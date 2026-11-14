@@ -26,6 +26,7 @@ import {
   synthesisPrompt,
   teamContext,
   vaultNotes,
+  withLiveContext,
 } from "./hq/team";
 import { TelegramBot } from "./hq/telegram";
 
@@ -67,9 +68,7 @@ const VOICE_STYLE =
   "Use plain sentences only, with no markdown, numbered steps, lists or headings. " +
   "Do not write code unless the user explicitly asks for code; if they do, put it in one fenced block after a one-sentence summary.";
 
-const jsonChat = makeJsonChat(OLLAMA_BASE_URL, OLLAMA_KEEP_ALIVE);
 const hive = new Hive(DATA_DIR);
-const memory = new Memory(DATA_DIR, jsonChat, OLLAMA_FAST_MODEL);
 
 // --- Task state -------------------------------------------------------------
 interface Task extends TaskSummary {
@@ -190,6 +189,9 @@ async function modelSupportsThinking(model: string): Promise<boolean> {
   }
 }
 
+const jsonChat = makeJsonChat(OLLAMA_BASE_URL, OLLAMA_KEEP_ALIVE, 120000, modelSupportsThinking);
+const memory = new Memory(DATA_DIR, jsonChat, OLLAMA_FAST_MODEL);
+
 /**
  * Streams one model call into the task's output (through the exfiltration
  * guard) and returns the full raw text so the caller can look for handoffs.
@@ -245,20 +247,21 @@ async function streamChat(task: Task, messages: ChatMessage[], signal: AbortSign
   return full;
 }
 
+// The system prompt only holds text that stays the same between calls, so
+// Ollama can reuse its cached work for it; see teamContext in hq/team.ts.
 function systemPrompt(task: Task, agent: AgentTarget, opts: { team: boolean; delegate: boolean }) {
   let system = TEAM[agent].prompt;
   if (task.source === "voice") system += ` ${VOICE_STYLE}`;
-  if (opts.team) {
-    system += teamContext({
-      agent,
-      hive: hive.promptText(),
-      memories: memory.recall(task.prompt, agent),
-      notes: vaultNotes(OBSIDIAN_VAULT, agent),
-    });
-  }
   if (opts.delegate) system += DELEGATION_RULES;
   if (agent === "file" && OBSIDIAN_VAULT && task.source !== "voice") system += NOTE_RULES;
+  if (opts.team) system += teamContext(agent, vaultNotes(OBSIDIAN_VAULT, agent));
   return system;
+}
+
+// The parts that change on every call ride along with the request
+function userMessage(agent: AgentTarget, text: string, recallFor: string, team: boolean) {
+  if (!team) return text;
+  return withLiveContext(text, { hive: hive.promptText(), memories: memory.recall(recallFor, agent) });
 }
 
 async function runTask(task: Task) {
@@ -310,7 +313,7 @@ async function runTask(task: Task) {
       task,
       [
         { role: "system", content: systemPrompt(task, lead, { team: useTeam, delegate }) },
-        { role: "user", content: task.prompt },
+        { role: "user", content: userMessage(lead, task.prompt, task.prompt, useTeam) },
       ],
       controller.signal,
       push,
@@ -332,7 +335,7 @@ async function runTask(task: Task) {
           task,
           [
             { role: "system", content: systemPrompt(task, h.agent, { team: true, delegate: false }) },
-            { role: "user", content: h.task },
+            { role: "user", content: userMessage(h.agent, h.task, h.task, true) },
           ],
           controller.signal,
           push,
@@ -347,7 +350,7 @@ async function runTask(task: Task) {
         task,
         [
           { role: "system", content: systemPrompt(task, lead, { team: true, delegate: false }) },
-          { role: "user", content: synthesisPrompt(task.prompt, results) },
+          { role: "user", content: userMessage(lead, synthesisPrompt(task.prompt, results), task.prompt, true) },
         ],
         controller.signal,
         push,

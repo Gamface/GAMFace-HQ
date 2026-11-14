@@ -163,16 +163,22 @@ export function saveNotes(vault: string, text: string): string[] {
 }
 
 // --- Prompt context -------------------------------------------------------------
-export function teamContext(opts: {
-  agent: AgentKey;
-  hive: string;
-  memories: string[];
-  notes: string;
-}): string {
+// Ollama reuses its work for the part of a prompt that is identical to the last
+// call (prefix caching). So the system prompt holds only text that rarely
+// changes (persona, team, rules, vault notes) and everything that changes on
+// every call (hive log, recalled memories) travels with the user message.
+
+/** Stable part, for the end of the system prompt. */
+export function teamContext(agent: AgentKey, notes = ""): string {
+  return `\n\nYOUR TEAM:\n${rosterText(agent)}` + (notes ? `\n\nNOTES FROM THE VAULT:\n${notes}` : "");
+}
+
+/** Changing part, wrapped around the user's request. */
+export function withLiveContext(request: string, opts: { hive: string; memories: string[] }): string {
   return (
-    `\n\nYOUR TEAM:\n${rosterText(opts.agent)}` +
-    `\n\nHIVE MIND (recent activity across the team):\n${opts.hive}` +
-    `\n\nRELEVANT MEMORIES:\n${opts.memories.map((m) => `- ${m}`).join("\n") || "(none)"}` +
-    (opts.notes ? `\n\nNOTES FROM THE VAULT:\n${opts.notes}` : "")
+    `[Context for reference: do not answer it]\n` +
+    `HIVE MIND (recent team activity):\n${opts.hive}\n\n` +
+    `RELEVANT MEMORIES:\n${opts.memories.map((m) => `- ${m}`).join("\n") || "(none)"}\n` +
+    `[End of context]\n\nREQUEST:\n${request}`
   );
 }

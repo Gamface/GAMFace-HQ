@@ -16,6 +16,10 @@ your existing Mission Control. Your UI, the `/api/agent/*` routes, the legacy
 | **Exfiltration guard** | `src/hq/guard.ts` | API keys, tokens, private keys and `password=` values are redacted from the live stream (even when split across token batches), the hive log, memories, notes and Telegram. |
 | **Telegram** | `src/hq/telegram.ts` | Long-polling bot with a chat ID allowlist. `/coder …` picks an agent, `/status` shows the queue. Answers come back when the task finishes. |
 
+| **Prompt caching** | `teamContext` / `withLiveContext` | The system prompt holds only text that stays the same between calls (persona, team, rules, vault notes), so Ollama reuses its cached work for it. The hive log and memories, which change every call, travel with the request instead. |
+| **No silent thinking** | `makeJsonChat` in `src/hq/ollama.ts` | Routing and memory calls send `think: false` to models that support it, so qwen3 answers right away instead of reasoning first. |
+| **Preflight** | `scripts/preflight.ts` | `npm run preflight` checks the whole chain and prints a latency budget (see below). |
+
 Behaviour kept on purpose:
 - **Evals** (`source: "eval"`) get the bare prompts: no team context, no delegation, and they stay out of the hive, so scores stay comparable with your earlier results.
 - **Voice** tasks get team context and memory but never delegate, so Jarvis still gives one short spoken answer.
@@ -47,6 +51,25 @@ Add to `.env` as needed: `OLLAMA_FAST_MODEL=qwen3:4b`, `TELEGRAM_BOT_TOKEN`,
 
 New stream statuses: `routing`, `delegating`. New task fields: `routedBy`, `delegatedTo`.
 New task source: `telegram`.
+
+## Preflight
+
+```bash
+docker compose exec harness npm run preflight
+```
+
+It checks, in order: Ollama is reachable, both models are installed, generation
+speed and first-token time, whether the prompt cache is being reused, how much of
+the model sits in VRAM, the routing model, a real task through the harness queue,
+a memory write and read-back, and (if `VOICE_TTS_URL` and `VOICE_STT_URL` are
+set) a voice round trip that speaks a phrase and transcribes it back. It ends with:
+
+```
+Latency budget: hear 0.8s · think 2.1s (first token 0.4s, 38 tok/s) · speak 0.6s  =  3.5s per spoken turn
+```
+
+Every check prints a fix when it warns or fails (for example `ollama pull qwen3:4b`,
+or "part runs on CPU: lower OLLAMA_NUM_CTX"). Exit code 1 if anything fails.
 
 ## Tests
 

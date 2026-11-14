@@ -6,7 +6,7 @@ import { Hive } from "../src/hq/hive";
 import { Memory, similarity } from "../src/hq/memory";
 import { parseJsonLoose } from "../src/hq/ollama";
 import type { JsonChat } from "../src/hq/ollama";
-import { keywordRoute, parseDelegations, routeTask, synthesisPrompt, teamContext } from "../src/hq/team";
+import { keywordRoute, parseDelegations, routeTask, synthesisPrompt, teamContext, withLiveContext } from "../src/hq/team";
 import { TelegramBot } from "../src/hq/telegram";
 
 const fakeChat =
@@ -42,10 +42,16 @@ test("synthesis prompt carries every teammate result", () => {
 });
 
 test("team context lists teammates but not the agent itself", () => {
-  const ctx = teamContext({ agent: "coder", hive: "(nothing yet)", memories: ["likes TypeScript"], notes: "" });
+  const ctx = teamContext("coder");
   assert.match(ctx, /planner: Jarvis/);
   assert.doesNotMatch(ctx, /- coder:/);
-  assert.match(ctx, /likes TypeScript/);
+});
+
+test("system context stays identical between calls; live context goes with the request", () => {
+  assert.equal(teamContext("planner", "vault note"), teamContext("planner", "vault note"));
+  assert.doesNotMatch(teamContext("planner"), /HIVE MIND|MEMORIES/);
+  const msg = withLiveContext("make an app", { hive: "planner delegated: x", memories: ["likes TypeScript"] });
+  assert.match(msg, /HIVE MIND[\s\S]*likes TypeScript[\s\S]*REQUEST:\nmake an app$/);
 });
 
 test("router uses the model, then falls back to keywords", async () => {

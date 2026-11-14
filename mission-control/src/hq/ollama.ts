@@ -8,12 +8,22 @@ export interface ChatMessage {
 
 export type JsonChat = (model: string, messages: ChatMessage[]) => Promise<Record<string, unknown>>;
 
-export function makeJsonChat(baseUrl: string, keepAlive = "30m", timeoutMs = 120000): JsonChat {
+export function makeJsonChat(
+  baseUrl: string,
+  keepAlive = "30m",
+  timeoutMs = 120000,
+  // Reasoning models can spend the whole call thinking silently and return
+  // nothing, so thinking is switched off for these short structured jobs.
+  // Only models that support thinking accept the field; others reject it.
+  supportsThinking: (model: string) => Promise<boolean> = async () => false,
+): JsonChat {
   return async (model, messages) => {
+    const body: Record<string, unknown> = { model, messages, stream: false, format: "json", keep_alive: keepAlive, options: { temperature: 0.1 } };
+    if (await supportsThinking(model)) body.think = false;
     const res = await fetch(`${baseUrl}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, messages, stream: false, format: "json", keep_alive: keepAlive, options: { temperature: 0.1 } }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) throw new Error(`Ollama HTTP ${res.status}: ${await res.text()}`);
