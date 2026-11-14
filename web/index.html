@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GAMFace HQ — Mission Control</title>
+<style>
+  :root { --bg:#070b14; --panel:#0d1424; --line:#1d2840; --text:#d8e0f0; --dim:#7d8aa5;
+          --accent:#2f7bff; --ok:#12a36b; --warn:#d99a1c; --bad:#e0475c; --cyan:#35c6e8; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui, Segoe UI, sans-serif; }
+  header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:14px; padding:14px 18px;
+           background:var(--panel); border:1px solid var(--line); border-radius:12px; }
+  header h1 { font-size:18px; margin:0 auto 0 0; display:flex; align-items:center; gap:10px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--bad); }
+  .dot.up { background:var(--ok); }
+  .chip { font:12px ui-monospace, Consolas, monospace; padding:5px 10px; border:1px solid var(--line);
+          border-radius:7px; background:#111a2e; color:var(--dim); }
+  .chip b { color:var(--text); font-weight:600; }
+  main { display:grid; grid-template-columns:270px 1fr 380px; gap:14px; margin:0 14px 14px; height:calc(100vh - 100px); }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:12px; display:flex; flex-direction:column; min-height:0; }
+  h2 { font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); margin:0; padding:14px 16px 8px; }
+  .scroll { overflow:auto; flex:1; min-height:0; }
+  .task { padding:9px 12px; margin:3px 8px; border-radius:8px; cursor:pointer; }
+  .task:hover, .task.sel { background:#16213a; }
+  .task .p { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .task.child { margin-left:24px; font-size:13px; }
+  .badge { display:inline-block; font-size:10px; font-weight:700; text-transform:uppercase; padding:2px 7px;
+           border-radius:4px; margin-right:6px; background:#25324f; }
+  .complete { background:var(--ok); color:#fff; } .failed { background:var(--bad); color:#fff; }
+  .running { background:var(--accent); color:#fff; } .waiting { background:var(--warn); color:#111; }
+  .meta { font-size:11px; color:var(--dim); }
+  #output { padding:16px 20px; font:13.5px/1.6 ui-monospace, Consolas, monospace; white-space:pre-wrap; }
+  #output .prompt { color:var(--cyan); margin-bottom:10px; }
+  #output .sub { border-left:3px solid var(--line); padding-left:12px; margin:14px 0; color:#b9c4da; }
+  #output .err { color:var(--bad); }
+  .tabs { display:flex; gap:6px; padding:10px 12px 0; }
+  .tab { background:none; border:1px solid var(--line); color:var(--dim); padding:5px 12px; border-radius:7px; cursor:pointer; }
+  .tab.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  #hive { margin:8px 12px; padding:10px; background:#050912; border:1px solid var(--line); border-radius:8px;
+          font:12px/1.55 ui-monospace, Consolas, monospace; }
+  #hive .t { color:var(--cyan); } #hive .a { color:#fff; } #hive .s { color:var(--dim); }
+  .mem { padding:8px 10px; border-bottom:1px solid var(--line); font-size:13px; display:flex; gap:8px; align-items:flex-start; }
+  .mem .txt { flex:1; } .mem button { background:none; border:1px solid var(--line); color:var(--dim); border-radius:5px; cursor:pointer; font-size:11px; }
+  .mem.pinned .txt::before { content:"📌 "; }
+  .dispatch { padding:12px; border-top:1px solid var(--line); }
+  textarea { width:100%; height:84px; resize:vertical; background:#050912; color:var(--text); border:1px solid var(--line);
+             border-radius:8px; padding:10px; font:inherit; }
+  .row { display:flex; gap:8px; margin-top:8px; }
+  select { flex:1; background:#050912; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:8px; }
+  .btn { border:0; border-radius:8px; padding:9px 16px; font-weight:600; cursor:pointer; background:var(--accent); color:#fff; }
+  .btn.ghost { background:#1a2440; color:var(--dim); }
+  @media (max-width: 1000px) { main { grid-template-columns:1fr; height:auto; } section { min-height:300px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1><span id="dot" class="dot"></span>GAMFace HQ — Mission Control</h1>
+  <span class="chip">Model: <b id="model">…</b></span>
+  <span class="chip">GPU: <b id="gpu">…</b></span>
+  <span class="chip">Queue: <b id="queue">0</b></span>
+  <span class="chip">Telegram: <b id="tg">off</b></span>
+</header>
+<main>
+  <section>
+    <h2>Tasks</h2>
+    <div id="tasks" class="scroll"></div>
+  </section>
+  <section>
+    <h2>Output</h2>
+    <div id="output" class="scroll"><span class="meta">Pick a task, or dispatch a new one.</span></div>
+  </section>
+  <section>
+    <div class="tabs">
+      <button class="tab on" data-tab="hive">Hive mind</button>
+      <button class="tab" data-tab="memory">Memory</button>
+      <button class="tab" data-tab="team">Team</button>
+    </div>
+    <div id="pane-hive" class="scroll"><div id="hive"></div></div>
+    <div id="pane-memory" class="scroll" hidden></div>
+    <div id="pane-team" class="scroll" hidden></div>
+    <div class="dispatch">
+      <textarea id="prompt" placeholder="Dispatch a task (Ctrl+Enter)…"></textarea>
+      <div class="row">
+        <select id="agent"><option value="auto">Auto-route (recommended)</option></select>
+        <button class="btn" id="send">Dispatch</button>
+        <button class="btn ghost" id="cancel">Cancel</button>
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const time = ts => new Date(ts * 1000).toLocaleTimeString();
+let selected = null, agents = [];
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  return r.json();
+}
+
+async function loadSystem() {
+  try {
+    const s = await api("/api/system");
+    $("#dot").classList.toggle("up", s.ollama === "up");
+    $("#model").textContent = s.model;
+    const m = (s.models || [])[0];
+    $("#gpu").textContent = m ? `${m.vramPct}% of ${m.sizeGB} GB` : (s.ollama === "up" ? "idle" : "Ollama down");
+    $("#queue").textContent = s.queued + (s.running ? " (+1 running)" : "");
+    $("#tg").textContent = s.telegram ? "on" : "off";
+  } catch { $("#dot").classList.remove("up"); }
+}
+
+async function loadAgents() {
+  agents = await api("/api/agents");
+  $("#agent").innerHTML = '<option value="auto">Auto-route (recommended)</option>' +
+    agents.map(a => `<option value="${esc(a.key)}">${esc(a.name)} — ${esc(a.role)}</option>`).join("");
+  $("#pane-team").innerHTML = agents.map(a =>
+    `<div class="mem"><div class="txt"><b>${esc(a.name)}</b> <span class="meta">(${esc(a.key)})</span><br>${esc(a.role)}` +
+    `${a.canDelegate ? '<br><span class="meta">can delegate to teammates</span>' : ""}</div></div>`).join("");
+}
+
+async function loadTasks() {
+  const tasks = await api("/api/tasks");
+  const tops = tasks.filter(t => !t.parent_id);
+  const kids = id => tasks.filter(t => t.parent_id === id).sort((a, b) => a.id - b.id);
+  const row = (t, child) => `<div class="task ${child ? "child" : ""} ${t.id === selected ? "sel" : ""}" data-id="${t.id}">
+      <div class="p">${child ? "↳ " : ""}${esc(t.prompt)}</div>
+      <span class="badge ${esc(t.status)}">${esc(t.status)}</span>
+      <span class="meta">#${t.id} · ${esc(t.agent || t.requested_agent)} · ${time(t.created_at)}</span></div>`;
+  $("#tasks").innerHTML = tops.map(t => row(t, false) + kids(t.id).map(k => row(k, true)).join("")).join("")
+    || '<div class="task meta">No tasks yet.</div>';
+}
+
+async function showTask(id) {
+  selected = id;
+  const t = await api(`/api/tasks/${id}`);
+  let html = `<div class="prompt">&gt; ${esc(t.prompt)}</div>`;
+  html += `<div class="meta">#${t.id} · ${esc(t.agent || "routing…")} · ${esc(t.status)}</div>\n`;
+  if (t.status === "waiting" && t.result) html += `<div class="meta">Plan:</div>${esc(t.result)}\n`;
+  for (const c of t.children || []) {
+    html += `<div class="sub"><b>${esc(c.agent)}</b> <span class="badge ${esc(c.status)}">${esc(c.status)}</span>\n` +
+            `<span class="meta">${esc(c.prompt)}</span>\n\n${esc(c.result || c.error || "…")}</div>`;
+  }
+  if (t.status !== "waiting" && t.result) html += `\n${esc(t.result)}`;
+  if (t.error && t.status === "failed") html += `\n<span class="err">Error: ${esc(t.error)}</span>`;
+  $("#output").innerHTML = html;
+  loadTasks();
+}
+
+async function loadMemories() {
+  const mems = await api("/api/memories");
+  $("#pane-memory").innerHTML =
+    `<div class="mem"><input id="newmem" placeholder="Add a pinned memory…" style="flex:1;background:#050912;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px">` +
+    `<button id="addmem">Add</button><button id="maint">Tidy now</button></div>` +
+    (mems.map(m => `<div class="mem ${m.pinned ? "pinned" : ""}"><div class="txt">${esc(m.text)}<br>` +
+      `<span class="meta">${esc(m.agent)} · importance ${m.importance.toFixed(2)} · used ${m.hits}×</span></div>` +
+      `<button data-mem="${m.id}" data-act="${m.pinned ? "unpin" : "pin"}">${m.pinned ? "Unpin" : "Pin"}</button>` +
+      `<button data-mem="${m.id}" data-act="delete">✕</button></div>`).join("") || '<div class="mem meta">No memories yet.</div>');
+}
+
+function hiveLine(e) {
+  const div = document.createElement("div");
+  div.innerHTML = `<span class="t">[${time(e.ts)}]</span> ${e.task_id ? "#" + e.task_id + " " : ""}<span class="a">${esc(e.agent)}</span> → ${esc(e.status || e.event)} <span class="s">${esc(e.summary)}</span>`;
+  $("#hive").appendChild(div);
+  const pane = $("#pane-hive"); pane.scrollTop = pane.scrollHeight;
+}
+
+async function loadHive() {
+  $("#hive").innerHTML = "";
+  (await api("/api/hive")).forEach(hiveLine);
+}
+
+function connect() {
+  const es = new EventSource("/api/events");
+  es.onmessage = ev => {
+    const e = JSON.parse(ev.data);
+    hiveLine(e);
+    loadTasks(); loadSystem();
+    if (selected && (e.task_id === selected || e.status === "complete")) showTask(selected);
+    if (e.agent === "memory") loadMemories();
+  };
+  es.onerror = () => { es.close(); setTimeout(connect, 3000); };
+}
+
+async function dispatch() {
+  const prompt = $("#prompt").value.trim();
+  if (!prompt) return;
+  const { id } = await api("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, agent: $("#agent").value }) });
+  $("#prompt").value = "";
+  showTask(id);
+}
+
+$("#send").onclick = dispatch;
+$("#prompt").onkeydown = e => { if (e.key === "Enter" && e.ctrlKey) dispatch(); };
+$("#cancel").onclick = () => selected && api(`/api/tasks/${selected}/cancel`, { method: "POST" }).then(() => showTask(selected));
+$("#tasks").onclick = e => { const t = e.target.closest(".task[data-id]"); if (t) showTask(Number(t.dataset.id)); };
+document.querySelectorAll(".tab").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("on", x === b));
+  ["hive", "memory", "team"].forEach(n => $("#pane-" + n).hidden = n !== b.dataset.tab);
+  if (b.dataset.tab === "memory") loadMemories();
+});
+$("#pane-memory").onclick = async e => {
+  const b = e.target;
+  if (b.dataset.mem) { await api(`/api/memories/${b.dataset.mem}/${b.dataset.act}`, { method: "POST" }); loadMemories(); }
+  if (b.id === "addmem" && $("#newmem").value.trim()) {
+    await api("/api/memories", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: $("#newmem").value.trim(), pinned: true }) });
+    loadMemories();
+  }
+  if (b.id === "maint") { await api("/api/memories/maintain", { method: "POST" }); loadMemories(); }
+};
+
+loadSystem(); loadAgents(); loadTasks(); loadHive(); connect();
+setInterval(loadSystem, 10000);
+</script>
+</body>
+</html>
