@@ -82,8 +82,10 @@ function ModelPicker({
   useEffect(() => {
     if (prov) loadModels(prov);
   }, [prov]);
-  const list = available[prov] ?? [];
-  const listId = `models-${prov}`;
+  const list = available[prov];
+  const [typing, setTyping] = useState(false);
+  const known = Boolean(list?.includes(name));
+  const custom = typing || (Boolean(name) && list !== undefined && list.length > 0 && !known);
   return (
     <div className="flex gap-1">
       <select
@@ -91,6 +93,7 @@ function ModelPicker({
         value={prov}
         onChange={(e) => {
           const p = e.target.value;
+          setTyping(false);
           if (!p) return onChange("");
           loadModels(p);
           onChange(`${p}/${(available[p] ?? [])[0] ?? ""}`);
@@ -104,16 +107,46 @@ function ModelPicker({
           </option>
         ))}
       </select>
-      {prov && (
-        <>
-          <input list={listId} className={`${input} flex-1 font-mono min-w-0`} value={name} onChange={(e) => onChange(`${prov}/${e.target.value}`)} placeholder="model name" />
-          <datalist id={listId}>
+      {prov &&
+        (custom || !list?.length ? (
+          <div className="flex flex-1 gap-1 min-w-0">
+            <input
+              className={`${input} flex-1 font-mono min-w-0`}
+              value={name}
+              onChange={(e) => onChange(`${prov}/${e.target.value}`)}
+              placeholder={list === undefined ? "loading models…" : "model name"}
+            />
+            {list && list.length > 0 && (
+              <button
+                className="text-[10px] text-cyan-400 hover:text-cyan-300 px-1"
+                title="Pick from installed models"
+                onClick={() => {
+                  setTyping(false);
+                  if (!known) onChange(`${prov}/${list[0]}`);
+                }}
+              >
+                list
+              </button>
+            )}
+            {name && list && !known && <span className="text-[10px] text-amber-300 self-center" title="Not in this provider's model list">not installed?</span>}
+          </div>
+        ) : (
+          <select
+            className={`${input} flex-1 font-mono min-w-0`}
+            value={name}
+            onChange={(e) => {
+              if (e.target.value === "__other__") return setTyping(true);
+              onChange(`${prov}/${e.target.value}`);
+            }}
+          >
             {list.map((m) => (
-              <option key={m} value={m} />
+              <option key={m} value={m}>
+                {m}
+              </option>
             ))}
-          </datalist>
-        </>
-      )}
+            <option value="__other__">Other (type a name)…</option>
+          </select>
+        ))}
     </div>
   );
 }
