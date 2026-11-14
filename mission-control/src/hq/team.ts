@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
 import type { JsonChat } from "./ollama";
+import { privateBlock, sanitize } from "./privacy";
 
 // The agent team: who is on it, how tasks get routed, and how the lead hands
 // work to teammates. Keys match AgentTargetSchema in ../schemas/agent.ts.
@@ -123,9 +124,15 @@ export function parseDelegations(text: string, max = 4): Delegation[] {
   return out;
 }
 
-export function synthesisPrompt(original: string, results: { agent: AgentKey; task: string; output: string }[]): string {
+export const WITHHELD_TEAMMATE = "(withheld from cloud models: this teammate worked from your private notes or memories)";
+
+export function synthesisPrompt(original: string, results: { agent: AgentKey; task: string; output: string; private?: boolean }[]): string {
   const parts = results
-    .map((r) => `### ${r.agent}: ${r.task}\n${r.output.trim() || "(no answer)"}`)
+    .map((r) => {
+      const body = sanitize(r.output.trim()) || "(no answer)";
+      // Answers written after seeing private material are private too
+      return `### ${r.agent}: ${r.task}\n${r.private ? privateBlock(body, WITHHELD_TEAMMATE) : body}`;
+    })
     .join("\n\n");
   return (
     `Original request: ${original}\n\nYour teammates finished their parts:\n\n${parts}\n\n` +
@@ -168,17 +175,24 @@ export function saveNotes(vault: string, text: string): string[] {
 // changes (persona, team, rules, vault notes) and everything that changes on
 // every call (hive log, recalled memories) travels with the user message.
 
-/** Stable part, for the end of the system prompt. */
+/** Stable part, for the end of the system prompt. Vault notes are private: cloud models don't get them. */
 export function teamContext(agent: AgentKey, notes = ""): string {
-  return `\n\nYOUR TEAM:\n${rosterText(agent)}` + (notes ? `\n\nNOTES FROM THE VAULT:\n${notes}` : "");
+  return `\n\nYOUR TEAM:\n${rosterText(agent)}` + (notes ? privateBlock(`\n\nNOTES FROM THE VAULT:\n${notes}`) : "");
 }
 
-/** Changing part, wrapped around the user's request. */
-export function withLiveContext(request: string, opts: { hive: string; memories: string[] }): string {
+/**
+ * Changing part, wrapped around the user's request. The hive log and memories
+ * are private: cloud models get the hive as bare activity (no details) and no memories.
+ */
+export function withLiveContext(request: string, opts: { hive: string; hivePublic?: string; memories: string[] }): string {
+  const memories = opts.memories.map((m) => `- ${m}`).join("\n") || "(none)";
   return (
     `[Context for reference: do not answer it]\n` +
-    `HIVE MIND (recent team activity):\n${opts.hive}\n\n` +
-    `RELEVANT MEMORIES:\n${opts.memories.map((m) => `- ${m}`).join("\n") || "(none)"}\n` +
-    `[End of context]\n\nREQUEST:\n${request}`
+    privateBlock(
+      `HIVE MIND (recent team activity):\n${opts.hive}\n\n`,
+      `HIVE MIND (activity only; details withheld from cloud models):\n${opts.hivePublic ?? "(withheld)"}\n\n`,
+    ) +
+    privateBlock(`RELEVANT MEMORIES:\n${memories}\n`, opts.memories.length ? "RELEVANT MEMORIES: (withheld from cloud models)\n" : "") +
+    `[End of context]\n\nREQUEST:\n${sanitize(request)}`
   );
 }

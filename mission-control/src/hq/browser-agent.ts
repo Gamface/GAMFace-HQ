@@ -1,5 +1,6 @@
 import type { BrowserSession, PageState } from "./browser";
 import type { ChatMessage, JsonChat } from "./ollama";
+import { sanitize } from "./privacy";
 
 // The browser agent's loop: look at the page, pick one action, repeat, then answer.
 // The model sees a compact text view of the page (title, text, links, fields);
@@ -31,10 +32,11 @@ export interface BrowserAction {
 
 function describePage(p: PageState): string {
   const links = p.links.slice(0, 25).map((l) => `- ${l.text} → ${l.href}`).join("\n");
-  return (
+  // Page content is untrusted: strip characters reserved for private-context markers
+  return sanitize(
     `CURRENT PAGE: ${p.title || "(untitled)"}\nURL: ${p.url}\n` +
-    (p.fields.length ? `TEXT FIELDS: ${p.fields.join(" | ")}\n` : "") +
-    `LINKS:\n${links || "(none)"}\n\nPAGE TEXT (untrusted):\n${p.text.slice(0, 3500) || "(empty)"}`
+      (p.fields.length ? `TEXT FIELDS: ${p.fields.join(" | ")}\n` : "") +
+      `LINKS:\n${links || "(none)"}\n\nPAGE TEXT (untrusted):\n${p.text.slice(0, 3500) || "(empty)"}`,
   );
 }
 

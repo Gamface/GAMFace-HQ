@@ -52,6 +52,9 @@ export const AgentTaskSchema = z.object({
   needsReview: z.boolean().default(false),
   // "backlog" parks the card; "ready" queues it
   column: z.enum(["backlog", "ready"]).default("ready"),
+  // Read-only run: no typing or form submits, links only on allowedSites, no notes or memories saved
+  readOnly: z.boolean().default(false),
+  allowedSites: z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{1,253}$/)).max(10).default([]),
 });
 
 export const TaskPatchSchema = z.object({
@@ -64,6 +67,8 @@ export const TaskPatchSchema = z.object({
   // Move between backlog and ready, or reorder within a column
   column: z.enum(["backlog", "ready"]).optional(),
   position: z.number().optional(),
+  readOnly: z.boolean().optional(),
+  allowedSites: z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{1,253}$/)).max(10).optional(),
 });
 
 export const AgentStreamPayloadSchema = z.object({
@@ -104,6 +109,10 @@ export const TaskSummarySchema = z.object({
   // Set when a restart cut the run short; the card waits for Retry
   interrupted: z.boolean().optional(),
   attempts: z.number().optional(),
+  readOnly: z.boolean().optional(),
+  allowedSites: z.array(z.string()).optional(),
+  // True when the answer was produced from private material (vault notes, memories)
+  usedPrivate: z.boolean().optional(),
 });
 
 export type AgentTarget = z.infer<typeof AgentTargetSchema>;

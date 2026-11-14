@@ -32,6 +32,13 @@ export class Hive {
     return this.store.data.slice(-limit);
   }
 
+  /** Who did what, without the details: safe to show a cloud model. */
+  publicText(limit = 15): string {
+    const rows = this.recent(limit).filter((h) => !["guard", "memory", "models", "telegram"].includes(h.agent));
+    if (!rows.length) return "(nothing yet)";
+    return rows.map((h) => `[${new Date(h.ts).toTimeString().slice(0, 5)}] ${h.agent} ${h.event}`).join("\n");
+  }
+
   /** Compact text for system prompts. */
   promptText(limit = 15): string {
     const rows = this.recent(limit);

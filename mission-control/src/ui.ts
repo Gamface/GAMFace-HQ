@@ -18,9 +18,11 @@ import { runBrowserAgent } from "./hq/browser-agent";
 import { StreamGuard, redact } from "./hq/guard";
 import { Hive } from "./hq/hive";
 import { Memory } from "./hq/memory";
-import { MODEL_ROLES, ModelRegistry, ModelRole, Resolved, parseSwitchCommand, resolveTarget } from "./hq/models";
+import { ModelGateway } from "./hq/gateway";
+import { MODEL_ROLES, ModelRegistry, ModelRole, parseSwitchCommand, resolveTarget } from "./hq/models";
+import { Notices } from "./hq/notices";
 import type { ChatMessage, JsonChat } from "./hq/ollama";
-import { chatOnce, chatStream, checkProvider, listModels } from "./hq/providers";
+import { checkProvider, listModels } from "./hq/providers";
 import { RUNNING_STATUSES, Task, TaskStore, pickNext, waitingOn } from "./hq/taskstore";
 import {
   AGENT_KEYS,
@@ -86,12 +88,18 @@ const store = new TaskStore(DATA_DIR);
 const { recovered } = store.load();
 const models = new ModelRegistry(store, { model: OLLAMA_MODEL, fastModel: OLLAMA_FAST_MODEL, numCtx: OLLAMA_NUM_CTX, think: OLLAMA_THINK });
 const hive = new Hive(DATA_DIR);
+const notices = new Notices(store);
+// Every model request goes through the gateway: local-only lock, spend caps, private-context rule
+const gateway = new ModelGateway(models, store, notices, OLLAMA_KEEP_ALIVE);
+gateway.onServed = (ref) => {
+  lastModelRef = ref;
+};
 const tasks = store.tasks;
 
 let runningTaskId: string | null = null;
 let lastModelRef: string | null = null;
 // Memory extraction runs between tasks so it never competes with one for the GPU
-const memoryJobs: { agent: AgentTarget; prompt: string; answer: string }[] = [];
+const memoryJobs: { agent: AgentTarget; prompt: string; answer: string; private: boolean }[] = [];
 let backgroundBusy = false;
 // Ids keep increasing across restarts, so a reconnecting UI never mistakes
 // new events for ones it already has
@@ -116,30 +124,11 @@ function agentLabel(task: Task) {
 }
 
 // --- Models -----------------------------------------------------------------
-/** A JSON-mode chat for one role (router, memory, browser decisions), with fallback and usage tracking. */
+/** A JSON-mode chat for one role (router, memory, browser steps), through the gateway. */
 function roleJson(role: ModelRole): JsonChat {
   return async (_model, messages) => {
-    const run = async (r: Resolved) => {
-      const opts = { json: true, think: false, temperature: 0.1, numCtx: r.settings.numCtx, keepAlive: OLLAMA_KEEP_ALIVE };
-      try {
-        const out = await chatOnce(r.provider, r.model, messages, opts);
-        store.recordUsage(role, r.ref, out.promptTokens, out.completionTokens);
-        lastModelRef = r.ref;
-        return out.json ?? {};
-      } catch (error) {
-        store.recordUsage(role, r.ref, 0, 0, true);
-        throw error;
-      }
-    };
-    const primary = models.resolve(role);
-    try {
-      return await run(primary);
-    } catch (error) {
-      const fb = models.resolveFallback(role);
-      if (!fb || fb.ref === primary.ref) throw error;
-      hive.log(role, "fallback", `${primary.ref} failed (${error instanceof Error ? error.message : error}); used ${fb.ref}`);
-      return run(fb);
-    }
+    const out = await gateway.json(role, messages, (note) => hive.log(role, "policy", note));
+    return out.json ?? {};
   };
 }
 
@@ -262,59 +251,52 @@ setInterval(() => {
 
 // --- Agent turns ------------------------------------------------------------
 
+interface TurnResult {
+  text: string;
+  /** The model that actually answered (after any lock, cap or fallback) */
+  ref?: string;
+  /** The turn saw private material, so its output is private too */
+  sawPrivate: boolean;
+}
+
 /**
- * Streams one model call for a role into the task's output (through the
- * exfiltration guard) and returns the full raw text. If the model fails before
- * producing anything, the role's fallback model gets one try.
+ * Streams one agent turn into the task's output (through the exfiltration
+ * guard). The gateway picks the model and applies the lock, caps and privacy
+ * rule; its notes (fallbacks, budgets) are shown inline.
  */
-async function streamTurn(task: Task, role: AgentTarget, messages: ChatMessage[], signal: AbortSignal, push: (text: string) => void, override?: string) {
-  const attempt = async (r: Resolved) => {
-    const guard = new StreamGuard();
-    let gotTokens = false;
-    try {
-      const out = await chatStream(
-        r.provider,
-        r.model,
-        messages,
-        { numCtx: r.settings.numCtx, temperature: r.settings.temperature, think: r.settings.think, keepAlive: OLLAMA_KEEP_ALIVE },
-        signal,
-        (piece) => {
-          gotTokens = true;
-          push(guard.push(piece));
-        },
-      );
-      store.recordUsage(role, r.ref, out.promptTokens, out.completionTokens);
-      lastModelRef = r.ref;
-      return out.text;
-    } catch (error) {
-      // A cancel or timeout isn't the model's fault, so it doesn't count as a failed call
-      if (!signal.aborted) store.recordUsage(role, r.ref, 0, 0, true);
-      throw Object.assign(error instanceof Error ? error : new Error(String(error)), { gotTokens });
-    } finally {
-      push(guard.end());
-      if (guard.found.size) hive.log("guard", "redacted", [...guard.found].join(", "), task.id);
-    }
-  };
-  const primary = models.resolve(role, override);
+async function streamTurn(task: Task, role: AgentTarget, messages: ChatMessage[], signal: AbortSignal, push: (text: string) => void, override?: string): Promise<TurnResult> {
+  const guard = new StreamGuard();
   try {
-    return await attempt(primary);
-  } catch (error) {
-    const fb = override ? null : models.resolveFallback(role);
-    if (signal.aborted || (error as { gotTokens?: boolean }).gotTokens || !fb || fb.ref === primary.ref) throw error;
-    const msg = error instanceof Error ? error.message : String(error);
-    push(`\n[${primary.ref} failed (${msg.slice(0, 120)}); switching to ${fb.ref}]\n\n`);
-    hive.log(role, "fallback", `${primary.ref} → ${fb.ref}: ${msg}`, task.id);
-    return attempt(fb);
+    const out = await gateway.stream(
+      role,
+      messages,
+      signal,
+      (piece) => push(guard.push(piece)),
+      (note) => {
+        push(guard.end());
+        push(`\n[${note}]\n\n`);
+        hive.log(role, "policy", note, task.id);
+      },
+      override,
+    );
+    return { text: out.text, ref: out.ref, sawPrivate: out.sawPrivate };
+  } finally {
+    push(guard.end());
+    if (guard.found.size) hive.log("guard", "redacted", [...guard.found].join(", "), task.id);
   }
 }
 
 // The system prompt only holds text that stays the same between calls, so
 // Ollama can reuse its cached work for it; see teamContext in hq/team.ts.
+const READ_ONLY_RULES =
+  "\n\nTHIS IS A READ-ONLY RUN: look things up and report back only. Don't submit, change, buy, sign up for or delete anything.";
+
 function systemPrompt(task: Task, agent: AgentTarget, opts: { team: boolean; delegate: boolean }) {
   let system = TEAM[agent].prompt;
   if (task.source === "voice") system += ` ${VOICE_STYLE}`;
   if (opts.delegate) system += DELEGATION_RULES;
-  if (agent === "file" && OBSIDIAN_VAULT && task.source !== "voice") system += NOTE_RULES;
+  if (task.readOnly) system += READ_ONLY_RULES;
+  if (agent === "file" && OBSIDIAN_VAULT && task.source !== "voice" && !task.readOnly) system += NOTE_RULES;
   if (opts.team) system += teamContext(agent, vaultNotes(OBSIDIAN_VAULT, agent));
   return system;
 }
@@ -322,15 +304,25 @@ function systemPrompt(task: Task, agent: AgentTarget, opts: { team: boolean; del
 // The parts that change on every call ride along with the request
 function userMessage(agent: AgentTarget, text: string, recallFor: string, team: boolean) {
   if (!team) return text;
-  return withLiveContext(text, { hive: hive.promptText(), memories: memory.recall(recallFor, agent) });
+  return withLiveContext(text, { hive: hive.promptText(), hivePublic: hive.publicText(), memories: memory.recall(recallFor, agent) });
 }
 
 const browsingEnabled = (task: Task) => Boolean(BROWSER_CDP_URL) && task.source !== "eval";
 
+/** Sites a read-only run may open: the card's list, or the sites named in its prompt, plus web search. */
+function readOnlySites(task: Task): string[] {
+  const named = task.allowedSites?.length
+    ? task.allowedSites
+    : [...task.prompt.matchAll(/https?:\/\/([a-z0-9.-]+)/gi)].map((m) => m[1].toLowerCase().replace(/^www\./, ""));
+  return [...new Set([...named, "html.duckduckgo.com"])];
+}
+
 /** Drives the real browser for one request and returns the agent's answer. */
 async function browse(task: Task, request: string, signal: AbortSignal, push: (text: string) => void) {
+  const sites = task.readOnly ? readOnlySites(task) : [];
   const session = new BrowserSession({
     allowPrivate: BROWSER_ALLOW_PRIVATE,
+    readOnly: task.readOnly ? { allowedSites: sites } : undefined,
     onFrame: (f: Frame) => broadcastBrowser({ type: "frame", taskId: task.id, ...f }),
     onBlocked: (url, reason) => {
       broadcastBrowser({ type: "blocked", taskId: task.id, url, reason });
@@ -348,14 +340,22 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
       model: "browser",
       maxSteps: BROWSER_MAX_STEPS,
       signal,
-      extraRules: task.source === "voice" ? `When you answer: ${VOICE_STYLE}` : undefined,
+      extraRules:
+        [
+          task.readOnly
+            ? `READ-ONLY RUN: you may only open pages on ${sites.join(", ")} and follow links there. Typing, buttons and forms are disabled; use web search via navigate.`
+            : "",
+          task.source === "voice" ? `When you answer: ${VOICE_STYLE}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n") || undefined,
       log: (line, kind) => {
         push(kind === "action" ? `🌐 ${line}\n` : `   ${kind === "error" ? "✗" : "✓"} ${line}\n`);
         broadcastBrowser({ type: "action", taskId: task.id, kind, line });
       },
     });
     push(`\n${redact(answer).text}`);
-    return answer;
+    return { text: answer, sawPrivate: false };
   } finally {
     await session.close();
     broadcastBrowser({ type: "end", taskId: task.id });
@@ -371,7 +371,7 @@ async function agentTurn(
   signal: AbortSignal,
   push: (text: string) => void,
   override?: string,
-): Promise<string> {
+): Promise<TurnResult> {
   if (agent === "browser" && browsingEnabled(task)) {
     try {
       return await browse(task, request, signal, push);
@@ -465,7 +465,8 @@ async function runTask(task: Task) {
     store.save(task);
     const delegate = canDelegate && lead === "planner";
     emit(task, "thinking");
-    const first = await agentTurn(
+    let usedPrivate = false;
+    const firstTurn = await agentTurn(
       task,
       lead,
       [
@@ -477,12 +478,19 @@ async function runTask(task: Task) {
       push,
       override,
     );
+    usedPrivate ||= firstTurn.sawPrivate;
+    const first = firstTurn.text;
+    // Show the model that really answered, which a cap or the local-only lock may have changed
+    if (firstTurn.ref && firstTurn.ref !== task.model) {
+      task.model = firstTurn.ref;
+      store.save(task);
+    }
 
     const handoffs = delegate ? parseDelegations(first) : [];
     let answer = first;
     if (handoffs.length) {
       task.delegatedTo = [];
-      const results: { agent: AgentTarget; task: string; output: string }[] = [];
+      const results: { agent: AgentTarget; task: string; output: string; private: boolean }[] = [];
       for (const h of handoffs) {
         flush();
         task.activeAgent = h.agent;
@@ -491,7 +499,7 @@ async function runTask(task: Task) {
         log("planner", "delegated", `→ ${h.agent}: ${h.task}`);
         emit(task, "delegating", `\n\n── ${TEAM[h.agent].name} (${openSub.model}) ── ${h.task}\n\n`);
         emit(task, "thinking");
-        const output = await agentTurn(
+        const turn = await agentTurn(
           task,
           h.agent,
           [
@@ -502,15 +510,19 @@ async function runTask(task: Task) {
           controller.signal,
           push,
         );
+        const output = turn.text;
+        usedPrivate ||= turn.sawPrivate;
+        if (turn.ref) openSub.model = turn.ref;
         finishSubtask(openSub, "complete", output);
         openSub = null;
-        results.push({ agent: h.agent, task: h.task, output });
+        // Remember which answers came from private material, so they're withheld if the lead runs in the cloud
+        results.push({ agent: h.agent, task: h.task, output, private: turn.sawPrivate });
         log(h.agent, "finished", output);
       }
       flush();
       task.activeAgent = lead;
       emit(task, "thinking", `\n\n── ${TEAM[lead].name}: final answer ──\n\n`);
-      answer = await streamTurn(
+      const final = await streamTurn(
         task,
         lead,
         [
@@ -521,14 +533,19 @@ async function runTask(task: Task) {
         push,
         override,
       );
+      answer = final.text;
+      usedPrivate ||= final.sawPrivate;
     }
 
-    const notes = saveNotes(OBSIDIAN_VAULT, redact(answer).text);
+    task.usedPrivate = usedPrivate || undefined;
+    // Read-only runs don't write to the vault
+    const notes = task.readOnly ? [] : saveNotes(OBSIDIAN_VAULT, redact(answer).text);
     if (notes.length) push(`\n\n(Saved to vault: ${notes.map((n) => path.basename(n)).join(", ")})`);
     flush();
     task.answer = redact(answer.replace(/<note title="[^"]*">[\s\S]*?<\/note>/g, "")).text.trim();
     log(lead, "complete", task.answer);
-    if (useTeam && task.answer) memoryJobs.push({ agent: lead, prompt: task.prompt, answer: task.answer });
+    // Read-only runs don't save memories either
+    if (useTeam && !task.readOnly && task.answer) memoryJobs.push({ agent: lead, prompt: task.prompt, answer: task.answer, private: usedPrivate });
     emit(task, "complete");
   } catch (error: unknown) {
     flush();
@@ -581,7 +598,7 @@ async function runBackgroundJob() {
   if (!job) return;
   backgroundBusy = true;
   try {
-    const saved = await memory.extract(job.agent, job.prompt, job.answer);
+    const saved = await memory.extract(job.agent, job.prompt, job.answer, job.private);
     if (saved.length) hive.log("memory", "saved", saved.join("; "));
   } catch (error) {
     hive.log("memory", "error", error instanceof Error ? error.message : String(error));
@@ -643,6 +660,8 @@ function createTask(input: unknown, extra: { chatId?: string } = {}): { task?: T
     priority: d.priority,
     dependsOn: d.dependsOn,
     needsReview: d.needsReview,
+    readOnly: d.readOnly || undefined,
+    allowedSites: d.allowedSites.length ? d.allowedSites : undefined,
     position: now,
     createdAt: now,
     queuedAt: queueIt ? now : undefined,
@@ -739,6 +758,11 @@ function patchTask(task: Task, input: unknown): { error?: string } {
   if (p.prompt) task.prompt = p.prompt;
   if (p.priority) task.priority = p.priority;
   if (p.needsReview !== undefined) task.needsReview = p.needsReview;
+  if (p.readOnly !== undefined) {
+    if (!editable) return { error: "Only cards in Backlog or Ready can change read-only mode" };
+    task.readOnly = p.readOnly || undefined;
+  }
+  if (p.allowedSites !== undefined) task.allowedSites = p.allowedSites.length ? p.allowedSites : undefined;
   if (p.position !== undefined) task.position = p.position;
   if (p.targetAgent) {
     task.requestedAgent = p.targetAgent;
@@ -807,6 +831,7 @@ app.get("/api/system", async (_req: Request, res: Response) => {
     browser: Boolean(BROWSER_CDP_URL),
     memories: memory.list().length,
     lastModel: lastModelRef,
+    notices: notices.list().length,
   };
   const model = models.resolve("planner").ref;
   try {
@@ -916,7 +941,14 @@ app.get("/api/models", (_req, res) => {
     keySet: p.apiKeyEnv ? Boolean(process.env[p.apiKeyEnv]) : null,
   }));
   const resolved = Object.fromEntries(MODEL_ROLES.map((r) => [r, models.resolve(r).ref]));
-  res.json({ settings: models.settings(), resolved, providers, usage: store.usageToday() });
+  res.json({
+    settings: models.settings(),
+    resolved,
+    providers,
+    usage: store.usageToday(),
+    spendThisMonth: store.spendByAgentThisMonth(),
+    spendTotalThisMonth: store.spendThisMonth(),
+  });
 });
 
 app.get("/api/models/available", async (req, res) => {
@@ -937,6 +969,13 @@ app.put("/api/models", requireToken, (req, res) => {
   hive.log("models", "updated", "Team model settings changed");
   void pump();
   res.json({ settings: models.settings() });
+});
+
+// Notices: budget hits, local-only redirects, missing prices
+app.get("/api/notices", (_req, res) => res.json(notices.list()));
+app.post("/api/notices/dismiss", requireToken, (req, res) => {
+  notices.dismiss(typeof req.body?.id === "string" ? req.body.id : undefined);
+  res.json({ ok: true });
 });
 
 // Team, hive mind and memory

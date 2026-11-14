@@ -70,6 +70,9 @@ export interface BoardCard {
   dependsOn?: string[];
   waitingOn: string[];
   needsReview?: boolean;
+  readOnly?: boolean;
+  allowedSites?: string[];
+  usedPrivate?: boolean;
   interrupted?: boolean;
   attempts?: number;
   position?: number;

@@ -11,6 +11,13 @@ interface RoleSettings {
   temperature?: number;
   think?: boolean;
   dailyTokenLimit?: number;
+  localOnly?: boolean;
+  allowPrivateToCloud?: boolean;
+  monthlyBudgetUsd?: number;
+}
+interface Price {
+  input: number;
+  output: number;
 }
 interface CustomProvider {
   id: string;
@@ -29,7 +36,15 @@ interface ProviderInfo {
   keySet: boolean | null;
 }
 interface ModelsReply {
-  settings: { roles: Record<string, RoleSettings>; aliases: Record<string, string>; customProviders: CustomProvider[] };
+  settings: {
+    roles: Record<string, RoleSettings>;
+    aliases: Record<string, string>;
+    customProviders: CustomProvider[];
+    prices: Record<string, Price>;
+    monthlyBudgetUsd?: number;
+  };
+  spendThisMonth: Record<string, number>;
+  spendTotalThisMonth: number;
   resolved: Record<string, string>;
   providers: ProviderInfo[];
   usage: { agent: string; model: string; prompt_tokens: number; completion_tokens: number; requests: number; errors: number }[];
@@ -108,6 +123,8 @@ export default function TeamPage() {
   const [roles, setRoles] = useState<Record<string, RoleSettings>>({});
   const [aliases, setAliases] = useState<[string, string][]>([]);
   const [custom, setCustom] = useState<CustomProvider[]>([]);
+  const [prices, setPrices] = useState<Record<string, Price>>({});
+  const [overallCap, setOverallCap] = useState<number | undefined>(undefined);
   const [available, setAvailable] = useState<Record<string, string[]>>({});
   const [checks, setChecks] = useState<Record<string, { ok: boolean; detail: string }>>({});
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
@@ -119,6 +136,8 @@ export default function TeamPage() {
       setRoles(d.settings.roles);
       setAliases(Object.entries(d.settings.aliases));
       setCustom(d.settings.customProviders);
+      setPrices(d.settings.prices ?? {});
+      setOverallCap(d.settings.monthlyBudgetUsd);
       setDirty(false);
     });
 
@@ -156,12 +175,22 @@ export default function TeamPage() {
   const save = async () => {
     try {
       const cleanRoles = Object.fromEntries(
-        Object.entries(roles).map(([k, v]) => [k, { ...v, fallback: v.fallback || undefined, dailyTokenLimit: v.dailyTokenLimit || undefined }]),
+        Object.entries(roles).map(([k, v]) => [
+          k,
+          {
+            ...v,
+            fallback: v.fallback || undefined,
+            dailyTokenLimit: v.dailyTokenLimit || undefined,
+            monthlyBudgetUsd: v.monthlyBudgetUsd === undefined || Number.isNaN(v.monthlyBudgetUsd) ? undefined : v.monthlyBudgetUsd,
+          },
+        ]),
       );
       await send("PUT", "/api/models", {
         roles: cleanRoles,
         aliases: Object.fromEntries(aliases.filter(([a, r]) => a.trim() && r.trim()).map(([a, r]) => [a.trim().toLowerCase(), r.trim()])),
         customProviders: custom,
+        prices,
+        monthlyBudgetUsd: overallCap === undefined || Number.isNaN(overallCap) ? undefined : overallCap,
       });
       setStatus({ ok: true, text: "Saved. New tasks use these models." });
       await load();
@@ -173,6 +202,9 @@ export default function TeamPage() {
   if (!data) return <div className="col-span-3 p-6 text-slate-500">Loading team…</div>;
   const providers = data.providers;
   const isLocal = (ref?: string) => providers.find((p) => p.id === splitModel(ref).provider)?.local ?? true;
+  // Cloud models in use need a price for their spend to be capped
+  const cloudRefs = [...new Set([...Object.values(roles).flatMap((r) => [r.model, r.fallback ?? ""]), ...Object.keys(prices)])].filter((r) => r && !isLocal(r)).sort();
+  const money = (x?: number) => (x === undefined ? "—" : x > 0 && x < 0.01 ? `$${x.toFixed(4)}` : `$${x.toFixed(2)}`);
 
   return (
     <div className="col-span-3 min-h-0 overflow-y-auto space-y-4 pr-1">
@@ -196,8 +228,11 @@ export default function TeamPage() {
               <th className="font-medium w-20">Context</th>
               <th className="font-medium w-16">Temp</th>
               <th className="font-medium w-14">Think</th>
+              <th className="font-medium w-16" title="Never send this agent's requests to a cloud model">Local only</th>
+              <th className="font-medium w-20" title="Let vault notes, memories and the hive log go to its cloud model">Private → cloud</th>
+              <th className="font-medium w-24">Monthly $ cap</th>
               <th className="font-medium w-28">Daily token cap</th>
-              <th className="font-medium w-28 text-right">Today</th>
+              <th className="font-medium w-28 text-right">Today / month</th>
             </tr>
           </thead>
           <tbody>
@@ -228,6 +263,40 @@ export default function TeamPage() {
                   <td className="py-2 pr-2">
                     <input type="checkbox" checked={Boolean(r.think)} onChange={(e) => setRole(key, { think: e.target.checked })} title="Let reasoning models think first (slower)" />
                   </td>
+                  <td className="py-2 pr-2 text-center">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(r.localOnly)}
+                      onChange={(e) => setRole(key, { localOnly: e.target.checked })}
+                      title="Checked on every request: this agent never reaches a cloud provider"
+                    />
+                    {r.localOnly && <div className="text-[10px] text-emerald-400">🔒</div>}
+                  </td>
+                  <td className="py-2 pr-2 text-center">
+                    {isLocal(r.model) && isLocal(r.fallback) ? (
+                      <span className="text-slate-600">—</span>
+                    ) : (
+                      <>
+                        <input type="checkbox" checked={Boolean(r.allowPrivateToCloud)} onChange={(e) => setRole(key, { allowPrivateToCloud: e.target.checked })} />
+                        <div className={`text-[10px] ${r.allowPrivateToCloud ? "text-amber-300" : "text-slate-500"}`}>{r.allowPrivateToCloud ? "sent" : "withheld"}</div>
+                      </>
+                    )}
+                  </td>
+                  <td className="py-2 pr-2">
+                    {isLocal(r.model) ? (
+                      <span className="text-slate-600">local: free</span>
+                    ) : (
+                      <input
+                        type="number"
+                        className={`${input} w-24`}
+                        value={r.monthlyBudgetUsd ?? ""}
+                        step={1}
+                        min={0}
+                        placeholder="no cap"
+                        onChange={(e) => setRole(key, { monthlyBudgetUsd: e.target.value === "" ? undefined : Number(e.target.value) })}
+                      />
+                    )}
+                  </td>
                   <td className="py-2 pr-2">
                     {isLocal(r.model) ? (
                       <span className="text-slate-600">local: none</span>
@@ -238,12 +307,88 @@ export default function TeamPage() {
                   <td className="py-2 text-right text-slate-400 font-mono">
                     {u ? `${u.tokens.toLocaleString()} tok` : "—"}
                     {u && <div className="text-[10px] text-slate-600">{u.requests} calls{u.errors ? `, ${u.errors} failed` : ""}</div>}
+                    {(data.spendThisMonth[key] ?? 0) > 0 && (
+                      <div className={`text-[10px] ${r.monthlyBudgetUsd !== undefined && data.spendThisMonth[key] >= r.monthlyBudgetUsd ? "text-amber-300" : "text-slate-500"}`}>
+                        {money(data.spendThisMonth[key])} this month
+                        {r.monthlyBudgetUsd !== undefined ? ` / ${money(r.monthlyBudgetUsd)}` : ""}
+                      </div>
+                    )}
                   </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
+      </section>
+
+      <section className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <div className="flex items-center gap-3 mb-1">
+          <h2 className="text-sm font-semibold text-slate-200">Cloud spending</h2>
+          <span className="text-xs text-slate-500">
+            This month: <span className="text-slate-300 font-mono">{money(data.spendTotalThisMonth)}</span>
+          </span>
+          <label className="ml-auto flex items-center gap-2 text-xs text-slate-400">
+            Overall monthly cap
+            <input
+              type="number"
+              className={`${input} w-24`}
+              value={overallCap ?? ""}
+              min={0}
+              step={1}
+              placeholder="no cap"
+              onChange={(e) => {
+                setOverallCap(e.target.value === "" ? undefined : Number(e.target.value));
+                setDirty(true);
+              }}
+            />
+          </label>
+        </div>
+        <p className="text-xs text-slate-500 mb-3">
+          Caps are checked before every cloud request (with an estimate of its cost) and count input and output tokens. When a cap is reached the agent uses its
+          local model instead, the card says so, and a notice appears at the top. A capped agent on a model with no price also goes local.
+        </p>
+        {cloudRefs.length === 0 ? (
+          <p className="text-xs text-slate-600">No cloud models in use.</p>
+        ) : (
+          <table className="text-xs">
+            <thead className="text-slate-500 text-left">
+              <tr>
+                <th className="font-medium pr-4">Cloud model</th>
+                <th className="font-medium pr-2">$ per 1M input tokens</th>
+                <th className="font-medium">$ per 1M output tokens</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cloudRefs.map((ref) => (
+                <tr key={ref}>
+                  <td className="pr-4 py-1 font-mono text-slate-300">
+                    {ref} {!prices[ref] && <span className="text-amber-300 font-sans">(no price)</span>}
+                  </td>
+                  {(["input", "output"] as const).map((k) => (
+                    <td key={k} className="pr-2 py-1">
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.05}
+                        className={`${input} w-24`}
+                        value={prices[ref]?.[k] ?? ""}
+                        onChange={(e) => {
+                          const v = e.target.value === "" ? NaN : Number(e.target.value);
+                          setPrices((p) => {
+                            const cur = p[ref] ?? { input: 0, output: 0 };
+                            const next = { ...cur, [k]: Number.isNaN(v) ? 0 : v };
+                            return { ...p, [ref]: next };
+                          });
+                          setDirty(true);
+                        }}
+                      />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
 
       <div className="grid grid-cols-2 gap-4">

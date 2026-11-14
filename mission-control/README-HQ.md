@@ -63,6 +63,42 @@ Board API: `GET /api/board`, `POST /api/tasks` (`title`, `prompt`, `targetAgent`
 `dependsOn`, `needsReview`, `column`), `PATCH /api/tasks/:id`, `POST /api/tasks/:id/retry|accept|archive`.
 Models API: `GET /api/models`, `PUT /api/models`, `GET /api/models/available?provider=…`, `GET /api/models/check`.
 
+## Privacy, spend caps and read-only runs
+
+Every model request, including routing, memory, browser steps, delegation,
+synthesis and every fallback, goes through one gateway (`src/hq/gateway.ts`).
+On each request it applies, in order:
+
+1. **Local-only lock.** Agents marked *Local only* (File and Memory by default) never
+   reach a cloud provider. The Team page and `switch file to claude` refuse it, and the
+   gateway refuses it again at send time, so no code path can get around it.
+2. **Spend caps.** Set a price per cloud model ($ per million input and output tokens),
+   a monthly cap per agent, and an overall monthly cap. The gateway checks before each
+   request, counting what's already spent this month plus an estimate of this request's
+   input cost, and records the real cost of input and output tokens afterwards.
+   **At the cap, the agent uses its local model instead**, the card's output says so, and
+   a notice appears in the dashboard header. A capped agent whose cloud model has no
+   price set also goes local, rather than spending without a limit.
+3. **Private-context rule.** Vault notes, memories and the hive log are marked private
+   where they enter a prompt. Local models get them in full; cloud models get a stand-in:
+   the hive as bare activity (who did what, no details), no memories and no vault notes,
+   unless you tick *Private → cloud* for that agent. Anything an agent wrote **after**
+   seeing private material is private too: if a local teammate answered from your notes,
+   that answer is withheld when a cloud lead combines the results, and memory extraction
+   never shows a cloud model an answer written from private material. Cards that used
+   private context show 🔒.
+
+**Read-only runs** (tick *Read-only run* on a card; routines will use this until the
+approval rules in Phase 4 exist):
+- the browser gets a **fresh profile** for the run, so it is never logged in anywhere;
+- pages may only be opened on the card's **allowed sites** (or the sites named in the task),
+  plus web search; links to other sites are refused, so a one-click unsubscribe, logout or
+  "confirm" link elsewhere can't fire;
+- **no typing, no buttons**: clicks only follow links;
+- the browser blocks **every request that isn't a plain page load** (no form submits, no
+  data sent by page scripts);
+- no notes are written to the vault and no memories are saved.
+
 Browser safety:
 - Every request the page makes (navigations, redirects, images, scripts) is checked; anything aimed at localhost, `*.local` or your private network (10.x, 172.16–31.x, 192.168.x, Tailscale 100.64.x) is blocked, so a web page can't steer the agent into your router, Proxmox or the harness.
 - Page text is passed to the model as untrusted data, and the agent is told never to sign in, enter passwords, payment or personal details, buy or post.
@@ -123,6 +159,6 @@ or "part runs on CPU: lower OLLAMA_NUM_CTX"). Exit code 1 if anything fails.
 ## Tests
 
 ```bash
-npm test        # HQ unit tests (20), no Ollama needed
+npm test        # HQ unit tests (30), no Ollama needed
 npm run eval    # your existing eval suite, unchanged
 ```

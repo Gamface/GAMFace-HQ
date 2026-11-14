@@ -64,6 +64,9 @@ export class TaskStore {
         PRIMARY KEY (day, agent, model)
       );
     `);
+    // Databases from before spend caps lack the cost column
+    const cols = this.db.prepare("PRAGMA table_info(usage)").all() as { name: string }[];
+    if (!cols.some((c) => c.name === "cost_usd")) this.db.exec("ALTER TABLE usage ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0");
   }
 
   /** Loads recent cards. Runs cut short by a restart are marked interrupted and wait for Retry. */
@@ -176,20 +179,38 @@ export class TaskStore {
   }
 
   // --- token usage per agent per day --------------------------------------------
-  recordUsage(agent: string, model: string, promptTokens: number, completionTokens: number, error = false) {
+  recordUsage(agent: string, model: string, promptTokens: number, completionTokens: number, error = false, costUsd = 0) {
     const day = new Date().toISOString().slice(0, 10);
     this.db
       .prepare(
-        `INSERT INTO usage (day, agent, model, prompt_tokens, completion_tokens, requests, errors) VALUES (?, ?, ?, ?, ?, 1, ?)
+        `INSERT INTO usage (day, agent, model, prompt_tokens, completion_tokens, requests, errors, cost_usd) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
          ON CONFLICT(day, agent, model) DO UPDATE SET prompt_tokens = prompt_tokens + excluded.prompt_tokens,
-           completion_tokens = completion_tokens + excluded.completion_tokens, requests = requests + 1, errors = errors + excluded.errors`,
+           completion_tokens = completion_tokens + excluded.completion_tokens, requests = requests + 1, errors = errors + excluded.errors,
+           cost_usd = cost_usd + excluded.cost_usd`,
       )
-      .run(day, agent, model, promptTokens, completionTokens, error ? 1 : 0);
+      .run(day, agent, model, promptTokens, completionTokens, error ? 1 : 0, costUsd);
   }
 
-  usageToday(): { agent: string; model: string; prompt_tokens: number; completion_tokens: number; requests: number; errors: number }[] {
+  usageToday(): { agent: string; model: string; prompt_tokens: number; completion_tokens: number; requests: number; errors: number; cost_usd: number }[] {
     const day = new Date().toISOString().slice(0, 10);
-    return this.db.prepare("SELECT agent, model, prompt_tokens, completion_tokens, requests, errors FROM usage WHERE day = ?").all(day) as never;
+    return this.db.prepare("SELECT agent, model, prompt_tokens, completion_tokens, requests, errors, cost_usd FROM usage WHERE day = ?").all(day) as never;
+  }
+
+  /** Dollars spent this calendar month (UTC), for one agent or all of them. */
+  spendThisMonth(agent?: string): number {
+    const month = new Date().toISOString().slice(0, 7);
+    const row = (
+      agent
+        ? this.db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS s FROM usage WHERE day LIKE ? AND agent = ?").get(`${month}%`, agent)
+        : this.db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS s FROM usage WHERE day LIKE ?").get(`${month}%`)
+    ) as { s: number };
+    return row.s;
+  }
+
+  spendByAgentThisMonth(): Record<string, number> {
+    const month = new Date().toISOString().slice(0, 7);
+    const rows = this.db.prepare("SELECT agent, SUM(cost_usd) AS s FROM usage WHERE day LIKE ? GROUP BY agent").all(`${month}%`) as { agent: string; s: number }[];
+    return Object.fromEntries(rows.map((r) => [r.agent, r.s]));
   }
 
   tokensToday(agent: string): number {

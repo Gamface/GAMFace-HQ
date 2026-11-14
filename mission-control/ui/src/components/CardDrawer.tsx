@@ -19,6 +19,9 @@ interface Detail {
   dependsOn?: string[];
   waitingOn: string[];
   needsReview?: boolean;
+  readOnly?: boolean;
+  allowedSites?: string[];
+  usedPrivate?: boolean;
   acceptedAt?: number;
   interrupted?: boolean;
   attempts?: number;
@@ -107,6 +110,16 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
               </span>
               {d.priority && d.priority !== "normal" && <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 uppercase">{d.priority}</span>}
               {(d.attempts ?? 0) > 1 && <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-400">attempt {d.attempts}</span>}
+              {d.readOnly && (
+                <span className="px-2 py-0.5 rounded bg-sky-900/70 text-sky-200" title={`May open: ${(d.allowedSites ?? []).join(", ") || "sites named in the task"}`}>
+                  👁 read-only
+                </span>
+              )}
+              {d.usedPrivate && (
+                <span className="px-2 py-0.5 rounded bg-emerald-900/60 text-emerald-200" title="Used your vault notes or memories; never sent to a cloud model unless you allowed it">
+                  🔒 private context
+                </span>
+              )}
               {d.startedAt && d.finishedAt && <span className="text-slate-500">{((d.finishedAt - d.startedAt) / 1000).toFixed(1)}s</span>}
             </div>
           )}
@@ -164,6 +177,8 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
                 priority: d.priority ?? "normal",
                 dependsOn: d.dependsOn ?? [],
                 needsReview: Boolean(d.needsReview),
+                readOnly: Boolean(d.readOnly),
+                allowedSites: d.allowedSites ?? [],
               }}
               cards={cards}
               selfId={id}

@@ -3,6 +3,7 @@ import type { AgentStatus, RequestedAgent } from "../../../src/schemas/agent";
 import { HARNESS_URL, authHeaders } from "../config";
 import { TERMINAL, useAgentStream } from "../useAgentStream";
 import Board from "./Board";
+import NoticesBar from "./NoticesBar";
 import BrowserPane from "./BrowserPane";
 import PreviewPane from "./PreviewPane";
 import TeamPage from "./TeamPage";
@@ -197,6 +198,7 @@ export default function MissionControl() {
           </nav>
         </div>
         <div className="flex items-center gap-3 text-sm font-mono">
+          <NoticesBar />
           <span className="text-cyan-400">
             State: {connection !== "open" ? `Harness ${connection}` : selected ? `${selected.agent} [${selected.status}]` : "Online / Ready"}
           </span>

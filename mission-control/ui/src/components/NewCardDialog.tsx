@@ -10,6 +10,8 @@ export interface CardFields {
   priority: "low" | "normal" | "high";
   dependsOn: string[];
   needsReview: boolean;
+  readOnly: boolean;
+  allowedSites: string[];
 }
 
 export function CardForm({
@@ -107,6 +109,34 @@ export function CardForm({
         <input type="checkbox" checked={f.needsReview} onChange={(e) => set("needsReview", e.target.checked)} />
         I'll review the result before it counts as done
       </label>
+      <div>
+        <label className="flex items-center gap-2 text-slate-300 cursor-pointer select-none">
+          <input type="checkbox" checked={f.readOnly} onChange={(e) => set("readOnly", e.target.checked)} />
+          Read-only run: look, don't touch
+        </label>
+        {f.readOnly && (
+          <div className="ml-6 mt-1.5 space-y-1">
+            <input
+              className={input}
+              value={f.allowedSites.join(", ")}
+              onChange={(e) =>
+                set(
+                  "allowedSites",
+                  e.target.value
+                    .split(/[\s,]+/)
+                    .map((x) => x.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
+                    .filter(Boolean)
+                    .slice(0, 10),
+                )
+              }
+              placeholder="Sites it may open, e.g. example.com (blank: sites named in the task)"
+            />
+            <p className="text-[10px] text-slate-500">
+              Fresh browser profile (never logged in), links only on these sites, no typing, buttons or form submits, no notes or memories saved.
+            </p>
+          </div>
+        )}
+      </div>
       {extra}
       {error && <p className="text-rose-300 text-xs">{error}</p>}
       <div className="flex justify-end gap-2 pt-1">
@@ -138,7 +168,7 @@ export default function NewCardDialog({
       <div className="w-full max-w-lg bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
         <h2 className="text-base font-semibold text-slate-100 mb-3">New card</h2>
         <CardForm
-          initial={{ title: "", prompt: "", targetAgent: "auto", priority: "normal", dependsOn: [], needsReview: false }}
+          initial={{ title: "", prompt: "", targetAgent: "auto", priority: "normal", dependsOn: [], needsReview: false, readOnly: false, allowedSites: [] }}
           cards={cards}
           submitLabel={where === "ready" ? "Add & queue" : "Add to Backlog"}
           onCancel={onClose}

@@ -168,6 +168,7 @@ const FIND_ELEMENT = `(kind, wanted) => {
   const visible = (el) => { const r = el.getBoundingClientRect(); const st = getComputedStyle(el); return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none"; };
   const label = (el) => norm([el.innerText, el.value, el.getAttribute("aria-label"), el.getAttribute("title"), el.getAttribute("placeholder"), el.getAttribute("name"), el.id && document.querySelector('label[for="' + el.id + '"]')?.innerText, el.alt].filter(Boolean).join(" "));
   const sel = kind === "field" ? 'input:not([type=hidden]):not([type=submit]):not([type=button]), textarea, [contenteditable="true"], select'
+            : kind === "link" ? 'a[href]'
                                : 'a, button, [role=button], [role=link], [role=tab], [role=menuitem], input[type=submit], input[type=button], summary, label';
   const els = [...document.querySelectorAll(sel)].filter(visible);
   let best = null, score = 0;
@@ -193,25 +194,49 @@ const READ_PAGE = `(() => {
   return { url: location.href, title: document.title, text, links, fields };
 })()`;
 
+/** Hostname without "www.", lowercased */
+function siteOf(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+export interface ReadOnlyOptions {
+  /** Sites this run may open, e.g. ["example.com"]; subdomains included */
+  allowedSites: string[];
+}
+
 export class BrowserSession {
   private cdp!: Cdp;
   private sessionId = "";
   private targetId = "";
+  private contextId = "";
+  private readOnly: ReadOnlyOptions | null;
   private loadWaiters: (() => void)[] = [];
   private allowPrivate: boolean;
   private onFrame: (f: Frame) => void;
   private onBlocked: (url: string, reason: string) => void;
   private current = { url: "about:blank", title: "" };
 
-  constructor(opts: { allowPrivate?: boolean; onFrame?: (f: Frame) => void; onBlocked?: (url: string, reason: string) => void } = {}) {
+  constructor(
+    opts: { allowPrivate?: boolean; readOnly?: ReadOnlyOptions; onFrame?: (f: Frame) => void; onBlocked?: (url: string, reason: string) => void } = {},
+  ) {
     this.allowPrivate = Boolean(opts.allowPrivate);
+    this.readOnly = opts.readOnly ? { allowedSites: opts.readOnly.allowedSites.map((x) => x.toLowerCase().replace(/^www\./, "")) } : null;
     this.onFrame = opts.onFrame ?? (() => {});
     this.onBlocked = opts.onBlocked ?? (() => {});
   }
 
   async start(cdpBase: string) {
     this.cdp = await Cdp.connect(await resolveCdpUrl(cdpBase));
-    const { targetId } = await this.cdp.send("Target.createTarget", { url: "about:blank", ...VIEWPORT });
+    // Read-only runs get a throwaway profile: no cookies, so never logged in anywhere
+    if (this.readOnly) {
+      const { browserContextId } = await this.cdp.send("Target.createBrowserContext", { disposeOnDetach: true });
+      this.contextId = browserContextId;
+    }
+    const { targetId } = await this.cdp.send("Target.createTarget", { url: "about:blank", ...VIEWPORT, ...(this.contextId ? { browserContextId: this.contextId } : {}) });
     this.targetId = targetId;
     const { sessionId } = await this.cdp.send("Target.attachToTarget", { targetId, flatten: true });
     this.sessionId = sessionId;
@@ -225,7 +250,7 @@ export class BrowserSession {
         void this.cdp.send("Page.screencastFrameAck", { sessionId: params.sessionId }, this.sessionId).catch(() => {});
         this.onFrame({ data: params.data, url: this.current.url, title: this.current.title });
       } else if (method === "Fetch.requestPaused") {
-        void this.screenRequest(params.requestId, params.request.url);
+        void this.screenRequest(params.requestId, params.request.url, params.request.method, params.resourceType);
       }
     });
     const s = this.sessionId;
@@ -236,8 +261,23 @@ export class BrowserSession {
     await this.cdp.send("Page.startScreencast", { format: "jpeg", quality: 55, maxWidth: VIEWPORT.width, maxHeight: VIEWPORT.height }, s);
   }
 
-  private async screenRequest(requestId: string, url: string) {
-    const reason = await blockedReason(url, this.allowPrivate);
+  /** In read-only runs, whether a page on this URL may be opened. */
+  siteAllowed(url: string): boolean {
+    if (!this.readOnly) return true;
+    if (/^(about|data|blob):/i.test(url)) return true;
+    const site = siteOf(url);
+    return Boolean(site) && this.readOnly.allowedSites.some((a) => site === a || site.endsWith(`.${a}`));
+  }
+
+  private readOnlyReason(url: string, method: string, resourceType?: string): string | null {
+    if (!this.readOnly) return null;
+    if (!["GET", "HEAD", "OPTIONS"].includes(method)) return `read-only run: ${method} requests (form submits, sending data) are blocked`;
+    if (resourceType === "Document" && !this.siteAllowed(url)) return "read-only run: outside the sites this run may visit";
+    return null;
+  }
+
+  private async screenRequest(requestId: string, url: string, method = "GET", resourceType?: string) {
+    const reason = this.readOnlyReason(url, method, resourceType) ?? (await blockedReason(url, this.allowPrivate));
     try {
       if (reason) {
         this.onBlocked(url, reason);
@@ -274,7 +314,7 @@ export class BrowserSession {
 
   async navigate(url: string): Promise<string> {
     if (!/^[a-z]+:/i.test(url)) url = `https://${url}`;
-    const reason = await blockedReason(url, this.allowPrivate);
+    const reason = (this.siteAllowed(url) ? null : `read-only run: only ${this.readOnly!.allowedSites.join(", ")} may be opened`) ?? (await blockedReason(url, this.allowPrivate));
     if (reason) throw new Error(`Blocked ${url}: ${reason}`);
     const load = this.waitForLoad();
     const r = await this.cdp.send("Page.navigate", { url }, this.sessionId);
@@ -291,8 +331,14 @@ export class BrowserSession {
   }
 
   async click(target: string): Promise<string> {
-    const found = await this.evaluate<string | null>(`(${FIND_ELEMENT})("click", ${JSON.stringify(target)})`);
-    if (!found) throw new Error(`Nothing clickable matches "${target}"`);
+    // Read-only runs may only follow links to allowed sites: no buttons, no "confirm" or form controls
+    const found = await this.evaluate<string | null>(`(${FIND_ELEMENT})(${JSON.stringify(this.readOnly ? "link" : "click")}, ${JSON.stringify(target)})`);
+    if (!found) throw new Error(this.readOnly ? `No link matches "${target}" (read-only runs can only follow links)` : `Nothing clickable matches "${target}"`);
+    if (this.readOnly) {
+      const href = await this.evaluate<string>("window.__mcTarget.href || ''");
+      if (!/^https?:/i.test(href)) throw new Error(`Blocked link "${found}": read-only runs only follow web links`);
+      if (!this.siteAllowed(href)) throw new Error(`Blocked link to ${href}: read-only run, outside ${this.readOnly.allowedSites.join(", ")}`);
+    }
     const before = this.current.url;
     const load = this.waitForLoad(5000);
     await this.evaluate("window.__mcTarget.click(), true");
@@ -302,6 +348,7 @@ export class BrowserSession {
   }
 
   async type(field: string, text: string, submit: boolean): Promise<string> {
+    if (this.readOnly) throw new Error("Typing is disabled in read-only runs");
     const found = await this.evaluate<string | null>(`(${FIND_ELEMENT})("field", ${JSON.stringify(field)})`);
     if (!found) throw new Error(`No text field matches "${field}"`);
     await this.evaluate("window.__mcTarget.focus(), window.__mcTarget.select?.(), true");
@@ -338,6 +385,7 @@ export class BrowserSession {
     try {
       await this.cdp.send("Page.stopScreencast", {}, this.sessionId);
       await this.cdp.send("Target.closeTarget", { targetId: this.targetId });
+      if (this.contextId) await this.cdp.send("Target.disposeBrowserContext", { browserContextId: this.contextId });
     } catch {
       // Chrome may already be gone
     }

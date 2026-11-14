@@ -194,6 +194,8 @@ function Card({
         </span>
         {c.priority && c.priority !== "normal" && <span className={`px-1.5 py-0.5 rounded uppercase ${PRIORITY_STYLE[c.priority]}`}>{c.priority}</span>}
         {c.needsReview && <span className="px-1.5 py-0.5 rounded bg-fuchsia-900/70 text-fuchsia-200">review</span>}
+        {c.readOnly && <span className="px-1.5 py-0.5 rounded bg-sky-900/70 text-sky-200" title="Read-only run">👁 read-only</span>}
+        {c.usedPrivate && <span title="Used your private notes or memories">🔒</span>}
         {c.source === "telegram" && <span title="From Telegram">✈</span>}
         {c.source === "voice" && <span title="Spoken">🎙</span>}
       </div>

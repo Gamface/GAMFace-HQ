@@ -1,4 +1,5 @@
 import type { JsonChat } from "./ollama";
+import { privateBlock, sanitize } from "./privacy";
 import { JsonStore } from "./store";
 
 // Long-term memory. After each task a small model pulls out durable facts.
@@ -137,7 +138,9 @@ export class Memory {
   }
 
   /** Ask the model which durable facts from one exchange are worth keeping. */
-  async extract(agent: string, prompt: string, answer: string): Promise<string[]> {
+  /** `privateAnswer`: the answer was written from private material, so a cloud model must not see it. */
+  async extract(agent: string, prompt: string, answer: string, privateAnswer = false): Promise<string[]> {
+    const shown = sanitize(answer.slice(0, 3000));
     const data = await this.chat(this.model, [
       {
         role: "system",
@@ -146,7 +149,7 @@ export class Memory {
           "Skip small talk and one-off details. Reply with JSON only: " +
           '{"memories": [{"text": "...", "importance": 0.0-1.0, "shared": true}]} and an empty list if nothing is worth keeping.',
       },
-      { role: "user", content: `USER: ${prompt.slice(0, 3000)}\n\nASSISTANT: ${answer.slice(0, 3000)}` },
+      { role: "user", content: `USER: ${sanitize(prompt.slice(0, 3000))}\n\nASSISTANT: ${privateAnswer ? privateBlock(shown, "(withheld)") : shown}` },
     ]);
     const saved: string[] = [];
     const items = Array.isArray(data.memories) ? data.memories.slice(0, 5) : [];

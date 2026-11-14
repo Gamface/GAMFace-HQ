@@ -125,7 +125,7 @@ test("switch commands", () => {
   assert.equal(parseSwitchCommand("switch the light to blue in my python app please now"), null);
   assert.equal(parseSwitchCommand("write a function to switch to dark mode"), null);
   assert.equal(parseSwitchCommand("switch banana to local"), null);
-  const settings = { roles: {} as never, aliases: { local: "ollama/qwen3:14b" }, customProviders: [] };
+  const settings = { roles: {} as never, aliases: { local: "ollama/qwen3:14b" }, customProviders: [], prices: {} };
   assert.equal(resolveTarget("local", settings, providers), "ollama/qwen3:14b");
   assert.equal(resolveTarget("ollama/llama3.1:8b", settings, providers), "ollama/llama3.1:8b");
   assert.equal(resolveTarget("typo", settings, providers), null);

@@ -19,6 +19,18 @@ export interface RoleSettings {
   think?: boolean;
   /** Daily cap on tokens for cloud models; past it the fallback is used */
   dailyTokenLimit?: number;
+  /** Never send this agent's requests to a cloud provider (checked on every request) */
+  localOnly?: boolean;
+  /** Let vault notes, memories and the hive log go to a cloud model (off: they are withheld) */
+  allowPrivateToCloud?: boolean;
+  /** Monthly spend cap in US dollars for this agent's cloud requests */
+  monthlyBudgetUsd?: number;
+}
+
+/** US dollars per million tokens */
+export interface ModelPrice {
+  input: number;
+  output: number;
 }
 
 export interface CustomProvider {
@@ -34,7 +46,14 @@ export interface ModelSettings {
   /** Short names for "switch to <alias>", e.g. { local: "ollama/qwen3:14b", claude: "anthropic/claude-sonnet-4-5" } */
   aliases: Record<string, string>;
   customProviders: CustomProvider[];
+  /** Prices for cloud models, keyed by model reference */
+  prices: Record<string, ModelPrice>;
+  /** Monthly spend cap across all agents, in US dollars */
+  monthlyBudgetUsd?: number;
 }
+
+/** Agents that start out local-only: the File agent reads your vault, Memory handles your memories */
+export const LOCAL_ONLY_BY_DEFAULT: readonly ModelRole[] = ["file", "memory"];
 
 export interface Resolved {
   role: ModelRole;
@@ -68,9 +87,14 @@ export class ModelRegistry {
     const roles = {} as Record<ModelRole, RoleSettings>;
     for (const r of MODEL_ROLES) {
       const background = r === "router" || r === "memory";
-      roles[r] = { model: background ? fast : main, numCtx: this.defaults.numCtx, think: background ? false : this.defaults.think };
+      roles[r] = {
+        model: background ? fast : main,
+        numCtx: this.defaults.numCtx,
+        think: background ? false : this.defaults.think,
+        localOnly: LOCAL_ONLY_BY_DEFAULT.includes(r),
+      };
     }
-    return { roles, aliases: { local: main }, customProviders: [] };
+    return { roles, aliases: { local: main }, customProviders: [], prices: {} };
   }
 
   settings(): ModelSettings {
@@ -80,6 +104,8 @@ export class ModelRegistry {
       roles: Object.fromEntries(MODEL_ROLES.map((r) => [r, { ...d.roles[r], ...(saved.roles?.[r] ?? {}) }])) as Record<ModelRole, RoleSettings>,
       aliases: { ...d.aliases, ...(saved.aliases ?? {}) },
       customProviders: saved.customProviders ?? [],
+      prices: saved.prices ?? {},
+      monthlyBudgetUsd: saved.monthlyBudgetUsd,
     };
   }
 
@@ -102,7 +128,10 @@ export class ModelRegistry {
       roles: { ...current.roles },
       aliases: change.aliases ?? current.aliases,
       customProviders: change.customProviders ?? current.customProviders,
+      prices: change.prices ?? current.prices,
+      monthlyBudgetUsd: "monthlyBudgetUsd" in change ? change.monthlyBudgetUsd : current.monthlyBudgetUsd,
     };
+    if (next.monthlyBudgetUsd !== undefined && (!(next.monthlyBudgetUsd >= 0) || next.monthlyBudgetUsd > 100000)) return "Monthly budget must be between $0 and $100,000";
     for (const c of next.customProviders) {
       if (!ID_RE.test(c.id)) return `Provider id "${c.id}" must be lowercase letters, digits, - or _`;
       if (["ollama", "lmstudio", "openai", "openrouter", "anthropic", "gemini"].includes(c.id)) return `"${c.id}" is a built-in provider`;
@@ -124,8 +153,25 @@ export class ModelRegistry {
       }
       if (merged.numCtx !== undefined && (merged.numCtx < 512 || merged.numCtx > 262144)) return "Context size must be between 512 and 262144";
       if (merged.temperature !== undefined && (merged.temperature < 0 || merged.temperature > 2)) return "Temperature must be between 0 and 2";
+      if (merged.monthlyBudgetUsd !== undefined && (!(merged.monthlyBudgetUsd >= 0) || merged.monthlyBudgetUsd > 100000)) return "Monthly budget must be between $0 and $100,000";
       next.roles[role] = merged;
     }
+    // A local-only agent can't be given a cloud model, as its main model or its fallback
+    for (const role of MODEL_ROLES) {
+      const s = next.roles[role];
+      if (!s.localOnly) continue;
+      for (const ref of [s.model, s.fallback]) {
+        const parsed = ref ? parseModelRef(ref, providers) : null;
+        if (parsed && !parsed.provider.local) return `${role} is local only, so it can't use the cloud model ${ref}. Turn off "Local only" for it first.`;
+      }
+    }
+    const cleanPrices: Record<string, ModelPrice> = {};
+    for (const [ref, price] of Object.entries(next.prices)) {
+      const norm = normalizeRef(ref, providers) ?? ref;
+      if (!(price.input >= 0 && price.output >= 0 && price.input < 10000 && price.output < 10000)) return `Price for ${ref} must be dollars per million tokens`;
+      cleanPrices[norm] = { input: Number(price.input), output: Number(price.output) };
+    }
+    next.prices = cleanPrices;
     for (const [alias, ref] of Object.entries(next.aliases)) {
       if (!/^[a-z0-9][a-z0-9 _.-]{0,30}$/.test(alias)) return `Alias "${alias}" should be short lowercase text`;
       if (!normalizeRef(ref, providers)) return `No provider for alias "${alias}" → ${ref}`;
@@ -150,6 +196,16 @@ export class ModelRegistry {
       parsed = parseModelRef(ref, providers)!;
     }
     return { role, ref: `${parsed.provider.id}/${parsed.model}`, provider: parsed.provider, model: parsed.model, settings: s };
+  }
+
+  /** A local model for this role: its fallback if that is local, otherwise the default local model. */
+  localFor(role: ModelRole): Resolved {
+    const s = this.settings().roles[role];
+    const providers = this.providers();
+    const fb = s.fallback ? parseModelRef(s.fallback, providers) : null;
+    const main = parseModelRef(s.model, providers);
+    const pick = fb?.provider.local ? fb : main?.provider.local ? main : parseModelRef(`ollama/${this.defaults.model}`, providers)!;
+    return { role, ref: `${pick.provider.id}/${pick.model}`, provider: pick.provider, model: pick.model, settings: s };
   }
 
   resolveFallback(role: ModelRole): Resolved | null {
