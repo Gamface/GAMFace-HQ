@@ -214,3 +214,63 @@ test("a failed model's fallback goes through the same rules", async () => {
   assert.match(notes.join(" "), /deadcloud\/x failed/);
   assert.ok(local.bodies.join("").includes(SECRET)); // local fallback: private context allowed
 });
+
+test("a handoff written from private material keeps a cloud teammate local", async () => {
+  assert.equal(models.update({ roles: { coder: { model: "cloudy/big", fallback: "localbox/small" } } as never }), null);
+  const signal = new AbortController().signal;
+  const handoff = [{ role: "user" as const, content: `Write a script that uses ${SECRET}` }];
+
+  // The instructions carry no markers, so only the flag can keep them off the cloud
+  cloud.bodies.length = 0;
+  const notes: string[] = [];
+  const kept = await gateway.stream("coder", handoff, signal, () => {}, (n) => notes.push(n), undefined, { privateTask: true });
+  assert.equal(kept.ref, "localbox/small");
+  assert.match(notes[0], /written from your private notes or memories/);
+  assert.equal(cloud.bodies.length, 0);
+  assert.ok(notices.list().some((n) => n.key.startsWith("private-task:coder")));
+
+  // JSON calls (the browser agent's steps) follow the same rule
+  const step = await gateway.json("coder", handoff, () => {}, { privateTask: true });
+  assert.equal(step.ref, "localbox/small");
+  assert.equal(cloud.bodies.length, 0);
+
+  // An ordinary handoff still uses the cloud model, and so does an agent allowed to send private context
+  const plain = await gateway.stream("coder", [{ role: "user", content: "hi" }], signal, () => {}, () => {});
+  assert.equal(plain.ref, "cloudy/big");
+  const allowed = await gateway.stream("security_audit", handoff, signal, () => {}, () => {}, undefined, { privateTask: true });
+  assert.equal(allowed.ref, "cloudy/big");
+});
+
+test("the daily token cap holds even when no fallback model is set", () => {
+  assert.equal(models.update({ roles: { coder: { model: "cloudy/big", fallback: undefined, dailyTokenLimit: 1_000_000_000 } } as never }), null);
+  assert.equal(models.resolve("coder").ref, "cloudy/big"); // under the cap
+  assert.ok(store.tokensToday("coder") > 1);
+  assert.equal(models.update({ roles: { coder: { dailyTokenLimit: 1 } } as never }), null);
+  const r = models.resolve("coder");
+  assert.equal(r.provider.local, true);
+  assert.equal(r.ref, "ollama/qwen3:14b");
+});
+
+test("a default overall cap applies until one is saved, and clearing it means no cap", () => {
+  const fresh = new TaskStore(":memory:");
+  const reg = new ModelRegistry(fresh, { model: "qwen3:14b", fastModel: "qwen3:4b", numCtx: 8192, think: false, monthlyBudgetUsd: 20 });
+  assert.equal(reg.settings().monthlyBudgetUsd, 20);
+  // Saving something else keeps the default
+  assert.equal(reg.update({ aliases: { quick: "ollama/qwen3:4b" } }), null);
+  assert.equal(reg.settings().monthlyBudgetUsd, 20);
+  assert.equal(reg.update({ monthlyBudgetUsd: 5 }), null);
+  assert.equal(reg.settings().monthlyBudgetUsd, 5);
+  // The Team page sends null to clear a cap; it stays cleared instead of snapping back to the default
+  assert.equal(reg.update(JSON.parse(JSON.stringify({ monthlyBudgetUsd: null }))), null);
+  assert.equal(reg.settings().monthlyBudgetUsd, undefined);
+  fresh.close();
+});
+
+test("null clears an agent's cap, fallback and daily limit", () => {
+  assert.equal(models.update({ roles: { coder: { model: "cloudy/big", fallback: "localbox/small", monthlyBudgetUsd: 3, dailyTokenLimit: 5 } } as never }), null);
+  assert.equal(models.update(JSON.parse(JSON.stringify({ roles: { coder: { fallback: null, monthlyBudgetUsd: null, dailyTokenLimit: null } } }))), null);
+  const s = models.settings().roles.coder;
+  assert.equal(s.fallback, undefined);
+  assert.equal(s.monthlyBudgetUsd, undefined);
+  assert.equal(s.dailyTokenLimit, undefined);
+});

@@ -1,7 +1,7 @@
 // Unit tests for the HQ modules. No Ollama needed.   npm test
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { blockedReason } from "../src/hq/browser";
+import { blockedReason, searchResultTarget } from "../src/hq/browser";
 import { StreamGuard, redact } from "../src/hq/guard";
 import { Hive } from "../src/hq/hive";
 import { Memory, similarity } from "../src/hq/memory";
@@ -143,4 +143,12 @@ test("browser guard blocks local and private addresses", async () => {
   assert.match((await blockedReason("file:///etc/passwd"))!, /not allowed/);
   assert.equal(await blockedReason("https://1.1.1.1/"), null);
   assert.equal(await blockedReason("http://127.0.0.1:8765/", true), null);
+});
+
+test("search result links are judged by where they lead", () => {
+  assert.equal(searchResultTarget("https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fnews%3Fa%3D1&rut=abc"), "https://example.com/news?a=1");
+  assert.equal(searchResultTarget("https://html.duckduckgo.com/html/?q=news"), null);
+  assert.equal(searchResultTarget("https://example.com/l/?uddg=https%3A%2F%2Fevil.test"), null);
+  assert.equal(searchResultTarget("https://duckduckgo.com/l/?uddg=javascript%3Aalert(1)"), null);
+  assert.equal(searchResultTarget("not a url"), null);
 });

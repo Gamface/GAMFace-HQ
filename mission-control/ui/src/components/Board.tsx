@@ -198,6 +198,7 @@ function Card({
         {c.readOnly && <span className="px-1.5 py-0.5 rounded bg-sky-900/70 text-sky-200" title="Read-only run">👁 read-only</span>}
         {c.usedPrivate && <span title="Used your private notes or memories">🔒</span>}
         {c.source === "telegram" && <span title="From Telegram">✈</span>}
+        {c.source === "routine" && <span title={`Routine run: always read-only. Result goes to: ${c.deliverTo ?? "dashboard"}`}>⏱</span>}
         {c.source === "voice" && <span title="Spoken">🎙</span>}
       </div>
       {waitingTitles.length > 0 && (

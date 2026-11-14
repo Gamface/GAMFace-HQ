@@ -24,6 +24,15 @@ export interface CallResult {
   sawPrivate: boolean;
 }
 
+export interface CallOptions {
+  /**
+   * The request text itself was written by an agent that had seen private
+   * material (a lead's handoff to a teammate). Unless the agent may send
+   * private context to the cloud, the call is kept on a local model.
+   */
+  privateTask?: boolean;
+}
+
 export interface Prepared {
   r: Resolved;
   messages: ChatMessage[];
@@ -60,7 +69,7 @@ export class ModelGateway {
   }
 
   /** Applies the lock, the caps and the privacy rule to one request. Exported for tests. */
-  prepare(role: ModelRole, messages: ChatMessage[], candidate: Resolved): Prepared {
+  prepare(role: ModelRole, messages: ChatMessage[], candidate: Resolved, opts: CallOptions = {}): Prepared {
     const notes: string[] = [];
     const who = LABEL[role] ?? role;
     let r = candidate;
@@ -71,6 +80,16 @@ export class ModelGateway {
       const msg = `${who} is local only, so it used ${local.ref} instead of ${r.ref}.`;
       notes.push(msg);
       this.notices.add("local-only", `local-only:${role}:${r.ref}`, msg);
+      r = local;
+    }
+
+    // 1b. Private task: instructions written from private material are the request
+    // itself, so they can't be withheld; the turn stays on a local model instead
+    if (!r.provider.local && opts.privateTask && !r.settings.allowPrivateToCloud) {
+      const local = this.models.localFor(role);
+      const msg = `${who}'s instructions were written from your private notes or memories, so it used ${local.ref} instead of ${r.ref}.`;
+      notes.push(msg);
+      this.notices.add("local-only", `private-task:${role}:${r.ref}`, msg);
       r = local;
     }
 
@@ -138,9 +157,10 @@ export class ModelGateway {
     onToken: (t: string) => void,
     onNote: (note: string) => void,
     override?: string,
+    opts: CallOptions = {},
   ): Promise<CallResult> {
     const attempt = async (candidate: Resolved): Promise<CallResult> => {
-      const p = this.prepare(role, messages, candidate);
+      const p = this.prepare(role, messages, candidate, opts);
       p.notes.forEach(onNote);
       const s = p.r.settings;
       let gotTokens = false;
@@ -170,9 +190,9 @@ export class ModelGateway {
   }
 
   /** A JSON-mode call for routing, memory and browser steps. Notes go to `onNote`. */
-  async json(role: ModelRole, messages: ChatMessage[], onNote: (note: string) => void = () => {}): Promise<CallResult> {
+  async json(role: ModelRole, messages: ChatMessage[], onNote: (note: string) => void = () => {}, opts: CallOptions = {}): Promise<CallResult> {
     const attempt = async (candidate: Resolved): Promise<CallResult> => {
-      const p = this.prepare(role, messages, candidate);
+      const p = this.prepare(role, messages, candidate, opts);
       p.notes.forEach(onNote);
       try {
         const out = await chatOnce(p.r.provider, p.r.model, p.messages, { json: true, think: false, temperature: 0.1, numCtx: p.r.settings.numCtx, keepAlive: this.keepAlive });

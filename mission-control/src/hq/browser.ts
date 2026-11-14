@@ -203,6 +203,22 @@ function siteOf(url: string): string {
   }
 }
 
+/**
+ * Search results link through the search engine's redirect page
+ * (duckduckgo.com/l/?uddg=<real address>). Returns the real address, or null
+ * when the link is not such a redirect.
+ */
+export function searchResultTarget(href: string): string | null {
+  try {
+    const u = new URL(href);
+    if (!/(^|\.)duckduckgo\.com$/i.test(u.hostname) || u.pathname !== "/l/") return null;
+    const dest = u.searchParams.get("uddg");
+    return dest && /^https?:\/\//i.test(dest) ? dest : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface ReadOnlyOptions {
   /** Sites this run may open, e.g. ["example.com"]; subdomains included */
   allowedSites: string[];
@@ -326,6 +342,8 @@ export class BrowserSession {
 
   async read(): Promise<PageState> {
     const state = await this.evaluate<PageState>(READ_PAGE);
+    // Show where search results really lead, so the agent can tell which ones it may open
+    state.links = state.links.map((l) => ({ ...l, href: searchResultTarget(l.href) ?? l.href }));
     this.current = { url: state.url, title: state.title };
     return state;
   }
@@ -335,9 +353,16 @@ export class BrowserSession {
     const found = await this.evaluate<string | null>(`(${FIND_ELEMENT})(${JSON.stringify(this.readOnly ? "link" : "click")}, ${JSON.stringify(target)})`);
     if (!found) throw new Error(this.readOnly ? `No link matches "${target}" (read-only runs can only follow links)` : `Nothing clickable matches "${target}"`);
     if (this.readOnly) {
-      const href = await this.evaluate<string>("window.__mcTarget.href || ''");
+      const raw = await this.evaluate<string>("window.__mcTarget.href || ''");
+      // A search result is judged by where it leads, and opened there directly
+      const dest = searchResultTarget(raw);
+      const href = dest ?? raw;
       if (!/^https?:/i.test(href)) throw new Error(`Blocked link "${found}": read-only runs only follow web links`);
       if (!this.siteAllowed(href)) throw new Error(`Blocked link to ${href}: read-only run, outside ${this.readOnly.allowedSites.join(", ")}`);
+      if (dest) {
+        await this.navigate(dest);
+        return `Followed "${found}" → ${this.current.url}`;
+      }
     }
     const before = this.current.url;
     const load = this.waitForLoad(5000);

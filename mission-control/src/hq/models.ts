@@ -17,7 +17,7 @@ export interface RoleSettings {
   temperature?: number;
   /** false switches reasoning off on models that support it */
   think?: boolean;
-  /** Daily cap on tokens for cloud models; past it the fallback is used */
+  /** Daily cap on tokens for cloud models; past it the fallback is used, or the default local model when there is none */
   dailyTokenLimit?: number;
   /** Never send this agent's requests to a cloud provider (checked on every request) */
   localOnly?: boolean;
@@ -68,6 +68,8 @@ export interface ModelDefaults {
   fastModel: string;
   numCtx: number;
   think: boolean;
+  /** Overall monthly cap that applies until one is saved on the Team page (clearing it there means no cap) */
+  monthlyBudgetUsd?: number;
 }
 
 const ID_RE = /^[a-z][a-z0-9_-]{1,30}$/;
@@ -105,7 +107,8 @@ export class ModelRegistry {
       aliases: { ...d.aliases, ...(saved.aliases ?? {}) },
       customProviders: saved.customProviders ?? [],
       prices: saved.prices ?? {},
-      monthlyBudgetUsd: saved.monthlyBudgetUsd,
+      // Never saved: the default cap. Saved as null: the cap was cleared on purpose.
+      monthlyBudgetUsd: saved.monthlyBudgetUsd === undefined ? this.defaults.monthlyBudgetUsd : (saved.monthlyBudgetUsd ?? undefined),
     };
   }
 
@@ -129,7 +132,8 @@ export class ModelRegistry {
       aliases: change.aliases ?? current.aliases,
       customProviders: change.customProviders ?? current.customProviders,
       prices: change.prices ?? current.prices,
-      monthlyBudgetUsd: "monthlyBudgetUsd" in change ? change.monthlyBudgetUsd : current.monthlyBudgetUsd,
+      // null (what JSON can carry) and undefined both clear the cap
+      monthlyBudgetUsd: "monthlyBudgetUsd" in change ? (change.monthlyBudgetUsd ?? undefined) : current.monthlyBudgetUsd,
     };
     if (next.monthlyBudgetUsd !== undefined && (!(next.monthlyBudgetUsd >= 0) || next.monthlyBudgetUsd > 100000)) return "Monthly budget must be between $0 and $100,000";
     for (const c of next.customProviders) {
@@ -142,7 +146,9 @@ export class ModelRegistry {
     const providers = this.providers(next.customProviders);
     for (const [role, s] of Object.entries(change.roles ?? {}) as [ModelRole, Partial<RoleSettings>][]) {
       if (!MODEL_ROLES.includes(role)) return `Unknown agent "${role}"`;
+      // A null field clears that setting (JSON drops undefined, so the Team page sends null)
       const merged = { ...current.roles[role], ...s };
+      for (const k of Object.keys(merged) as (keyof RoleSettings)[]) if (merged[k] === null) delete merged[k];
       const model = normalizeRef(merged.model, providers);
       if (!model) return `No provider for "${merged.model}"`;
       merged.model = model;
@@ -176,7 +182,7 @@ export class ModelRegistry {
       if (!/^[a-z0-9][a-z0-9 _.-]{0,30}$/.test(alias)) return `Alias "${alias}" should be short lowercase text`;
       if (!normalizeRef(ref, providers)) return `No provider for alias "${alias}" → ${ref}`;
     }
-    this.store.setSetting("models", next);
+    this.store.setSetting("models", { ...next, monthlyBudgetUsd: next.monthlyBudgetUsd ?? null });
     return null;
   }
 
@@ -186,8 +192,9 @@ export class ModelRegistry {
     const providers = this.providers();
     let ref = override || s.model;
     let parsed = parseModelRef(ref, providers);
-    if (!override && parsed && !parsed.provider.local && s.dailyTokenLimit && s.fallback && this.store.tokensToday(role) >= s.dailyTokenLimit) {
-      ref = s.fallback;
+    if (!override && parsed && !parsed.provider.local && s.dailyTokenLimit && this.store.tokensToday(role) >= s.dailyTokenLimit) {
+      // No fallback set: the cap still holds, and the agent uses the default local model
+      ref = s.fallback || `ollama/${this.defaults.model}`;
       parsed = parseModelRef(ref, providers);
     }
     if (!parsed) {

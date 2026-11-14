@@ -212,9 +212,10 @@ export default function TeamPage() {
           k,
           {
             ...v,
-            fallback: v.fallback || undefined,
-            dailyTokenLimit: v.dailyTokenLimit || undefined,
-            monthlyBudgetUsd: v.monthlyBudgetUsd === undefined || Number.isNaN(v.monthlyBudgetUsd) ? undefined : v.monthlyBudgetUsd,
+            // null clears a setting on the server (JSON would drop undefined and keep the old value)
+            fallback: v.fallback || null,
+            dailyTokenLimit: v.dailyTokenLimit || null,
+            monthlyBudgetUsd: v.monthlyBudgetUsd === undefined || Number.isNaN(v.monthlyBudgetUsd) ? null : v.monthlyBudgetUsd,
           },
         ]),
       );
@@ -223,7 +224,7 @@ export default function TeamPage() {
         aliases: Object.fromEntries(aliases.filter(([a, r]) => a.trim() && r.trim()).map(([a, r]) => [a.trim().toLowerCase(), r.trim()])),
         customProviders: custom,
         prices,
-        monthlyBudgetUsd: overallCap === undefined || Number.isNaN(overallCap) ? undefined : overallCap,
+        monthlyBudgetUsd: overallCap === undefined || Number.isNaN(overallCap) ? null : overallCap,
       });
       setStatus({ ok: true, text: "Saved. New tasks use these models." });
       await load();

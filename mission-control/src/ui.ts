@@ -19,6 +19,8 @@ import { StreamGuard, redact } from "./hq/guard";
 import { Hive } from "./hq/hive";
 import { Memory } from "./hq/memory";
 import { ModelGateway } from "./hq/gateway";
+import type { CallOptions } from "./hq/gateway";
+import { deliveryText, hiveSummary, isRoutine, routineFields, routinePatchError, saveRoutineNote } from "./hq/routine";
 import { MODEL_ROLES, ModelRegistry, ModelRole, parseSwitchCommand, resolveTarget } from "./hq/models";
 import { Notices } from "./hq/notices";
 import type { ChatMessage, JsonChat } from "./hq/ollama";
@@ -55,6 +57,9 @@ const TASK_TIMEOUT_MS = Number(process.env.TASK_TIMEOUT_MS) || 10 * 60 * 1000;
 const MAX_QUEUE = Number(process.env.MAX_QUEUE) || 20;
 // How long the front of the queue may wait while same-model tasks run first
 const MODEL_GROUP_MAX_WAIT_MS = Number(process.env.MODEL_GROUP_MAX_WAIT_MS) || 60_000;
+// Overall cloud spend cap until one is saved on the Team page; "none" starts with no cap
+const DEFAULT_MONTHLY_BUDGET_USD =
+  process.env.MONTHLY_BUDGET_USD === "none" ? undefined : Number.isFinite(Number(process.env.MONTHLY_BUDGET_USD)) && process.env.MONTHLY_BUDGET_USD ? Number(process.env.MONTHLY_BUDGET_USD) : 20;
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || "http://localhost:5173,http://127.0.0.1:5173")
   .split(",")
   .map((o) => o.trim())
@@ -86,7 +91,7 @@ const VOICE_STYLE =
 // --- State ------------------------------------------------------------------
 const store = new TaskStore(DATA_DIR);
 const { recovered } = store.load();
-const models = new ModelRegistry(store, { model: OLLAMA_MODEL, fastModel: OLLAMA_FAST_MODEL, numCtx: OLLAMA_NUM_CTX, think: OLLAMA_THINK });
+const models = new ModelRegistry(store, { model: OLLAMA_MODEL, fastModel: OLLAMA_FAST_MODEL, numCtx: OLLAMA_NUM_CTX, think: OLLAMA_THINK, monthlyBudgetUsd: DEFAULT_MONTHLY_BUDGET_USD });
 const hive = new Hive(DATA_DIR);
 const notices = new Notices(store);
 // Every model request goes through the gateway: local-only lock, spend caps, private-context rule
@@ -125,9 +130,9 @@ function agentLabel(task: Task) {
 
 // --- Models -----------------------------------------------------------------
 /** A JSON-mode chat for one role (router, memory, browser steps), through the gateway. */
-function roleJson(role: ModelRole): JsonChat {
+function roleJson(role: ModelRole, opts: CallOptions = {}): JsonChat {
   return async (_model, messages) => {
-    const out = await gateway.json(role, messages, (note) => hive.log(role, "policy", note));
+    const out = await gateway.json(role, messages, (note) => hive.log(role, "policy", note), opts);
     return out.json ?? {};
   };
 }
@@ -264,7 +269,15 @@ interface TurnResult {
  * guard). The gateway picks the model and applies the lock, caps and privacy
  * rule; its notes (fallbacks, budgets) are shown inline.
  */
-async function streamTurn(task: Task, role: AgentTarget, messages: ChatMessage[], signal: AbortSignal, push: (text: string) => void, override?: string): Promise<TurnResult> {
+async function streamTurn(
+  task: Task,
+  role: AgentTarget,
+  messages: ChatMessage[],
+  signal: AbortSignal,
+  push: (text: string) => void,
+  override?: string,
+  privateTask = false,
+): Promise<TurnResult> {
   const guard = new StreamGuard();
   try {
     const out = await gateway.stream(
@@ -278,8 +291,10 @@ async function streamTurn(task: Task, role: AgentTarget, messages: ChatMessage[]
         hive.log(role, "policy", note, task.id);
       },
       override,
+      { privateTask },
     );
-    return { text: out.text, ref: out.ref, sawPrivate: out.sawPrivate };
+    // A turn working from private instructions produces private output, whatever model ran it
+    return { text: out.text, ref: out.ref, sawPrivate: out.sawPrivate || privateTask };
   } finally {
     push(guard.end());
     if (guard.found.size) hive.log("guard", "redacted", [...guard.found].join(", "), task.id);
@@ -318,7 +333,7 @@ function readOnlySites(task: Task): string[] {
 }
 
 /** Drives the real browser for one request and returns the agent's answer. */
-async function browse(task: Task, request: string, signal: AbortSignal, push: (text: string) => void) {
+async function browse(task: Task, request: string, signal: AbortSignal, push: (text: string) => void, privateTask = false) {
   const sites = task.readOnly ? readOnlySites(task) : [];
   const session = new BrowserSession({
     allowPrivate: BROWSER_ALLOW_PRIVATE,
@@ -330,13 +345,19 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
     },
   });
   await session.start(BROWSER_CDP_URL);
+  if (task.readOnly && sites.length === 1) {
+    // Only web search is allowed: the run can read result snippets but open no result
+    const msg = "This read-only run names no sites, so the browser can only read search results. Add allowed sites to the card to let it open pages.";
+    push(`[${msg}]\n\n`);
+    notices.add("read-only", "read-only:no-sites", msg);
+  }
   broadcastBrowser({ type: "start", taskId: task.id, task: request });
   emit(task, "executing_tool");
   try {
     const answer = await runBrowserAgent({
       task: request,
       session,
-      chat: roleJson("browser"),
+      chat: roleJson("browser", { privateTask }),
       model: "browser",
       maxSteps: BROWSER_MAX_STEPS,
       signal,
@@ -355,7 +376,7 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
       },
     });
     push(`\n${redact(answer).text}`);
-    return { text: answer, sawPrivate: false };
+    return { text: answer, sawPrivate: privateTask };
   } finally {
     await session.close();
     broadcastBrowser({ type: "end", taskId: task.id });
@@ -371,10 +392,12 @@ async function agentTurn(
   signal: AbortSignal,
   push: (text: string) => void,
   override?: string,
+  /** The request was written by a lead that had seen private material */
+  privateTask = false,
 ): Promise<TurnResult> {
   if (agent === "browser" && browsingEnabled(task)) {
     try {
-      return await browse(task, request, signal, push);
+      return await browse(task, request, signal, push, privateTask);
     } catch (error) {
       if (signal.aborted) throw error;
       const msg = error instanceof Error ? error.message : String(error);
@@ -382,7 +405,7 @@ async function agentTurn(
       hive.log("browser", "error", msg, task.id);
     }
   }
-  return streamTurn(task, agent, messages, signal, push, override);
+  return streamTurn(task, agent, messages, signal, push, override, privateTask);
 }
 
 /** A board record for a delegated piece of work, shown under its parent card. */
@@ -419,6 +442,8 @@ async function runTask(task: Task) {
   task.controller = controller;
   task.startedAt = Date.now();
   task.attempts = (task.attempts ?? 0) + 1;
+  // Routine runs are read-only whatever the stored card says
+  if (isRoutine(task)) task.readOnly = true;
   const timeout = setTimeout(() => {
     task.abortReason = "timeout";
     controller.abort();
@@ -443,7 +468,7 @@ async function runTask(task: Task) {
   const canDelegate = useTeam && task.source !== "voice";
   // Eval runs stay out of the hive so they don't show up in other agents' context
   const log = (agent: string, event: string, summary: string) => {
-    if (useTeam) hive.log(agent, event, summary, task.id);
+    if (useTeam) hive.log(agent, event, hiveSummary(task, event, summary), task.id);
   };
   let openSub: Task | null = null;
 
@@ -509,6 +534,10 @@ async function runTask(task: Task) {
           h.task,
           controller.signal,
           push,
+          undefined,
+          // The lead wrote these instructions after seeing private material, so they may
+          // carry it: the teammate stays local unless it may send private context to the cloud
+          firstTurn.sawPrivate,
         );
         const output = turn.text;
         usedPrivate ||= turn.sawPrivate;
@@ -643,6 +672,9 @@ function createTask(input: unknown, extra: { chatId?: string } = {}): { task?: T
   if (queueIt && store.queuedCount() >= MAX_QUEUE) return { status: 429, error: `Queue is full (${MAX_QUEUE} tasks)` };
   const missing = d.dependsOn.filter((dep) => !tasks.has(dep));
   if (missing.length) return { status: 400, error: `Unknown dependency: ${missing.join(", ")}` };
+  // Routine runs are forced read-only and get exactly one destination
+  const routine = routineFields(d, { telegramChat: telegram ? [...TELEGRAM_ALLOWED][0] : undefined, vault: OBSIDIAN_VAULT || undefined });
+  if ("error" in routine) return { status: 400, error: routine.error };
   const now = Date.now();
   const requested = d.targetAgent;
   const task: Task = {
@@ -660,17 +692,19 @@ function createTask(input: unknown, extra: { chatId?: string } = {}): { task?: T
     priority: d.priority,
     dependsOn: d.dependsOn,
     needsReview: d.needsReview,
-    readOnly: d.readOnly || undefined,
+    readOnly: routine.readOnly || undefined,
+    deliverTo: routine.deliverTo,
     allowedSites: d.allowedSites.length ? d.allowedSites : undefined,
     position: now,
     createdAt: now,
     queuedAt: queueIt ? now : undefined,
     events: [],
-    chatId: extra.chatId,
+    chatId: extra.chatId ?? routine.chatId,
   };
 
   // Model switches answer at once and show up as a finished card
-  const switched = d.source !== "eval" ? handleSwitch(d.prompt) : null;
+  // A routine's prompt never changes model settings
+  const switched = d.source !== "eval" && d.source !== "routine" ? handleSwitch(d.prompt) : null;
   if (switched) {
     task.status = "complete";
     task.answer = switched;
@@ -736,6 +770,8 @@ function patchTask(task: Task, input: unknown): { error?: string } {
   const parsed = TaskPatchSchema.safeParse(input);
   if (!parsed.success) return { error: JSON.stringify(parsed.error.flatten()) };
   const p = parsed.data;
+  const locked = routinePatchError(task, p);
+  if (locked) return { error: locked };
   const editable = task.status === "backlog" || task.status === "queued";
   if (!editable && (p.prompt || p.targetAgent || p.dependsOn || p.column)) return { error: "Only cards in Backlog or Ready can be changed" };
   if (p.dependsOn) {
@@ -782,7 +818,22 @@ function patchTask(task: Task, input: unknown): { error?: string } {
 // --- Telegram ---------------------------------------------------------------
 let telegram: TelegramBot | null = null;
 
+/** Sends a finished routine run to its one destination. The card on the dashboard always has the result. */
+function deliverRoutine(task: Task) {
+  if (task.parentId) return;
+  try {
+    if (task.deliverTo === "telegram" && telegram && task.chatId) {
+      telegram.send(task.chatId, deliveryText(task)).catch((e) => hive.log("telegram", "error", String(e)));
+    } else if (task.deliverTo === "obsidian" && OBSIDIAN_VAULT && task.status === "complete" && task.answer) {
+      saveRoutineNote(OBSIDIAN_VAULT, task.title || "routine", task.answer);
+    }
+  } catch (error) {
+    hive.log("routine", "error", `delivery failed: ${error instanceof Error ? error.message : String(error)}`, task.id);
+  }
+}
+
 function notifyDone(task: Task) {
+  if (isRoutine(task)) return deliverRoutine(task);
   if (!telegram || task.source !== "telegram" || !task.chatId) return;
   const text =
     task.status === "complete"

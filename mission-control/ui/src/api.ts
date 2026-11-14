@@ -71,6 +71,7 @@ export interface BoardCard {
   waitingOn: string[];
   needsReview?: boolean;
   readOnly?: boolean;
+  deliverTo?: "dashboard" | "telegram" | "obsidian";
   allowedSites?: string[];
   usedPrivate?: boolean;
   interrupted?: boolean;

@@ -24,7 +24,11 @@ export const AgentStatusSchema = z.enum([
 ]);
 
 // Where a task came from; voice tasks get spoken-style answers and are read aloud
-export const TaskSourceSchema = z.enum(["ui", "voice", "api", "eval", "telegram"]);
+// "routine" cards are created by a schedule and always run read-only (see hq/routine.ts)
+export const TaskSourceSchema = z.enum(["ui", "voice", "api", "eval", "telegram", "routine"]);
+
+// Where a routine run's result goes
+export const DeliverySchema = z.enum(["dashboard", "telegram", "obsidian"]);
 
 export const PrioritySchema = z.enum(["low", "normal", "high"]);
 
@@ -55,6 +59,8 @@ export const AgentTaskSchema = z.object({
   // Read-only run: no typing or form submits, links only on allowedSites, no notes or memories saved
   readOnly: z.boolean().default(false),
   allowedSites: z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{1,253}$/)).max(10).default([]),
+  // Routine runs only: where the result is sent (default: the dashboard)
+  deliverTo: DeliverySchema.optional(),
 });
 
 export const TaskPatchSchema = z.object({
@@ -111,6 +117,7 @@ export const TaskSummarySchema = z.object({
   attempts: z.number().optional(),
   readOnly: z.boolean().optional(),
   allowedSites: z.array(z.string()).optional(),
+  deliverTo: DeliverySchema.optional(),
   // True when the answer was produced from private material (vault notes, memories)
   usedPrivate: z.boolean().optional(),
 });
