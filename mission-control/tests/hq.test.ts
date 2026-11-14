@@ -1,6 +1,7 @@
 // Unit tests for the HQ modules. No Ollama needed.   npm test
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { blockedReason } from "../src/hq/browser";
 import { StreamGuard, redact } from "../src/hq/guard";
 import { Hive } from "../src/hq/hive";
 import { Memory, similarity } from "../src/hq/memory";
@@ -133,4 +134,13 @@ test("telegram rejects strangers and queues allowed chats", async () => {
   assert.deepEqual(submitted[0], ["write a regex", "coder", "42"]);
   await bot.handle({ chat: { id: 42 }, text: "hello" });
   assert.equal(submitted[1][1], "auto");
+});
+
+test("browser guard blocks local and private addresses", async () => {
+  for (const url of ["http://127.0.0.1:3008/api/system", "http://192.168.4.90/", "http://10.0.0.1/", "http://localhost/", "http://[::1]/", "http://router.local/"]) {
+    assert.ok(await blockedReason(url), `${url} should be blocked`);
+  }
+  assert.match((await blockedReason("file:///etc/passwd"))!, /not allowed/);
+  assert.equal(await blockedReason("https://1.1.1.1/"), null);
+  assert.equal(await blockedReason("http://127.0.0.1:8765/", true), null);
 });

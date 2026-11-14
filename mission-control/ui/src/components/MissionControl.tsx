@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentStatus, RequestedAgent } from "../../../src/schemas/agent";
 import { HARNESS_URL, authHeaders } from "../config";
 import { TERMINAL, useAgentStream } from "../useAgentStream";
+import BrowserPane from "./BrowserPane";
+import PreviewPane from "./PreviewPane";
 
 interface SystemInfo {
   ollama: "up" | "down";
@@ -12,6 +14,7 @@ interface SystemInfo {
   fastModel?: string;
   telegram?: boolean;
   obsidian?: boolean;
+  browser?: boolean;
   memories?: number;
 }
 
@@ -33,6 +36,7 @@ interface MemoryItem {
 }
 
 type RightTab = "commands" | "hive" | "memory";
+type CenterTab = "output" | "preview" | "browser";
 
 const STATUS_STYLES: Record<AgentStatus, string> = {
   idle: "bg-slate-700 text-slate-200",
@@ -58,6 +62,7 @@ export default function MissionControl() {
   const [prompt, setPrompt] = useState("");
   const [targetAgent, setTargetAgent] = useState<RequestedAgent>("auto");
   const [rightTab, setRightTab] = useState<RightTab>("commands");
+  const [centerTab, setCenterTab] = useState<CenterTab>("output");
   const [hive, setHive] = useState<HiveEntry[]>([]);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [newMemory, setNewMemory] = useState("");
@@ -233,19 +238,46 @@ export default function MissionControl() {
       {/* CENTER: OUTPUT */}
       <main className="bg-slate-900 border border-slate-800 rounded-xl flex flex-col overflow-hidden min-h-0">
         <div className="flex items-center justify-between border-b border-slate-800 bg-slate-950/40 px-4 py-2 text-xs">
-          <span className="px-3 py-1 bg-blue-600 rounded text-white font-medium">Output Stream</span>
-          <label className="flex items-center gap-2 text-slate-400 cursor-pointer select-none">
-            <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} />
-            Auto-scroll
-          </label>
-        </div>
-        <div ref={outputRef} className="flex-1 p-6 overflow-y-auto font-mono text-sm leading-relaxed text-slate-300">
-          {selected ? (
-            <pre className="whitespace-pre-wrap break-words font-mono">{selected.output}</pre>
-          ) : (
-            <p className="text-slate-600 italic">// No active run. Dispatch a prompt to begin.</p>
+          <div className="flex gap-1">
+            {(
+              [
+                ["output", "Output Stream"],
+                ["preview", "Preview"],
+                ["browser", "Browser"],
+              ] as [CenterTab, string][]
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setCenterTab(key)}
+                className={`px-3 py-1 rounded font-medium ${centerTab === key ? "bg-blue-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {centerTab === "output" && (
+            <label className="flex items-center gap-2 text-slate-400 cursor-pointer select-none">
+              <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} />
+              Auto-scroll
+            </label>
           )}
         </div>
+        {centerTab === "output" && (
+          <div ref={outputRef} className="flex-1 p-6 overflow-y-auto font-mono text-sm leading-relaxed text-slate-300">
+            {selected ? (
+              <pre className="whitespace-pre-wrap break-words font-mono">{selected.output}</pre>
+            ) : (
+              <p className="text-slate-600 italic">// No active run. Dispatch a prompt to begin.</p>
+            )}
+          </div>
+        )}
+        {centerTab === "preview" && <PreviewPane output={selected?.output ?? ""} active={Boolean(selectedActive)} />}
+        <BrowserPane
+          baseUrl={HARNESS_URL}
+          enabled={Boolean(system?.browser)}
+          visible={centerTab === "browser"}
+          onStart={() => setCenterTab((tab) => (tab === "output" ? "browser" : tab))}
+        />
       </main>
 
       {/* RIGHT: TELEMETRY + DISPATCH */}
@@ -261,7 +293,7 @@ export default function MissionControl() {
             <button
               key={key}
               onClick={() => setRightTab(key)}
-              className={`px-3 py-1 rounded-md uppercase tracking-wider font-semibold ${
+              className={`px-2.5 py-1 rounded-md uppercase tracking-wider font-semibold whitespace-nowrap ${
                 rightTab === key ? "bg-cyan-700 text-white" : "text-slate-500 hover:text-slate-300"
               }`}
             >

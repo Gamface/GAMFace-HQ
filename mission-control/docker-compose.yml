@@ -24,6 +24,9 @@ services:
       TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS:-}
       # Uncomment with the vault volume below
       # OBSIDIAN_VAULT: /vault
+      # Real browsing for the browser agent (live view in the dashboard's Browser tab)
+      BROWSER_CDP_URL: http://browser:9222
+      BROWSER_MAX_STEPS: ${BROWSER_MAX_STEPS:-10}
     volumes:
       - .:/app
       # - /mnt/c/Users/aldra/Documents/ObsidianVault:/vault
@@ -36,6 +39,14 @@ services:
       timeout: 5s
       start_period: 60s
       retries: 3
+    restart: unless-stopped
+
+  # Headless Chrome for the browser agent. Not published to your machine: only
+  # the harness can reach it. The harness blocks pages from loading anything on
+  # localhost or your LAN.
+  browser:
+    image: chromedp/headless-shell:latest
+    shm_size: 1gb
     restart: unless-stopped
 
   ui:

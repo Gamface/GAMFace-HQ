@@ -11,6 +11,8 @@ import {
   TaskSummary,
   TERMINAL_STATUSES,
 } from "./schemas/agent";
+import { BrowserSession, Frame } from "./hq/browser";
+import { runBrowserAgent } from "./hq/browser-agent";
 import { StreamGuard, redact } from "./hq/guard";
 import { Hive } from "./hq/hive";
 import { Memory } from "./hq/memory";
@@ -56,6 +58,11 @@ const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
 const OBSIDIAN_VAULT = process.env.OBSIDIAN_VAULT || "";
 const MEMORY_INTERVAL_MIN = Number(process.env.MEMORY_INTERVAL_MIN) || 30;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+// Real browsing: a Chrome DevTools endpoint, e.g. http://browser:9222 (docker-compose.yml)
+const BROWSER_CDP_URL = process.env.BROWSER_CDP_URL || "";
+const BROWSER_MAX_STEPS = Number(process.env.BROWSER_MAX_STEPS) || 10;
+// Only for testing against pages on your own machine; keep false otherwise
+const BROWSER_ALLOW_PRIVATE = process.env.BROWSER_ALLOW_PRIVATE === "true";
 const TELEGRAM_ALLOWED = new Set(
   (process.env.TELEGRAM_ALLOWED_CHAT_IDS || "").split(",").map((s) => s.trim()).filter(Boolean),
 );
@@ -169,6 +176,50 @@ setInterval(() => {
   for (const client of sseClients) client.res.write(": ping\n\n");
 }, 15000);
 
+// --- Browser live view --------------------------------------------------------
+// Frames from the browser agent's Chrome go to the dashboard's Browser tab over
+// their own event stream, capped at ~5 frames a second.
+type BrowserEvent =
+  | { type: "frame"; taskId: string; data: string; url: string; title: string }
+  | { type: "start" | "end"; taskId: string; task?: string }
+  | { type: "action"; taskId: string; kind: string; line: string }
+  | { type: "blocked"; taskId: string; url: string; reason: string };
+const browserClients = new Set<Response>();
+let lastFrame: BrowserEvent | null = null;
+let lastFrameSentAt = 0;
+const browserLog: BrowserEvent[] = [];
+
+function broadcastBrowser(event: BrowserEvent) {
+  if (event.type === "frame") {
+    lastFrame = event;
+    const now = Date.now();
+    if (now - lastFrameSentAt < 200) return;
+    lastFrameSentAt = now;
+  } else {
+    browserLog.push(event);
+    if (browserLog.length > 60) browserLog.shift();
+  }
+  const line = `data: ${JSON.stringify(event)}\n\n`;
+  for (const res of browserClients) res.write(line);
+}
+
+function handleBrowserStream(req: Request, res: Response) {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+  res.write("retry: 3000\n\n");
+  for (const e of browserLog) res.write(`data: ${JSON.stringify(e)}\n\n`);
+  if (lastFrame) res.write(`data: ${JSON.stringify(lastFrame)}\n\n`);
+  browserClients.add(res);
+  req.on("close", () => browserClients.delete(res));
+}
+
+setInterval(() => {
+  for (const res of browserClients) res.write(": ping\n\n");
+}, 15000);
+
 // --- Ollama -----------------------------------------------------------------
 const thinkingSupport = new Map<string, boolean>();
 
@@ -264,6 +315,65 @@ function userMessage(agent: AgentTarget, text: string, recallFor: string, team: 
   return withLiveContext(text, { hive: hive.promptText(), memories: memory.recall(recallFor, agent) });
 }
 
+const browsingEnabled = (task: Task) => Boolean(BROWSER_CDP_URL) && task.source !== "eval";
+
+/** Drives the real browser for one request and returns the agent's answer. */
+async function browse(task: Task, request: string, signal: AbortSignal, push: (text: string) => void) {
+  const session = new BrowserSession({
+    allowPrivate: BROWSER_ALLOW_PRIVATE,
+    onFrame: (f: Frame) => broadcastBrowser({ type: "frame", taskId: task.id, ...f }),
+    onBlocked: (url, reason) => {
+      broadcastBrowser({ type: "blocked", taskId: task.id, url, reason });
+      hive.log("browser", "blocked", `${url} (${reason})`, task.id);
+    },
+  });
+  await session.start(BROWSER_CDP_URL);
+  broadcastBrowser({ type: "start", taskId: task.id, task: request });
+  emit(task, "executing_tool");
+  try {
+    const answer = await runBrowserAgent({
+      task: request,
+      session,
+      chat: jsonChat,
+      model: task.model,
+      maxSteps: BROWSER_MAX_STEPS,
+      signal,
+      extraRules: task.source === "voice" ? `When you answer: ${VOICE_STYLE}` : undefined,
+      log: (line, kind) => {
+        push(kind === "action" ? `🌐 ${line}\n` : `   ${kind === "error" ? "✗" : "✓"} ${line}\n`);
+        broadcastBrowser({ type: "action", taskId: task.id, kind, line });
+      },
+    });
+    push(`\n${redact(answer).text}`);
+    return answer;
+  } finally {
+    await session.close();
+    broadcastBrowser({ type: "end", taskId: task.id });
+  }
+}
+
+/** One agent's turn: the real browser for the browser agent when enabled, otherwise a model call. */
+async function agentTurn(
+  task: Task,
+  agent: AgentTarget,
+  messages: ChatMessage[],
+  request: string,
+  signal: AbortSignal,
+  push: (text: string) => void,
+): Promise<string> {
+  if (agent === "browser" && browsingEnabled(task)) {
+    try {
+      return await browse(task, request, signal, push);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      const msg = error instanceof Error ? error.message : String(error);
+      push(`\n[Browser unavailable (${msg}); answering without it.]\n\n`);
+      hive.log("browser", "error", msg, task.id);
+    }
+  }
+  return streamChat(task, messages, signal, push);
+}
+
 async function runTask(task: Task) {
   const controller = new AbortController();
   task.controller = controller;
@@ -309,12 +419,14 @@ async function runTask(task: Task) {
     const lead = task.targetAgent;
     const delegate = canDelegate && lead === "planner";
     emit(task, "thinking");
-    const first = await streamChat(
+    const first = await agentTurn(
       task,
+      lead,
       [
         { role: "system", content: systemPrompt(task, lead, { team: useTeam, delegate }) },
         { role: "user", content: userMessage(lead, task.prompt, task.prompt, useTeam) },
       ],
+      task.prompt,
       controller.signal,
       push,
     );
@@ -331,12 +443,14 @@ async function runTask(task: Task) {
         log("planner", "delegated", `→ ${h.agent}: ${h.task}`);
         emit(task, "delegating", `\n\n── ${TEAM[h.agent].name} ── ${h.task}\n\n`);
         emit(task, "thinking");
-        const output = await streamChat(
+        const output = await agentTurn(
           task,
+          h.agent,
           [
             { role: "system", content: systemPrompt(task, h.agent, { team: true, delegate: false }) },
             { role: "user", content: userMessage(h.agent, h.task, h.task, true) },
           ],
+          h.task,
           controller.signal,
           push,
         );
@@ -539,6 +653,7 @@ app.get("/api/system", async (_req: Request, res: Response) => {
     fastModel: OLLAMA_FAST_MODEL,
     telegram: Boolean(telegram),
     obsidian: Boolean(OBSIDIAN_VAULT),
+    browser: Boolean(BROWSER_CDP_URL),
     memories: memory.list().length,
   };
   try {
@@ -556,6 +671,7 @@ app.get("/api/system", async (_req: Request, res: Response) => {
 });
 
 app.get("/api/agent/stream", handleStream);
+app.get("/api/browser/stream", handleBrowserStream);
 app.post("/api/agent/run", requireToken, (req, res) => enqueue(req.body, res));
 app.post("/api/agent/:id/cancel", requireToken, (req, res) => cancel(String(req.params.id), res));
 
