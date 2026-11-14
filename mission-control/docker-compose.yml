@@ -1,0 +1,49 @@
+# Mission Control: harness + UI. Inference runs on native Windows Ollama
+# (GPU, port 11435), reached from containers via host.docker.internal.
+#   docker compose up -d     then open http://localhost:5173
+name: mission-control
+
+services:
+  harness:
+    image: node:22-bookworm-slim
+    working_dir: /app
+    user: "1000:1000"
+    command: sh -c "npm install --no-audit --no-fund && npm run dev"
+    environment:
+      HOME: /tmp
+      HOST: 0.0.0.0
+      PORT: 3008
+      OLLAMA_BASE_URL: http://host.docker.internal:11435
+      OLLAMA_MODEL: qwen3:14b
+      OLLAMA_NUM_CTX: 8192
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    volumes:
+      - .:/app
+    # Published on localhost only; port 3008 is taken by jarvis-harness
+    ports:
+      - "127.0.0.1:3010:3008"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3008/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    restart: unless-stopped
+
+  ui:
+    image: node:22-bookworm-slim
+    working_dir: /app/ui
+    user: "1000:1000"
+    command: sh -c "npm install --no-audit --no-fund && npx vite --host 0.0.0.0 --port 5173"
+    environment:
+      HOME: /tmp
+      VITE_HARNESS_URL: http://localhost:3010
+      VITE_POLL: "true"
+    volumes:
+      - .:/app
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      harness:
+        condition: service_healthy
+    restart: unless-stopped
