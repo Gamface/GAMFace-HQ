@@ -1,5 +1,7 @@
 import { useState } from "react";
-import { AGENT_LABELS, BoardCard, send } from "../api";
+import type { ReactNode } from "react";
+import { AGENT_LABELS, send } from "../api";
+import type { BoardCard } from "../api";
 
 // Form for a new card (also reused for editing a card in Backlog or Ready).
 
@@ -29,7 +31,7 @@ export function CardForm({
   submitLabel: string;
   onSubmit: (f: CardFields) => Promise<void>;
   onCancel: () => void;
-  extra?: React.ReactNode;
+  extra?: ReactNode;
 }) {
   const [f, setF] = useState<CardFields>(initial);
   const [busy, setBusy] = useState(false);

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { AGENT_COLORS, AGENT_LABELS, BoardCard, getJson, send, splitModel } from "../api";
+import { AGENT_COLORS, AGENT_LABELS, getJson, send, splitModel } from "../api";
+import type { BoardCard } from "../api";
 import { CardForm } from "./NewCardDialog";
 import PreviewPane from "./PreviewPane";
 

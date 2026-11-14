@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { AGENT_COLORS, AGENT_LABELS, Board as BoardData, BoardCard, getJson, send, splitModel } from "../api";
+import { AGENT_COLORS, AGENT_LABELS, getJson, send, splitModel } from "../api";
+import type { Board as BoardData, BoardCard } from "../api";
 import CardDrawer from "./CardDrawer";
 import NewCardDialog from "./NewCardDialog";
 
