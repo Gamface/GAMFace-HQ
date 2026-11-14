@@ -109,6 +109,7 @@ export interface BoardCard {
   usedPrivate?: boolean;
   images?: string[];
   audio?: string[];
+  replies?: number;
   interrupted?: boolean;
   attempts?: number;
   position?: number;

@@ -71,6 +71,29 @@ export const AgentTaskSchema = z.object({
   audio: z.array(AudioIdSchema).max(4).default([]),
 });
 
+/** A reply to a finished card: the same agent continues the conversation. */
+export const TaskReplySchema = z.object({
+  message: z.string().trim().min(1).max(20000),
+  images: z.array(ImageIdSchema).max(6).default([]),
+  audio: z.array(AudioIdSchema).max(4).default([]),
+  // "same" keeps the agent that answered; "auto" routes the reply again
+  targetAgent: z.union([z.literal("same"), RequestedAgentSchema]).default("same"),
+});
+
+/** One finished turn of a card's conversation. */
+export const ThreadTurnSchema = z.object({
+  role: z.enum(["user", "agent"]),
+  text: z.string(),
+  agent: AgentTargetSchema.optional(),
+  // The turn came from (or was answered with) private material
+  private: z.boolean().optional(),
+  images: z.array(z.string()).optional(),
+  audio: z.array(z.string()).optional(),
+  // What the agent learned from attachments (transcripts, picture descriptions); private
+  notes: z.string().optional(),
+  at: z.number(),
+});
+
 export const TaskPatchSchema = z.object({
   title: z.string().trim().max(200).optional(),
   prompt: z.string().trim().min(1).max(20000).optional(),
@@ -132,6 +155,12 @@ export const TaskSummarySchema = z.object({
   audio: z.array(z.string()).optional(),
   // True when the answer was produced from private material (vault notes, memories, pictures)
   usedPrivate: z.boolean().optional(),
+  // Earlier turns, when the card has been replied to; the current round is reply ?? prompt
+  thread: z.array(ThreadTurnSchema).optional(),
+  // The user's latest reply, which the current run answers
+  reply: z.string().optional(),
+  // How many times the card has been replied to (lists send this instead of the thread)
+  replies: z.number().optional(),
 });
 
 export type AgentTarget = z.infer<typeof AgentTargetSchema>;
@@ -142,6 +171,8 @@ export type Priority = z.infer<typeof PrioritySchema>;
 export type BoardColumn = z.infer<typeof BoardColumnSchema>;
 export type AgentTask = z.infer<typeof AgentTaskSchema>;
 export type TaskPatch = z.infer<typeof TaskPatchSchema>;
+export type TaskReply = z.infer<typeof TaskReplySchema>;
+export type ThreadTurn = z.infer<typeof ThreadTurnSchema>;
 export type AgentStreamPayload = z.infer<typeof AgentStreamPayloadSchema>;
 export type TaskSummary = z.infer<typeof TaskSummarySchema>;
 

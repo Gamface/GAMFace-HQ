@@ -128,6 +128,25 @@ Console box: pick them, drag them in, or paste a screenshot straight into the te
 API: `POST /api/uploads` with `{ "data": "<base64 or data: URL>" }` returns `{ id }`; pass
 ids in a card's `images`. `GET /api/uploads/:id` returns the picture.
 
+## Replying to cards
+
+When a card finishes (Done, Review or Failed), a **Reply** box sits under its output, in the
+card drawer and in the Console. Type an answer (Ctrl+Enter), optionally attach pictures or
+audio, and the card runs again with the conversation so far:
+- The agent gets the earlier turns as chat history (the last 12, up to 4,000 characters
+  each) and your reply as the new message. The output keeps growing under
+  `── You replied ──` headers, and cards show 💬 with the number of replies.
+- **To** picks who answers: the same agent (default), Auto-route, or any agent. The browser
+  agent also gets the original request, since it works from one instruction.
+- Earlier answers that used private material (vault notes, memories, pictures, audio
+  transcripts) stay private: if the reply runs on a cloud model, those turns are withheld,
+  and your own words still go.
+- You can't reply while a card is running; cancel it first. **Run again** re-runs the
+  latest round.
+
+API: `POST /api/tasks/:id/reply` with `{ "message": "…", "images": [], "audio": [],
+"targetAgent": "same" }`. `GET /api/tasks/:id` returns the conversation as `thread`.
+
 ## Audio
 
 Attach audio to a new card or the Console box: pick or drop a file (MP3, M4A, WAV, OGG,

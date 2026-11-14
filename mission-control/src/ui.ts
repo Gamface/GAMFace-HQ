@@ -9,6 +9,7 @@ import {
   AgentTarget,
   AgentTaskSchema,
   TaskPatchSchema,
+  TaskReplySchema,
   TaskSummary,
   TERMINAL_STATUSES,
   boardColumn,
@@ -43,6 +44,7 @@ import { TelegramBot } from "./hq/telegram";
 import { privateBlock } from "./hq/privacy";
 import { Uploads } from "./hq/uploads";
 import { splitWav } from "./hq/wav";
+import { closeRound, historyMessages } from "./hq/thread";
 
 // --- Config (env vars, see .env.example) ------------------------------------
 const PORT = Number(process.env.PORT) || 3008;
@@ -137,8 +139,9 @@ function requireToken(req: Request, res: Response, next: NextFunction) {
 }
 
 function summarize(task: Task): TaskSummary {
-  const { events, controller, abortReason, requestedAgent, activeAgent, chatId, answer, queuedAt, modelOverride, ...summary } = task;
-  return summary;
+  const { events, controller, abortReason, requestedAgent, activeAgent, chatId, answer, queuedAt, modelOverride, privateNotes, thread, ...summary } = task;
+  // Lists only need how many replies a card has; the detail view sends the thread itself
+  return thread?.length ? { ...summary, replies: thread.length / 2 } : summary;
 }
 
 function agentLabel(task: Task) {
@@ -345,7 +348,7 @@ const browsingEnabled = (task: Task) => Boolean(BROWSER_CDP_URL) && task.source 
 function readOnlySites(task: Task): string[] {
   const named = task.allowedSites?.length
     ? task.allowedSites
-    : [...task.prompt.matchAll(/https?:\/\/([a-z0-9.-]+)/gi)].map((m) => m[1].toLowerCase().replace(/^www\./, ""));
+    : [...`${task.prompt} ${task.reply ?? ""}`.matchAll(/https?:\/\/([a-z0-9.-]+)/gi)].map((m) => m[1].toLowerCase().replace(/^www\./, ""));
   return [...new Set([...named, "html.duckduckgo.com"])];
 }
 
@@ -490,6 +493,12 @@ async function runTask(task: Task) {
   let openSub: Task | null = null;
 
   try {
+    // A reply to a finished card continues its conversation: the current round answers
+    // the reply, with the earlier turns as history
+    const ask = task.reply ?? task.prompt;
+    const history = historyMessages(task.thread);
+    const followUp = history.length > 0;
+    const learned: string[] = [];
     const images = (task.images ?? []).map((id) => uploads.base64(id)).filter((b): b is string => Boolean(b));
 
     // Audio is transcribed first. The transcript is private, like the audio itself.
@@ -517,6 +526,7 @@ async function runTask(task: Task) {
       push(`${transcript}\n\n`);
       flush();
       heardPrivate = true;
+      learned.push(`Transcript of the attached audio:\n${transcript}`);
       transcriptBlock = privateBlock(
         `TRANSCRIPT OF THE ATTACHED AUDIO:\n${transcript}`,
         "(The attached audio and its transcript stay on the user's PC and are withheld from cloud models.)",
@@ -527,19 +537,20 @@ async function runTask(task: Task) {
       // Pictures go to the agent that can see them
       task.targetAgent = "vision";
       task.routedBy = "router";
-      log("router", "routed", `→ vision (pictures attached): ${task.prompt}`);
+      log("router", "routed", `→ vision (pictures attached): ${ask}`);
     } else if (task.requestedAgent === "auto") {
       emit(task, "routing");
       // Route on what was said too; the router's text limit can't cut a private block open
+      const routeAsk = followUp ? `Follow-up to: ${task.prompt.slice(0, 300)}\nReply: ${ask}` : ask;
       const routeText = transcript
-        ? `${task.prompt.slice(0, 1100)}\n\n${privateBlock(`AUDIO TRANSCRIPT: ${transcript.slice(0, 600)}`, "(audio is attached)")}`
-        : task.prompt;
+        ? `${routeAsk.slice(0, 1100)}\n\n${privateBlock(`AUDIO TRANSCRIPT: ${transcript.slice(0, 600)}`, "(audio is attached)")}`
+        : routeAsk;
       const routed = await routeTask(roleJson("router"), "router", routeText);
       task.targetAgent = routed.agent;
       task.routedBy = routed.reason === "keyword match" ? "keywords" : "router";
-      log("router", "routed", `→ ${routed.agent} (${routed.reason}): ${task.prompt}`);
+      log("router", "routed", `→ ${routed.agent} (${routed.reason}): ${ask}`);
     } else {
-      log(task.targetAgent, "assigned", task.prompt);
+      log(task.targetAgent, "assigned", ask);
     }
 
     const lead = task.targetAgent;
@@ -552,9 +563,9 @@ async function runTask(task: Task) {
 
     // Only the vision agent can see pictures. When another agent leads, Vision reads
     // them first and the lead gets its description, which is private like the pictures.
-    let request = transcriptBlock ? `${task.prompt}\n\n${transcriptBlock}` : task.prompt;
+    let request = transcriptBlock ? `${ask}\n\n${transcriptBlock}` : ask;
     if (images.length && lead !== "vision") {
-      openSub = addSubtask(task, "vision", `Describe the ${images.length} attached picture(s) for: ${task.prompt}`);
+      openSub = addSubtask(task, "vision", `Describe the ${images.length} attached picture(s) for: ${ask}`);
       task.activeAgent = "vision";
       emit(task, "delegating", `── ${TEAM.vision.name} (${openSub.model}) ── reading ${images.length} picture(s)\n\n`);
       emit(task, "thinking");
@@ -576,6 +587,7 @@ async function runTask(task: Task) {
       finishSubtask(openSub, "complete", seen.text);
       openSub = null;
       usedPrivate ||= seen.sawPrivate;
+      learned.push(`Description of the attached pictures:\n${seen.text}`);
       task.activeAgent = lead;
       flush();
       emit(task, "thinking", `\n\n── ${TEAM[lead].name} ──\n\n`);
@@ -592,13 +604,15 @@ async function runTask(task: Task) {
       lead,
       [
         { role: "system", content: systemPrompt(task, lead, { team: useTeam, delegate }) },
+        ...history,
         {
           role: "user",
-          content: userMessage(lead, request, task.prompt, useTeam),
+          content: userMessage(lead, request, ask, useTeam),
           ...(lead === "vision" && images.length ? { images } : {}),
         },
       ],
-      task.prompt,
+      // The browser agent works from this text alone, so a reply carries the original request
+      followUp ? `${ask}\n\n(This follows up on the earlier request: ${task.prompt.slice(0, 500)})` : ask,
       controller.signal,
       push,
       override,
@@ -661,7 +675,8 @@ async function runTask(task: Task) {
         lead,
         [
           { role: "system", content: systemPrompt(task, lead, { team: true, delegate: false }) },
-          { role: "user", content: userMessage(lead, synthesisPrompt(task.prompt, results), task.prompt, true) },
+          ...history,
+          { role: "user", content: userMessage(lead, synthesisPrompt(ask, results), ask, true) },
         ],
         controller.signal,
         push,
@@ -672,6 +687,7 @@ async function runTask(task: Task) {
     }
 
     task.usedPrivate = usedPrivate || undefined;
+    task.privateNotes = learned.join("\n\n") || undefined;
     // Read-only runs don't write to the vault
     const notes = task.readOnly ? [] : saveNotes(OBSIDIAN_VAULT, redact(answer).text);
     if (notes.length) push(`\n\n(Saved to vault: ${notes.map((n) => path.basename(n)).join(", ")})`);
@@ -679,7 +695,7 @@ async function runTask(task: Task) {
     task.answer = redact(answer.replace(/<note title="[^"]*">[\s\S]*?<\/note>/g, "")).text.trim();
     log(lead, "complete", task.answer);
     // Read-only runs don't save memories either
-    if (useTeam && !task.readOnly && task.answer) memoryJobs.push({ agent: lead, prompt: task.prompt, answer: task.answer, private: usedPrivate });
+    if (useTeam && !task.readOnly && task.answer) memoryJobs.push({ agent: lead, prompt: ask, answer: task.answer, private: usedPrivate });
     emit(task, "complete");
   } catch (error: unknown) {
     flush();
@@ -875,6 +891,47 @@ function retry(task: Task): string | null {
   return null;
 }
 
+/** Answers a finished card: the round so far joins its history and the card runs again on the reply. */
+function replyTo(task: Task, input: unknown): string | null {
+  const parsed = TaskReplySchema.safeParse(input);
+  if (!parsed.success) return JSON.stringify(parsed.error.flatten());
+  const r = parsed.data;
+  if (!TERMINAL_STATUSES.includes(task.status)) return "Wait for the card to finish before replying";
+  if (task.source === "eval") return "Eval runs can't be replied to";
+  if (store.queuedCount() >= MAX_QUEUE) return `Queue is full (${MAX_QUEUE} tasks)`;
+  if ([...r.images, ...r.audio].some((id) => !uploads.exists(id))) return "Unknown attachment: upload it with POST /api/uploads first";
+  const now = Date.now();
+  task.thread = closeRound(task, now);
+  task.reply = r.message;
+  task.images = r.images.length ? r.images : undefined;
+  task.audio = r.audio.length ? r.audio : undefined;
+  task.privateNotes = undefined;
+  if (r.targetAgent === "auto") {
+    task.requestedAgent = "auto";
+    task.routedBy = undefined;
+  } else if (r.targetAgent !== "same") {
+    task.requestedAgent = r.targetAgent;
+    task.targetAgent = r.targetAgent;
+    task.routedBy = "user";
+  } else {
+    // Keep talking to whoever answered
+    task.requestedAgent = task.targetAgent;
+  }
+  Object.assign(task, {
+    error: undefined,
+    interrupted: undefined,
+    answer: undefined,
+    delegatedTo: undefined,
+    acceptedAt: undefined,
+    finishedAt: undefined,
+    startedAt: undefined,
+    queuedAt: now,
+  });
+  emit(task, "queued", `\n\n── You replied ──\n> ${r.message}\n\n`);
+  void pump();
+  return null;
+}
+
 function patchTask(task: Task, input: unknown): { error?: string } {
   const parsed = TaskPatchSchema.safeParse(input);
   if (!parsed.success) return { error: JSON.stringify(parsed.error.flatten()) };
@@ -1035,6 +1092,7 @@ app.get("/api/tasks/:id", (req: Request, res: Response) => {
   res.json({
     ...summarize(task),
     answer: task.answer,
+    thread: task.thread,
     plannedModel: plannedModel(task),
     waitingOn: waitingOn(task, tasks),
     subtasks: store.children(task.id).map((s) => ({ ...summarize(s), answer: s.answer })),
@@ -1079,6 +1137,14 @@ app.post("/api/tasks/:id/retry", requireToken, (req, res) => {
   const task = tasks.get(String(req.params.id));
   if (!task || task.parentId) return res.status(404).json({ error: "Task not found" });
   const err = retry(task);
+  if (err) return res.status(400).json({ error: err });
+  res.json(summarize(task));
+});
+
+app.post("/api/tasks/:id/reply", requireToken, (req, res) => {
+  const task = tasks.get(String(req.params.id));
+  if (!task || task.parentId) return res.status(404).json({ error: "Task not found" });
+  const err = replyTo(task, req.body);
   if (err) return res.status(400).json({ error: err });
   res.json(summarize(task));
 });

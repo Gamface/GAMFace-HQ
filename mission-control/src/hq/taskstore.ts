@@ -20,6 +20,8 @@ export interface Task extends TaskSummary {
   queuedAt?: number;
   // A model chosen for this task only; otherwise the agent's own model is used
   modelOverride?: string;
+  // Transcripts and picture descriptions from this round, kept for the conversation history (private)
+  privateNotes?: string;
 }
 
 // Fields kept only in memory

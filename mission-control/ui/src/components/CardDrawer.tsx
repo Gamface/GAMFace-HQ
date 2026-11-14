@@ -3,6 +3,7 @@ import { AGENT_COLORS, AGENT_LABELS, getJson, imageUrl, send, splitModel, upload
 import type { BoardCard } from "../api";
 import { CardForm } from "./NewCardDialog";
 import PreviewPane from "./PreviewPane";
+import ReplyBox from "./ReplyBox";
 
 // Side panel for one card: what it is, where it stands, its handoffs and output,
 // and the actions that make sense for its column.
@@ -25,6 +26,8 @@ interface Detail {
   usedPrivate?: boolean;
   images?: string[];
   audio?: string[];
+  thread?: { role: "user" | "agent"; text: string }[];
+  reply?: string;
   acceptedAt?: number;
   interrupted?: boolean;
   attempts?: number;
@@ -112,6 +115,11 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
                 {d.model || d.plannedModel || "model chosen when routed"}
               </span>
               {d.priority && d.priority !== "normal" && <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 uppercase">{d.priority}</span>}
+              {(d.thread?.length ?? 0) > 0 && (
+                <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300" title="Replies in this conversation">
+                  💬 {d.thread!.length / 2} {d.thread!.length / 2 === 1 ? "reply" : "replies"}
+                </span>
+              )}
               {(d.attempts ?? 0) > 1 && <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-400">attempt {d.attempts}</span>}
               {d.readOnly && (
                 <span className="px-2 py-0.5 rounded bg-sky-900/70 text-sky-200" title={`May open: ${(d.allowedSites ?? []).join(", ") || "sites named in the task"}`}>
@@ -254,6 +262,7 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
                   <PreviewPane output={output} active={RUNNING.includes(d.status)} />
                 </div>
               )}
+              {(col === "done" || col === "review" || col === "failed") && <ReplyBox taskId={id} agent={d.targetAgent} onSent={onChanged} />}
             </div>
           )
         )}

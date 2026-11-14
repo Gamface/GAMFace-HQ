@@ -7,6 +7,7 @@ import NoticesBar from "./NoticesBar";
 import BrowserPane from "./BrowserPane";
 import ImageAttach, { imageFiles, useImageUploads } from "./ImageAttach";
 import AudioAttach, { useAudioUploads } from "./AudioAttach";
+import ReplyBox from "./ReplyBox";
 import PreviewPane from "./PreviewPane";
 import TeamPage from "./TeamPage";
 
@@ -329,6 +330,9 @@ export default function MissionControl() {
               <p className="text-slate-600 italic">// No active run. Dispatch a prompt to begin.</p>
             )}
           </div>
+        )}
+        {centerTab === "output" && selected && !selectedActive && selected.source !== "eval" && (
+          <ReplyBox taskId={selected.id} agent={selected.agent} compact />
         )}
         {centerTab === "preview" && <PreviewPane output={selected?.output ?? ""} active={Boolean(selectedActive)} />}
         <BrowserPane
