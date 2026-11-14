@@ -197,6 +197,7 @@ function Card({
         {c.needsReview && <span className="px-1.5 py-0.5 rounded bg-fuchsia-900/70 text-fuchsia-200">review</span>}
         {c.readOnly && <span className="px-1.5 py-0.5 rounded bg-sky-900/70 text-sky-200" title="Read-only run">👁 read-only</span>}
         {c.usedPrivate && <span title="Used your private notes, memories or pictures">🔒</span>}
+        {c.audio && c.audio.length > 0 && <span title={`${c.audio.length} audio clip(s) attached`}>🎧{c.audio.length > 1 ? c.audio.length : ""}</span>}
         {c.images && c.images.length > 0 && <span title={`${c.images.length} picture(s) attached`}>🖼{c.images.length > 1 ? c.images.length : ""}</span>}
         {c.source === "telegram" && <span title="From Telegram">✈</span>}
         {c.source === "routine" && <span title={`Routine run: always read-only. Result goes to: ${c.deliverTo ?? "dashboard"}`}>⏱</span>}

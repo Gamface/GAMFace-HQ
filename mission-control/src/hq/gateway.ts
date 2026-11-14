@@ -2,7 +2,7 @@ import type { ModelRegistry, ModelRole, Resolved } from "./models";
 import type { Notices } from "./notices";
 import type { ChatMessage } from "./ollama";
 import { resolvePrivate } from "./privacy";
-import { chatOnce, chatStream, supportsVision } from "./providers";
+import { chatOnce, chatStream, supportsAudio, supportsVision, transcribe } from "./providers";
 import type { TaskStore } from "./taskstore";
 
 // The one place model requests leave Mission Control. Every call (agent turns,
@@ -40,7 +40,7 @@ export interface Prepared {
   notes: string[];
 }
 
-const LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", vision: "Vision", router: "Router", memory: "Memory" };
+const LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", vision: "Vision", router: "Router", memory: "Memory", audio: "Transcriber" };
 const MARKERS = /[⟦⟧]/;
 
 /** Dollars, with enough decimals to be useful for small caps. */
@@ -231,6 +231,63 @@ export class ModelGateway {
       const fb = this.models.resolveFallback(role);
       if (!fb || fb.ref === primary.ref) throw error;
       onNote(`${primary.ref} failed (${error instanceof Error ? error.message : error}); used ${fb.ref}.`);
+      return attempt(fb);
+    }
+  }
+
+  /**
+   * Turns WAV audio into text for the Transcriber role. Audio is private like
+   * pictures: it reaches a cloud provider only if that role may send private
+   * context, and never while a spend cap applies (audio spend can't be measured
+   * in tokens). The fallback model goes through the same rules.
+   */
+  async transcribe(wav: Buffer, signal: AbortSignal | undefined, onNote: (note: string) => void = () => {}): Promise<{ text: string; ref: string }> {
+    const role: ModelRole = "audio";
+    const attempt = async (candidate: Resolved) => {
+      const notes: string[] = [];
+      let r = candidate;
+      if (!r.provider.local && r.settings.localOnly) {
+        const local = this.models.localFor(role);
+        notes.push(`Transcriber is local only, so it used ${local.ref} instead of ${r.ref}.`);
+        r = local;
+      }
+      if (!r.provider.local && !r.settings.allowPrivateToCloud) {
+        const local = this.models.localFor(role);
+        notes.push(`Audio stays on your PC, so the Transcriber used ${local.ref} instead of ${r.ref}.`);
+        r = local;
+      }
+      if (!r.provider.local) {
+        const settings = this.models.settings();
+        if (r.settings.monthlyBudgetUsd !== undefined || settings.monthlyBudgetUsd !== undefined) {
+          const local = this.models.localFor(role);
+          notes.push(`A spend cap is set and audio spend can't be measured, so the Transcriber used ${local.ref} instead of ${r.ref}.`);
+          r = local;
+        }
+      }
+      for (const n of notes) {
+        onNote(n);
+        this.notices.add("local-only", `audio:${n.slice(0, 60)}`, n);
+      }
+      if (!(await supportsAudio(r.provider, r.model))) {
+        throw new Error(`${r.ref} can't take audio. On the Team page, give the Transcriber an audio model (for example ollama/gemma4:12b) or a Whisper server.`);
+      }
+      try {
+        const text = await transcribe(r.provider, r.model, wav, signal);
+        this.store.recordUsage(role, r.ref, 0, 0);
+        this.onServed(r.ref);
+        return { text, ref: r.ref };
+      } catch (error) {
+        if (!signal?.aborted) this.store.recordUsage(role, r.ref, 0, 0, true);
+        throw error;
+      }
+    };
+    const primary = this.models.resolve(role);
+    try {
+      return await attempt(primary);
+    } catch (error) {
+      const fb = this.models.resolveFallback(role);
+      if (signal?.aborted || !fb || fb.ref === primary.ref) throw error;
+      onNote(`${primary.ref} failed (${error instanceof Error ? error.message.slice(0, 120) : error}); switching to ${fb.ref}.`);
       return attempt(fb);
     }
   }

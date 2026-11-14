@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AGENT_COLORS, AGENT_LABELS, getJson, imageUrl, send, splitModel } from "../api";
+import { AGENT_COLORS, AGENT_LABELS, getJson, imageUrl, send, splitModel, uploadUrl } from "../api";
 import type { BoardCard } from "../api";
 import { CardForm } from "./NewCardDialog";
 import PreviewPane from "./PreviewPane";
@@ -24,6 +24,7 @@ interface Detail {
   allowedSites?: string[];
   usedPrivate?: boolean;
   images?: string[];
+  audio?: string[];
   acceptedAt?: number;
   interrupted?: boolean;
   attempts?: number;
@@ -126,6 +127,16 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
             </div>
           )}
           {d && d.waitingOn.length > 0 && <p className="mt-2 text-xs text-amber-300">⏳ Waiting on: {d.waitingOn.map(titleOf).join(", ")}</p>}
+          {d?.audio && d.audio.length > 0 && (
+            <div className="flex flex-col gap-1">
+              {d.audio.map((id, i) => (
+                <div key={id} className="flex items-center gap-2">
+                  <span className="text-[11px] text-slate-400">🎧 clip {i + 1}</span>
+                  <audio src={uploadUrl(id)} controls preload="none" className="h-7 w-64" />
+                </div>
+              ))}
+            </div>
+          )}
           {d?.images && d.images.length > 0 && (
             <div className="flex flex-wrap gap-2 mt-3">
               {d.images.map((id) => (
@@ -191,6 +202,7 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
                 readOnly: Boolean(d.readOnly),
                 allowedSites: d.allowedSites ?? [],
                 images: d.images ?? [],
+                audio: d.audio ?? [],
               }}
               cards={cards}
               selfId={id}

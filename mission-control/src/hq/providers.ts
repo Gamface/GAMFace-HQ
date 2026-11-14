@@ -122,6 +122,43 @@ export async function supportsVision(p: Provider, model: string): Promise<boolea
   }
 }
 
+// --- Audio ---------------------------------------------------------------------------
+const audioSupport = new Map<string, boolean>();
+
+/** Whether a model can take audio. Ollama reports it; OpenAI-compatible servers are assumed able. */
+export async function supportsAudio(p: Provider, model: string): Promise<boolean> {
+  if (p.kind !== "ollama") return true;
+  const key = `${p.baseUrl}|${model}`;
+  if (audioSupport.has(key)) return audioSupport.get(key)!;
+  try {
+    const res = await fetch(`${p.baseUrl}/api/show`, { method: "POST", headers: headers(p), body: JSON.stringify({ model }), signal: AbortSignal.timeout(5000) });
+    const info = (await res.json()) as { capabilities?: string[] };
+    const ok = Boolean(info.capabilities?.includes("audio"));
+    audioSupport.set(key, ok);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Speech to text through the OpenAI-style /audio/transcriptions endpoint, which
+ * Ollama serves under /v1 for audio models (gemma4) and Whisper servers serve too.
+ */
+export async function transcribe(p: Provider, model: string, wav: Buffer, signal?: AbortSignal): Promise<string> {
+  const url = p.kind === "ollama" ? `${p.baseUrl}/v1/audio/transcriptions` : `${p.baseUrl}/audio/transcriptions`;
+  const form = new FormData();
+  form.append("file", new Blob([new Uint8Array(wav)], { type: "audio/wav" }), "audio.wav");
+  form.append("model", model);
+  form.append("response_format", "json");
+  const h = headers(p);
+  delete h["Content-Type"]; // fetch sets the multipart boundary
+  const res = await fetch(url, { method: "POST", headers: h, body: form, signal: signal ?? AbortSignal.timeout(180000) });
+  if (!res.ok) throw new Error(`${p.name} transcription HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const data = (await res.json()) as { text?: string };
+  return (data.text ?? "").trim();
+}
+
 // --- Ollama --------------------------------------------------------------------------
 const thinkingSupport = new Map<string, boolean>();
 

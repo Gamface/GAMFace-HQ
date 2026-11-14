@@ -4,6 +4,8 @@ import { z } from "zod";
 // file is the single source of truth for task and event shapes.
 
 export const AgentTargetSchema = z.enum(["planner", "browser", "coder", "file", "security_audit", "vision"]);
+// An attached audio clip (WAV), by its upload id
+export const AudioIdSchema = z.string().regex(/^[a-f0-9]{64}\.wav$/);
 // What a client may ask for: a specific agent, or "auto" to let the router pick
 export const RequestedAgentSchema = z.enum(["auto", "planner", "browser", "coder", "file", "security_audit", "vision"]);
 // An attached picture, by its upload id (see hq/uploads.ts)
@@ -65,6 +67,8 @@ export const AgentTaskSchema = z.object({
   deliverTo: DeliverySchema.optional(),
   // Pictures for the vision agent to look at
   images: z.array(ImageIdSchema).max(6).default([]),
+  // Audio clips, transcribed before the agent starts
+  audio: z.array(AudioIdSchema).max(4).default([]),
 });
 
 export const TaskPatchSchema = z.object({
@@ -80,6 +84,7 @@ export const TaskPatchSchema = z.object({
   readOnly: z.boolean().optional(),
   allowedSites: z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{1,253}$/)).max(10).optional(),
   images: z.array(ImageIdSchema).max(6).optional(),
+  audio: z.array(AudioIdSchema).max(4).optional(),
 });
 
 export const AgentStreamPayloadSchema = z.object({
@@ -124,6 +129,7 @@ export const TaskSummarySchema = z.object({
   allowedSites: z.array(z.string()).optional(),
   deliverTo: DeliverySchema.optional(),
   images: z.array(z.string()).optional(),
+  audio: z.array(z.string()).optional(),
   // True when the answer was produced from private material (vault notes, memories, pictures)
   usedPrivate: z.boolean().optional(),
 });

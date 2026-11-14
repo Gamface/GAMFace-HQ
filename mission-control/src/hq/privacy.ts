@@ -31,9 +31,16 @@ export function hasPrivate(text: string): boolean {
 /** Resolves every block: full text when allowed, the public stand-in otherwise. Always strips stray markers. */
 export function resolvePrivate(text: string, allowPrivate: boolean): { text: string; hadPrivate: boolean } {
   let hadPrivate = false;
-  const out = text.replace(BLOCK, (_m, full: string, pub: string) => {
+  let out = text.replace(BLOCK, (_m, full: string, pub: string) => {
     hadPrivate = true;
     return allowPrivate ? full : pub;
   });
+  // A block that was cut off (its end marker lost to truncation) is still private:
+  // without permission, everything from its start is withheld.
+  const cut = out.indexOf(OPEN);
+  if (cut >= 0) {
+    hadPrivate = true;
+    if (!allowPrivate) out = `${out.slice(0, cut)} (private content withheld)`;
+  }
   return { text: out.replace(MARKER_CHARS, ""), hadPrivate };
 }

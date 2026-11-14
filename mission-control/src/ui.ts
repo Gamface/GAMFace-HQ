@@ -42,6 +42,7 @@ import {
 import { TelegramBot } from "./hq/telegram";
 import { privateBlock } from "./hq/privacy";
 import { Uploads } from "./hq/uploads";
+import { splitWav } from "./hq/wav";
 
 // --- Config (env vars, see .env.example) ------------------------------------
 const PORT = Number(process.env.PORT) || 3008;
@@ -54,6 +55,8 @@ const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen3:14b";
 const OLLAMA_FAST_MODEL = process.env.OLLAMA_FAST_MODEL || OLLAMA_MODEL;
 // Default for the vision agent; it must be able to read images (qwen3.5, gemma4:12b, ...)
 const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL || "qwen3.5:latest";
+// Default for transcribing audio; it must have the audio capability (gemma4:12b) or be a Whisper server
+const OLLAMA_AUDIO_MODEL = process.env.OLLAMA_AUDIO_MODEL || "gemma4:12b";
 const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX) || 8192;
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || "30m";
 const OLLAMA_THINK = process.env.OLLAMA_THINK === "true";
@@ -99,6 +102,7 @@ const models = new ModelRegistry(store, {
   model: OLLAMA_MODEL,
   fastModel: OLLAMA_FAST_MODEL,
   visionModel: OLLAMA_VISION_MODEL,
+  audioModel: OLLAMA_AUDIO_MODEL,
   numCtx: OLLAMA_NUM_CTX,
   think: OLLAMA_THINK,
   monthlyBudgetUsd: DEFAULT_MONTHLY_BUDGET_USD,
@@ -124,8 +128,8 @@ let nextEventId = Math.max(Date.now(), store.maxEventId() + 1);
 
 const app = express();
 app.use(cors({ origin: CORS_ORIGINS }));
-// Room for a 10 MB picture sent as base64
-app.use(express.json({ limit: "16mb" }));
+// Room for a 25 MB audio clip (or a 10 MB picture) sent as base64
+app.use(express.json({ limit: "40mb" }));
 
 function requireToken(req: Request, res: Response, next: NextFunction) {
   if (!HARNESS_TOKEN || req.headers.authorization === `Bearer ${HARNESS_TOKEN}`) return next();
@@ -487,6 +491,38 @@ async function runTask(task: Task) {
 
   try {
     const images = (task.images ?? []).map((id) => uploads.base64(id)).filter((b): b is string => Boolean(b));
+
+    // Audio is transcribed first. The transcript is private, like the audio itself.
+    let transcriptBlock = "";
+    let transcript = "";
+    let heardPrivate = false;
+    const clips = (task.audio ?? []).map((id) => uploads.bytes(id)).filter((b): b is Buffer => Boolean(b));
+    if (clips.length) {
+      emit(task, "executing_tool", `── Transcribing ${clips.length} audio clip${clips.length > 1 ? "s" : ""} (${models.resolve("audio").ref}) ──\n\n`);
+      const parts: string[] = [];
+      for (const [i, clip] of clips.entries()) {
+        const texts: string[] = [];
+        // Audio models take short clips (Gemma 4: 30 s), so long recordings go in pieces
+        for (const piece of splitWav(clip)) {
+          const out = await gateway.transcribe(piece, controller.signal, (note) => {
+            push(`[${note}]\n`);
+            hive.log("audio", "policy", note, task.id);
+          });
+          texts.push(out.text);
+        }
+        const text = texts.join(" ").replace(/\s+/g, " ").trim();
+        parts.push(clips.length > 1 ? `Clip ${i + 1}: ${text || "(no speech found)"}` : text || "(no speech found)");
+      }
+      transcript = parts.join("\n\n");
+      push(`${transcript}\n\n`);
+      flush();
+      heardPrivate = true;
+      transcriptBlock = privateBlock(
+        `TRANSCRIPT OF THE ATTACHED AUDIO:\n${transcript}`,
+        "(The attached audio and its transcript stay on the user's PC and are withheld from cloud models.)",
+      );
+    }
+
     if (task.requestedAgent === "auto" && images.length) {
       // Pictures go to the agent that can see them
       task.targetAgent = "vision";
@@ -494,7 +530,11 @@ async function runTask(task: Task) {
       log("router", "routed", `→ vision (pictures attached): ${task.prompt}`);
     } else if (task.requestedAgent === "auto") {
       emit(task, "routing");
-      const routed = await routeTask(roleJson("router"), "router", task.prompt);
+      // Route on what was said too; the router's text limit can't cut a private block open
+      const routeText = transcript
+        ? `${task.prompt.slice(0, 1100)}\n\n${privateBlock(`AUDIO TRANSCRIPT: ${transcript.slice(0, 600)}`, "(audio is attached)")}`
+        : task.prompt;
+      const routed = await routeTask(roleJson("router"), "router", routeText);
       task.targetAgent = routed.agent;
       task.routedBy = routed.reason === "keyword match" ? "keywords" : "router";
       log("router", "routed", `→ ${routed.agent} (${routed.reason}): ${task.prompt}`);
@@ -508,11 +548,11 @@ async function runTask(task: Task) {
     task.model = models.resolve(lead, override).ref;
     store.save(task);
     const delegate = canDelegate && lead === "planner";
-    let usedPrivate = false;
+    let usedPrivate = heardPrivate;
 
     // Only the vision agent can see pictures. When another agent leads, Vision reads
     // them first and the lead gets its description, which is private like the pictures.
-    let request = task.prompt;
+    let request = transcriptBlock ? `${task.prompt}\n\n${transcriptBlock}` : task.prompt;
     if (images.length && lead !== "vision") {
       openSub = addSubtask(task, "vision", `Describe the ${images.length} attached picture(s) for: ${task.prompt}`);
       task.activeAgent = "vision";
@@ -525,7 +565,7 @@ async function runTask(task: Task) {
           { role: "system", content: systemPrompt(task, "vision", { team: false, delegate: false }) },
           {
             role: "user",
-            content: `Describe what the attached picture(s) show, in the detail another agent needs for this request:\n${task.prompt}`,
+            content: `Describe what the attached picture(s) show, in the detail another agent needs for this request:\n${request}`,
             images,
           },
         ],
@@ -539,7 +579,7 @@ async function runTask(task: Task) {
       task.activeAgent = lead;
       flush();
       emit(task, "thinking", `\n\n── ${TEAM[lead].name} ──\n\n`);
-      request = `${task.prompt}\n\n${privateBlock(
+      request = `${request}\n\n${privateBlock(
         `DESCRIPTION OF THE ATTACHED PICTURES (from Jarvis Vision):\n${seen.text}`,
         "(The attached pictures and their description stay on the user's PC and are withheld from cloud models.)",
       )}`;
@@ -708,7 +748,7 @@ setInterval(() => {
 }, MEMORY_INTERVAL_MIN * 60 * 1000);
 
 // --- Creating and changing cards ---------------------------------------------
-const ROLE_LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", vision: "Vision", router: "Router", memory: "Memory" };
+const ROLE_LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", vision: "Vision", router: "Router", memory: "Memory", audio: "Transcriber" };
 
 /** "switch coder to claude" and friends change models without running a task. */
 function handleSwitch(text: string): string | null {
@@ -738,6 +778,7 @@ function createTask(input: unknown, extra: { chatId?: string } = {}): { task?: T
   const missing = d.dependsOn.filter((dep) => !tasks.has(dep));
   if (missing.length) return { status: 400, error: `Unknown dependency: ${missing.join(", ")}` };
   if (d.images.some((id) => !uploads.exists(id))) return { status: 400, error: "Unknown picture: upload it with POST /api/uploads first" };
+  if (d.audio.some((id) => !uploads.exists(id))) return { status: 400, error: "Unknown audio: upload it with POST /api/uploads first" };
   // Routine runs are forced read-only and get exactly one destination
   const routine = routineFields(d, { telegramChat: telegram ? [...TELEGRAM_ALLOWED][0] : undefined, vault: OBSIDIAN_VAULT || undefined });
   if ("error" in routine) return { status: 400, error: routine.error };
@@ -762,6 +803,7 @@ function createTask(input: unknown, extra: { chatId?: string } = {}): { task?: T
     deliverTo: routine.deliverTo,
     allowedSites: d.allowedSites.length ? d.allowedSites : undefined,
     images: d.images.length ? d.images : undefined,
+    audio: d.audio.length ? d.audio : undefined,
     position: now,
     createdAt: now,
     queuedAt: queueIt ? now : undefined,
@@ -866,6 +908,11 @@ function patchTask(task: Task, input: unknown): { error?: string } {
     task.readOnly = p.readOnly || undefined;
   }
   if (p.allowedSites !== undefined) task.allowedSites = p.allowedSites.length ? p.allowedSites : undefined;
+  if (p.audio !== undefined) {
+    if (!editable) return { error: "Only cards in Backlog or Ready can change their audio" };
+    if (p.audio.some((id) => !uploads.exists(id))) return { error: "Unknown audio: upload it first" };
+    task.audio = p.audio.length ? p.audio : undefined;
+  }
   if (p.images !== undefined) {
     if (!editable) return { error: "Only cards in Backlog or Ready can change their pictures" };
     const missing = p.images.filter((id) => !uploads.exists(id));
@@ -1115,7 +1162,9 @@ app.get("/api/memories", (_req, res) => res.json(memory.list()));
 // Pictures for cards: upload as base64 (a data: URL is fine), then pass the id in "images"
 app.post("/api/uploads", requireToken, (req, res) => {
   const data = typeof req.body?.data === "string" ? req.body.data : "";
-  const out = uploads.save(data);
+  // Audio is sent as WAV; the dashboard converts recordings before uploading
+  const kind = req.body?.kind === "audio" || /^data:audio\//.test(data) ? "audio" : "image";
+  const out = uploads.save(data, kind);
   if ("error" in out) return res.status(400).json({ error: out.error });
   res.status(201).json(out);
 });

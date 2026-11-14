@@ -128,6 +128,31 @@ Console box: pick them, drag them in, or paste a screenshot straight into the te
 API: `POST /api/uploads` with `{ "data": "<base64 or data: URL>" }` returns `{ id }`; pass
 ids in a card's `images`. `GET /api/uploads/:id` returns the picture.
 
+## Audio
+
+Attach audio to a new card or the Console box: pick or drop a file (MP3, M4A, WAV, OGG,
+WebM, FLAC: anything your browser can play), or press **🎙 Record** to use the microphone.
+Up to 4 clips per card, 25 MB each after conversion (about 13 minutes).
+- The dashboard converts every clip to 16 kHz mono WAV in the browser, so the PC needs
+  no ffmpeg.
+- Before routing, the **Transcriber** turns each clip into text. Long recordings are split
+  into 28-second pieces, because Gemma 4 takes at most 30 s at a time. The transcript
+  shows in the output and goes to the agent with your request (and to the router, so
+  "summarise this voice memo" routes on what was said). You can leave the task box empty:
+  it becomes "Listen to the attached audio and respond."
+- The Transcriber defaults to `ollama/gemma4:12b` (set `OLLAMA_AUDIO_MODEL` to change it)
+  and is **local only** out of the box. You can also point it at a local Whisper server
+  (any OpenAI-style `/v1/audio/transcriptions`, such as faster-whisper-server) by adding it
+  as a provider on the Team page.
+- Audio and transcripts are private, like pictures: they never go to a cloud model unless
+  you unlock the Transcriber and tick *Private → cloud*, and never while a spend cap is set
+  (audio cost can't be counted in tokens). Answers that used them are marked 🔒.
+- Clips are stored in `data/uploads/` as `.wav`, named by their content hash, and play
+  back from the card.
+
+API: `POST /api/uploads` with `{ "data": "<base64 WAV>", "kind": "audio" }` returns
+`{ id, seconds }`; pass ids in a card's `audio`.
+
 Browser safety:
 - Every request the page makes (navigations, redirects, images, scripts) is checked; anything aimed at localhost, `*.local` or your private network (10.x, 172.16–31.x, 192.168.x, Tailscale 100.64.x) is blocked, so a web page can't steer the agent into your router, Proxmox or the harness.
 - Page text is passed to the model as untrusted data, and the agent is told never to sign in, enter passwords, payment or personal details, buy or post.

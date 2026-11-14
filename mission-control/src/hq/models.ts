@@ -5,7 +5,7 @@ import type { TaskStore } from "./taskstore";
 // Which model each agent uses. Settings live in the database (edited on the
 // Team page or with "switch <agent> to <model>"), with defaults from .env.
 
-export const MODEL_ROLES = ["planner", "coder", "browser", "file", "security_audit", "vision", "router", "memory"] as const;
+export const MODEL_ROLES = ["planner", "coder", "browser", "file", "security_audit", "vision", "router", "memory", "audio"] as const;
 export type ModelRole = (typeof MODEL_ROLES)[number];
 
 export interface RoleSettings {
@@ -53,7 +53,7 @@ export interface ModelSettings {
 }
 
 /** Agents that start out local-only: the File agent reads your vault, Memory handles your memories */
-export const LOCAL_ONLY_BY_DEFAULT: readonly ModelRole[] = ["file", "memory"];
+export const LOCAL_ONLY_BY_DEFAULT: readonly ModelRole[] = ["file", "memory", "audio"];
 
 export interface Resolved {
   role: ModelRole;
@@ -70,6 +70,8 @@ export interface ModelDefaults {
   think: boolean;
   /** Default model for the vision agent (must be able to read images) */
   visionModel?: string;
+  /** Default model for transcribing audio (must have the audio capability) */
+  audioModel?: string;
   /** Overall monthly cap that applies until one is saved on the Team page (clearing it there means no cap) */
   monthlyBudgetUsd?: number;
 }
@@ -92,7 +94,13 @@ export class ModelRegistry {
     for (const r of MODEL_ROLES) {
       const background = r === "router" || r === "memory";
       roles[r] = {
-        model: background ? fast : r === "vision" ? `ollama/${this.defaults.visionModel ?? "qwen3.5:latest"}` : main,
+        model: background
+          ? fast
+          : r === "vision"
+            ? `ollama/${this.defaults.visionModel ?? "qwen3.5:latest"}`
+            : r === "audio"
+              ? `ollama/${this.defaults.audioModel ?? "gemma4:12b"}`
+              : main,
         numCtx: this.defaults.numCtx,
         think: background ? false : this.defaults.think,
         localOnly: LOCAL_ONLY_BY_DEFAULT.includes(r),
@@ -214,7 +222,8 @@ export class ModelRegistry {
     const fb = s.fallback ? parseModelRef(s.fallback, providers) : null;
     const main = parseModelRef(s.model, providers);
     // The vision agent's last resort is the local vision model, since a text model can't read pictures
-    const defaultLocal = role === "vision" ? (this.defaults.visionModel ?? "qwen3.5:latest") : this.defaults.model;
+    const defaultLocal =
+      role === "vision" ? (this.defaults.visionModel ?? "qwen3.5:latest") : role === "audio" ? (this.defaults.audioModel ?? "gemma4:12b") : this.defaults.model;
     const pick = fb?.provider.local ? fb : main?.provider.local ? main : parseModelRef(`ollama/${defaultLocal}`, providers)!;
     return { role, ref: `${pick.provider.id}/${pick.model}`, provider: pick.provider, model: pick.model, settings: s };
   }
@@ -245,6 +254,9 @@ const ROLE_NAMES: Record<string, ModelRole> = {
   auditor: "security_audit",
   vision: "vision",
   eyes: "vision",
+  audio: "audio",
+  transcriber: "audio",
+  ears: "audio",
   router: "router",
   memory: "memory",
 };

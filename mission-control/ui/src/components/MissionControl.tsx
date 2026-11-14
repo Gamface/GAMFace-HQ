@@ -6,6 +6,7 @@ import Board from "./Board";
 import NoticesBar from "./NoticesBar";
 import BrowserPane from "./BrowserPane";
 import ImageAttach, { imageFiles, useImageUploads } from "./ImageAttach";
+import AudioAttach, { useAudioUploads } from "./AudioAttach";
 import PreviewPane from "./PreviewPane";
 import TeamPage from "./TeamPage";
 
@@ -68,6 +69,8 @@ export default function MissionControl() {
   const [prompt, setPrompt] = useState("");
   const [images, setImages] = useState<string[]>([]);
   const uploader = useImageUploads(images, setImages);
+  const [audio, setAudio] = useState<string[]>([]);
+  const audioUp = useAudioUploads(audio, setAudio);
   const [targetAgent, setTargetAgent] = useState<RequestedAgent>("auto");
   const [rightTab, setRightTab] = useState<RightTab>("commands");
   const [centerTab, setCenterTab] = useState<CenterTab>("output");
@@ -149,19 +152,27 @@ export default function MissionControl() {
   }, [statusEvents.length, hive.length, rightTab]);
 
   const handleRunTask = async () => {
-    if (!prompt.trim()) return;
+    if (!prompt.trim() && !audio.length) return;
     setDispatchError(null);
     try {
       const res = await fetch(`${HARNESS_URL}/api/agent/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ id: crypto.randomUUID(), prompt, targetAgent, source: "ui", images }),
+        body: JSON.stringify({
+          id: crypto.randomUUID(),
+          prompt: prompt.trim() || "Listen to the attached audio and respond.",
+          targetAgent,
+          source: "ui",
+          images,
+          audio,
+        }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(typeof body.error === "string" ? body.error : JSON.stringify(body.error));
       setSelectedId(body.taskId);
       setPrompt("");
       setImages([]);
+      setAudio([]);
     } catch (err) {
       setDispatchError(err instanceof Error ? err.message : String(err));
     }
@@ -439,11 +450,12 @@ export default function MissionControl() {
             className="w-full h-24 bg-slate-950 border border-slate-800 rounded-lg p-3 text-sm text-slate-200 resize-none focus:outline-none focus:border-cyan-500 font-mono"
           />
           <ImageAttach value={images} onChange={setImages} uploader={uploader} compact />
+          <AudioAttach value={audio} onChange={setAudio} uploader={audioUp} compact />
           {dispatchError && <p className="text-rose-400 text-xs font-mono">{dispatchError}</p>}
           <div className="flex gap-2">
             <button
               onClick={() => void handleRunTask()}
-              disabled={!prompt.trim() || connection !== "open" || uploader.busy}
+              disabled={(!prompt.trim() && !audio.length) || connection !== "open" || uploader.busy || audioUp.busy}
               className="flex-1 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 disabled:text-slate-400 text-white font-medium py-2 rounded-lg transition-colors text-sm shadow-lg shadow-cyan-950/50"
             >
               Dispatch to Agent

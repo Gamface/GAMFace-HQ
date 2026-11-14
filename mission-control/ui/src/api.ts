@@ -37,6 +37,21 @@ export async function uploadImage(file: Blob): Promise<string> {
 }
 
 export const imageUrl = (id: string) => `${HARNESS_URL}/api/uploads/${id}`;
+export const uploadUrl = imageUrl;
+
+/** Converts audio to 16 kHz mono WAV in the browser, uploads it, and returns its id and length. */
+export async function uploadAudio(file: Blob): Promise<{ id: string; seconds: number }> {
+  const { toWav16kMono } = await import("./audio");
+  const { wav, seconds } = await toWav16kMono(file);
+  const data = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(new Error("Couldn't read the audio"));
+    r.readAsDataURL(wav);
+  });
+  const out = await send<{ id: string; seconds?: number }>("POST", "/api/uploads", { data, kind: "audio" });
+  return { id: out.id, seconds: out.seconds ?? seconds };
+}
 
 /** "ollama/qwen2.5-coder:14b" → { name: "qwen2.5-coder:14b", provider: "ollama" } */
 export function splitModel(ref?: string | null): { name: string; provider: string } {
@@ -53,6 +68,7 @@ export const AGENT_LABELS: Record<string, string> = {
   file: "File",
   security_audit: "Security",
   vision: "Vision",
+  audio: "Transcriber",
   router: "Router",
   memory: "Memory",
 };
@@ -92,6 +108,7 @@ export interface BoardCard {
   allowedSites?: string[];
   usedPrivate?: boolean;
   images?: string[];
+  audio?: string[];
   interrupted?: boolean;
   attempts?: number;
   position?: number;
