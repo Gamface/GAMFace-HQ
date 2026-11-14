@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { AgentStatus, AgentTarget } from "../../../src/schemas/agent";
+import type { AgentStatus, RequestedAgent } from "../../../src/schemas/agent";
 import { HARNESS_URL, authHeaders } from "../config";
 import { TERMINAL, useAgentStream } from "../useAgentStream";
 
@@ -9,11 +9,36 @@ interface SystemInfo {
   models: { name: string; sizeGB: number; vramPct: number }[];
   running: string | null;
   queued: number;
+  fastModel?: string;
+  telegram?: boolean;
+  obsidian?: boolean;
+  memories?: number;
 }
+
+interface HiveEntry {
+  ts: number;
+  agent: string;
+  event: string;
+  summary: string;
+  taskId?: string;
+}
+
+interface MemoryItem {
+  id: number;
+  agent: string;
+  text: string;
+  importance: number;
+  pinned: boolean;
+  hits: number;
+}
+
+type RightTab = "commands" | "hive" | "memory";
 
 const STATUS_STYLES: Record<AgentStatus, string> = {
   idle: "bg-slate-700 text-slate-200",
   queued: "bg-slate-700 text-slate-200",
+  routing: "bg-sky-700/80 text-white",
+  delegating: "bg-fuchsia-700/80 text-white",
   thinking: "bg-amber-600/80 text-white",
   streaming: "bg-cyan-600/80 text-white",
   executing_tool: "bg-violet-600/80 text-white",
@@ -31,7 +56,11 @@ export default function MissionControl() {
   const { connection, tasks, statusEvents } = useAgentStream(HARNESS_URL);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
-  const [targetAgent, setTargetAgent] = useState<AgentTarget>("planner");
+  const [targetAgent, setTargetAgent] = useState<RequestedAgent>("auto");
+  const [rightTab, setRightTab] = useState<RightTab>("commands");
+  const [hive, setHive] = useState<HiveEntry[]>([]);
+  const [memories, setMemories] = useState<MemoryItem[]>([]);
+  const [newMemory, setNewMemory] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
   const [dispatchError, setDispatchError] = useState<string | null>(null);
   const [system, setSystem] = useState<SystemInfo | null>(null);
@@ -53,13 +82,41 @@ export default function MissionControl() {
     return () => clearInterval(timer);
   }, []);
 
+  // Hive mind and memory panels refresh while they are open
+  const loadHive = () =>
+    fetch(`${HARNESS_URL}/api/hive?limit=150`)
+      .then((r) => r.json())
+      .then(setHive)
+      .catch(() => {});
+  const loadMemories = () =>
+    fetch(`${HARNESS_URL}/api/memories`)
+      .then((r) => r.json())
+      .then(setMemories)
+      .catch(() => {});
+  useEffect(() => {
+    if (rightTab === "commands") return;
+    const load = rightTab === "hive" ? loadHive : loadMemories;
+    load();
+    const timer = setInterval(load, 4000);
+    return () => clearInterval(timer);
+  }, [rightTab]);
+
+  const memoryAction = async (path: string, body?: unknown) => {
+    await fetch(`${HARNESS_URL}/api/memories${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    void loadMemories();
+  };
+
   useEffect(() => {
     if (autoScroll && outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight;
   }, [selected?.output, autoScroll]);
 
   useEffect(() => {
     if (telemetryRef.current) telemetryRef.current.scrollTop = telemetryRef.current.scrollHeight;
-  }, [statusEvents.length]);
+  }, [statusEvents.length, hive.length, rightTab]);
 
   const handleRunTask = async () => {
     if (!prompt.trim()) return;
@@ -101,6 +158,7 @@ export default function MissionControl() {
             State: {connection !== "open" ? `Harness ${connection}` : selected ? `${selected.agent} [${selected.status}]` : "Online / Ready"}
           </span>
           <span className="bg-slate-800 px-3 py-1 rounded-md border border-slate-700">Model: {system?.model ?? "—"}</span>
+          {system?.telegram && <span className="bg-slate-800 px-3 py-1 rounded-md border border-slate-700" title="Telegram bot is polling">✈ Telegram</span>}
           <span
             className={`px-3 py-1 rounded-md border ${
               !system || system.ollama === "down"
@@ -144,6 +202,11 @@ export default function MissionControl() {
                       🎙 voice
                     </span>
                   )}
+                  {t.source === "telegram" && (
+                    <span className="px-1.5 py-0.5 rounded bg-sky-700/70 text-white uppercase tracking-wide" title="Sent from Telegram">
+                      ✈ tg
+                    </span>
+                  )}
                   {new Date(t.createdAt).toLocaleTimeString()}
                 </span>
               </button>
@@ -154,10 +217,11 @@ export default function MissionControl() {
           <span className="text-emerald-400 font-semibold block mb-1">Sub-Agent Mode:</span>
           <select
             value={targetAgent}
-            onChange={(e) => setTargetAgent(e.target.value as AgentTarget)}
+            onChange={(e) => setTargetAgent(e.target.value as RequestedAgent)}
             className="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded p-1 font-mono"
           >
-            <option value="planner">planner (General Task)</option>
+            <option value="auto">auto (route for me)</option>
+            <option value="planner">planner (Lead — delegates)</option>
             <option value="security_audit">security_audit (Defensive Scan)</option>
             <option value="coder">coder (TypeScript / Python)</option>
             <option value="browser">browser (Web Agent)</option>
@@ -186,19 +250,95 @@ export default function MissionControl() {
 
       {/* RIGHT: TELEMETRY + DISPATCH */}
       <aside className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col min-h-0">
-        <h2 className="text-xs uppercase tracking-wider text-slate-500 mb-2 font-semibold">Agent Command Stream</h2>
+        <div className="flex gap-1 mb-2 text-xs">
+          {(
+            [
+              ["commands", "Command Stream"],
+              ["hive", "Hive Mind"],
+              ["memory", `Memory${system?.memories ? ` (${system.memories})` : ""}`],
+            ] as [RightTab, string][]
+          ).map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setRightTab(key)}
+              className={`px-3 py-1 rounded-md uppercase tracking-wider font-semibold ${
+                rightTab === key ? "bg-cyan-700 text-white" : "text-slate-500 hover:text-slate-300"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <div
           ref={telemetryRef}
           className="flex-1 min-h-0 bg-slate-950 border border-slate-800 rounded-lg p-3 font-mono text-xs overflow-y-auto space-y-1 mb-4"
         >
-          <div className="text-emerald-400">Jarvis telemetry online. Awaiting dispatch...</div>
-          {statusEvents.map((e) => (
-            <div key={e.eventId} className="text-slate-400">
-              <span className="text-cyan-500">[{new Date(e.timestamp).toLocaleTimeString()}]</span>{" "}
-              <span className="text-slate-500">{e.taskId.slice(0, 8)}</span> {e.source === "voice" ? "🎙 " : ""}
-              {e.activeSubAgent} → {e.status}
+          {rightTab === "commands" && (
+            <>
+              <div className="text-emerald-400">Jarvis telemetry online. Awaiting dispatch...</div>
+              {statusEvents.map((e) => (
+                <div key={e.eventId} className="text-slate-400">
+                  <span className="text-cyan-500">[{new Date(e.timestamp).toLocaleTimeString()}]</span>{" "}
+                  <span className="text-slate-500">{e.taskId.slice(0, 8)}</span> {e.source === "voice" ? "🎙 " : ""}
+                  {e.source === "telegram" ? "✈ " : ""}
+                  {e.activeSubAgent} → {e.status}
+                </div>
+              ))}
+            </>
+          )}
+          {rightTab === "hive" &&
+            (hive.length ? (
+              hive.map((h, i) => (
+                <div key={`${h.ts}-${i}`} className="text-slate-400">
+                  <span className="text-cyan-500">[{new Date(h.ts).toLocaleTimeString()}]</span>{" "}
+                  <span className="text-slate-200">{h.agent}</span> <span className="text-fuchsia-400">{h.event}</span>{" "}
+                  <span className="text-slate-500">{h.summary}</span>
+                </div>
+              ))
+            ) : (
+              <div className="text-slate-600 italic">No team activity yet.</div>
+            ))}
+          {rightTab === "memory" && (
+            <div className="space-y-2">
+              <div className="flex gap-1">
+                <input
+                  value={newMemory}
+                  onChange={(e) => setNewMemory(e.target.value)}
+                  placeholder="Add a pinned memory..."
+                  className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200"
+                />
+                <button
+                  onClick={() => {
+                    if (newMemory.trim()) void memoryAction("", { text: newMemory.trim(), pinned: true }).then(() => setNewMemory(""));
+                  }}
+                  className="px-2 bg-cyan-700 rounded text-white"
+                >
+                  Add
+                </button>
+                <button onClick={() => void memoryAction("/maintain")} className="px-2 bg-slate-800 rounded text-slate-300" title="Run decay and merge now">
+                  Tidy
+                </button>
+              </div>
+              {memories.length === 0 && <div className="text-slate-600 italic">No memories yet. They are saved after tasks finish.</div>}
+              {memories.map((m) => (
+                <div key={m.id} className="flex gap-2 items-start border-b border-slate-800 pb-1">
+                  <div className="flex-1 text-slate-300">
+                    {m.pinned ? "📌 " : ""}
+                    {m.text}
+                    <div className="text-[10px] text-slate-600">
+                      {m.agent} · importance {m.importance.toFixed(2)} · used {m.hits}×
+                    </div>
+                  </div>
+                  <button onClick={() => void memoryAction(`/${m.id}/${m.pinned ? "unpin" : "pin"}`)} className="text-slate-500 hover:text-slate-200">
+                    {m.pinned ? "Unpin" : "Pin"}
+                  </button>
+                  <button onClick={() => void memoryAction(`/${m.id}/delete`)} className="text-slate-500 hover:text-rose-400">
+                    ✕
+                  </button>
+                </div>
+              ))}
             </div>
-          ))}
+          )}
         </div>
 
         <div className="space-y-2">

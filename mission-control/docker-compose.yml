@@ -17,8 +17,16 @@ services:
       OLLAMA_MODEL: qwen3:14b
       OLLAMA_NUM_CTX: 8192
       CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      # HQ: routing/memory model, saved hive + memories, Telegram (token from .env)
+      OLLAMA_FAST_MODEL: ${OLLAMA_FAST_MODEL:-qwen3:14b}
+      DATA_DIR: /app/data
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS:-}
+      # Uncomment with the vault volume below
+      # OBSIDIAN_VAULT: /vault
     volumes:
       - .:/app
+      # - /mnt/c/Users/aldra/Documents/ObsidianVault:/vault
     # Published on localhost only; port 3008 is taken by jarvis-harness
     ports:
       - "127.0.0.1:3010:3008"
