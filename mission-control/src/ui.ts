@@ -8,15 +8,20 @@ import {
   AgentStreamPayload,
   AgentTarget,
   AgentTaskSchema,
+  TaskPatchSchema,
   TaskSummary,
   TERMINAL_STATUSES,
+  boardColumn,
 } from "./schemas/agent";
 import { BrowserSession, Frame } from "./hq/browser";
 import { runBrowserAgent } from "./hq/browser-agent";
 import { StreamGuard, redact } from "./hq/guard";
 import { Hive } from "./hq/hive";
 import { Memory } from "./hq/memory";
-import { ChatMessage, makeJsonChat } from "./hq/ollama";
+import { MODEL_ROLES, ModelRegistry, ModelRole, Resolved, parseSwitchCommand, resolveTarget } from "./hq/models";
+import type { ChatMessage, JsonChat } from "./hq/ollama";
+import { chatOnce, chatStream, checkProvider, listModels } from "./hq/providers";
+import { RUNNING_STATUSES, Task, TaskStore, pickNext, waitingOn } from "./hq/taskstore";
 import {
   AGENT_KEYS,
   DELEGATION_RULES,
@@ -39,33 +44,34 @@ const HOST = process.env.HOST || "127.0.0.1";
 // Native Windows Ollama on the RX 9060 XT (port 11435, see setup-ollama.ps1)
 const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11435").replace(/\/+$/, "");
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen3:14b";
-// Small model for routing and memory extraction; falls back to OLLAMA_MODEL
+// Default for the router and memory roles; falls back to OLLAMA_MODEL
 const OLLAMA_FAST_MODEL = process.env.OLLAMA_FAST_MODEL || OLLAMA_MODEL;
 const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX) || 8192;
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || "30m";
 const OLLAMA_THINK = process.env.OLLAMA_THINK === "true";
 const TASK_TIMEOUT_MS = Number(process.env.TASK_TIMEOUT_MS) || 10 * 60 * 1000;
 const MAX_QUEUE = Number(process.env.MAX_QUEUE) || 20;
-const MAX_TASK_HISTORY = Number(process.env.MAX_TASK_HISTORY) || 50;
+// How long the front of the queue may wait while same-model tasks run first
+const MODEL_GROUP_MAX_WAIT_MS = Number(process.env.MODEL_GROUP_MAX_WAIT_MS) || 60_000;
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || "http://localhost:5173,http://127.0.0.1:5173")
   .split(",")
   .map((o) => o.trim())
   .filter(Boolean);
-// Optional bearer token for the endpoints that start or stop work
+// Optional bearer token for the endpoints that start, stop or change work
 const HARNESS_TOKEN = process.env.HARNESS_TOKEN || "";
 // HQ features (see README-HQ.md)
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
 const OBSIDIAN_VAULT = process.env.OBSIDIAN_VAULT || "";
 const MEMORY_INTERVAL_MIN = Number(process.env.MEMORY_INTERVAL_MIN) || 30;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+const TELEGRAM_ALLOWED = new Set(
+  (process.env.TELEGRAM_ALLOWED_CHAT_IDS || "").split(",").map((s) => s.trim()).filter(Boolean),
+);
 // Real browsing: a Chrome DevTools endpoint, e.g. http://browser:9222 (docker-compose.yml)
 const BROWSER_CDP_URL = process.env.BROWSER_CDP_URL || "";
 const BROWSER_MAX_STEPS = Number(process.env.BROWSER_MAX_STEPS) || 10;
 // Only for testing against pages on your own machine; keep false otherwise
 const BROWSER_ALLOW_PRIVATE = process.env.BROWSER_ALLOW_PRIVATE === "true";
-const TELEGRAM_ALLOWED = new Set(
-  (process.env.TELEGRAM_ALLOWED_CHAT_IDS || "").split(",").map((s) => s.trim()).filter(Boolean),
-);
 
 // Voice answers are read aloud by ~/sandcastle/src/agent_engine.py
 // (evals: voice-math, voice-explain)
@@ -75,28 +81,21 @@ const VOICE_STYLE =
   "Use plain sentences only, with no markdown, numbered steps, lists or headings. " +
   "Do not write code unless the user explicitly asks for code; if they do, put it in one fenced block after a one-sentence summary.";
 
+// --- State ------------------------------------------------------------------
+const store = new TaskStore(DATA_DIR);
+const { recovered } = store.load();
+const models = new ModelRegistry(store, { model: OLLAMA_MODEL, fastModel: OLLAMA_FAST_MODEL, numCtx: OLLAMA_NUM_CTX, think: OLLAMA_THINK });
 const hive = new Hive(DATA_DIR);
+const tasks = store.tasks;
 
-// --- Task state -------------------------------------------------------------
-interface Task extends TaskSummary {
-  events: AgentStreamPayload[];
-  controller?: AbortController;
-  abortReason?: "user" | "timeout";
-  requestedAgent: string;
-  activeAgent?: AgentTarget;
-  chatId?: string;
-  answer?: string;
-}
-
-const tasks = new Map<string, Task>();
-const queue: string[] = [];
 let runningTaskId: string | null = null;
+let lastModelRef: string | null = null;
 // Memory extraction runs between tasks so it never competes with one for the GPU
 const memoryJobs: { agent: AgentTarget; prompt: string; answer: string }[] = [];
 let backgroundBusy = false;
-// Seeded from the clock so ids keep increasing across restarts and a
-// reconnecting UI never mistakes new events for ones it already has
-let nextEventId = Date.now();
+// Ids keep increasing across restarts, so a reconnecting UI never mistakes
+// new events for ones it already has
+let nextEventId = Math.max(Date.now(), store.maxEventId() + 1);
 
 const app = express();
 app.use(cors({ origin: CORS_ORIGINS }));
@@ -108,12 +107,49 @@ function requireToken(req: Request, res: Response, next: NextFunction) {
 }
 
 function summarize(task: Task): TaskSummary {
-  const { events, controller, abortReason, requestedAgent, activeAgent, chatId, answer, ...summary } = task;
+  const { events, controller, abortReason, requestedAgent, activeAgent, chatId, answer, queuedAt, modelOverride, ...summary } = task;
   return summary;
 }
 
 function agentLabel(task: Task) {
   return `Jarvis (${task.activeAgent ?? task.targetAgent})`;
+}
+
+// --- Models -----------------------------------------------------------------
+/** A JSON-mode chat for one role (router, memory, browser decisions), with fallback and usage tracking. */
+function roleJson(role: ModelRole): JsonChat {
+  return async (_model, messages) => {
+    const run = async (r: Resolved) => {
+      const opts = { json: true, think: false, temperature: 0.1, numCtx: r.settings.numCtx, keepAlive: OLLAMA_KEEP_ALIVE };
+      try {
+        const out = await chatOnce(r.provider, r.model, messages, opts);
+        store.recordUsage(role, r.ref, out.promptTokens, out.completionTokens);
+        lastModelRef = r.ref;
+        return out.json ?? {};
+      } catch (error) {
+        store.recordUsage(role, r.ref, 0, 0, true);
+        throw error;
+      }
+    };
+    const primary = models.resolve(role);
+    try {
+      return await run(primary);
+    } catch (error) {
+      const fb = models.resolveFallback(role);
+      if (!fb || fb.ref === primary.ref) throw error;
+      hive.log(role, "fallback", `${primary.ref} failed (${error instanceof Error ? error.message : error}); used ${fb.ref}`);
+      return run(fb);
+    }
+  };
+}
+
+const memory = new Memory(DATA_DIR, roleJson("memory"), "memory");
+
+/** The model a queued task will run on, for grouping same-model work (null when auto-routed). */
+function plannedModel(t: Task): string | null {
+  if (t.modelOverride) return models.resolve(t.targetAgent, t.modelOverride).ref;
+  if (t.requestedAgent === "auto") return null;
+  return models.resolve(t.targetAgent).ref;
 }
 
 // --- SSE --------------------------------------------------------------------
@@ -128,6 +164,7 @@ function writeEvent(res: Response, payload: AgentStreamPayload) {
 }
 
 function emit(task: Task, status: AgentStatus, logChunk = "") {
+  const changed = task.status !== status;
   task.status = status;
   const payload: AgentStreamPayload = {
     eventId: nextEventId++,
@@ -139,6 +176,9 @@ function emit(task: Task, status: AgentStatus, logChunk = "") {
     source: task.source,
   };
   task.events.push(payload);
+  store.appendEvent(payload);
+  // Streaming chunks don't change the card, so only status changes rewrite it
+  if (changed) store.save(task);
   for (const client of sseClients) {
     if (!client.taskId || client.taskId === task.id) writeEvent(client.res, payload);
   }
@@ -154,12 +194,12 @@ function handleStream(req: Request, res: Response) {
   res.write("retry: 3000\n\n");
 
   // Browsers resend Last-Event-ID on reconnect, so replay anything missed.
-  // ?replay=all on the first connect sends the full in-memory history.
+  // ?replay=all on the first connect sends the recent history.
   const header = req.headers["last-event-id"];
   const lastId = header ? Number(header) : req.query.replay === "all" ? 0 : NaN;
   if (Number.isFinite(lastId)) {
     const missed = [...tasks.values()]
-      .filter((t) => !taskId || t.id === taskId)
+      .filter((t) => !t.parentId && (!taskId || t.id === taskId))
       .flatMap((t) => t.events)
       .filter((e) => e.eventId > lastId)
       .sort((a, b) => a.eventId - b.eventId);
@@ -220,82 +260,52 @@ setInterval(() => {
   for (const res of browserClients) res.write(": ping\n\n");
 }, 15000);
 
-// --- Ollama -----------------------------------------------------------------
-const thinkingSupport = new Map<string, boolean>();
-
-async function modelSupportsThinking(model: string): Promise<boolean> {
-  if (thinkingSupport.has(model)) return thinkingSupport.get(model)!;
-  try {
-    const res = await fetch(`${OLLAMA_BASE_URL}/api/show`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model }),
-    });
-    const info = (await res.json()) as { capabilities?: string[] };
-    const supported = Boolean(info.capabilities?.includes("thinking"));
-    thinkingSupport.set(model, supported);
-    return supported;
-  } catch {
-    return false;
-  }
-}
-
-const jsonChat = makeJsonChat(OLLAMA_BASE_URL, OLLAMA_KEEP_ALIVE, 120000, modelSupportsThinking);
-const memory = new Memory(DATA_DIR, jsonChat, OLLAMA_FAST_MODEL);
+// --- Agent turns ------------------------------------------------------------
 
 /**
- * Streams one model call into the task's output (through the exfiltration
- * guard) and returns the full raw text so the caller can look for handoffs.
+ * Streams one model call for a role into the task's output (through the
+ * exfiltration guard) and returns the full raw text. If the model fails before
+ * producing anything, the role's fallback model gets one try.
  */
-async function streamChat(task: Task, messages: ChatMessage[], signal: AbortSignal, push: (text: string) => void) {
-  const body: Record<string, unknown> = {
-    model: task.model,
-    messages,
-    stream: true,
-    keep_alive: OLLAMA_KEEP_ALIVE,
-    options: { num_ctx: OLLAMA_NUM_CTX },
+async function streamTurn(task: Task, role: AgentTarget, messages: ChatMessage[], signal: AbortSignal, push: (text: string) => void, override?: string) {
+  const attempt = async (r: Resolved) => {
+    const guard = new StreamGuard();
+    let gotTokens = false;
+    try {
+      const out = await chatStream(
+        r.provider,
+        r.model,
+        messages,
+        { numCtx: r.settings.numCtx, temperature: r.settings.temperature, think: r.settings.think, keepAlive: OLLAMA_KEEP_ALIVE },
+        signal,
+        (piece) => {
+          gotTokens = true;
+          push(guard.push(piece));
+        },
+      );
+      store.recordUsage(role, r.ref, out.promptTokens, out.completionTokens);
+      lastModelRef = r.ref;
+      return out.text;
+    } catch (error) {
+      // A cancel or timeout isn't the model's fault, so it doesn't count as a failed call
+      if (!signal.aborted) store.recordUsage(role, r.ref, 0, 0, true);
+      throw Object.assign(error instanceof Error ? error : new Error(String(error)), { gotTokens });
+    } finally {
+      push(guard.end());
+      if (guard.found.size) hive.log("guard", "redacted", [...guard.found].join(", "), task.id);
+    }
   };
-  // Only send "think" to models that support it; others reject the field
-  if (await modelSupportsThinking(task.model)) body.think = OLLAMA_THINK;
-
-  const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
-  if (!response.ok || !response.body) {
-    throw new Error(`Ollama HTTP ${response.status}: ${await response.text()}`);
-  }
-
-  const guard = new StreamGuard();
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let full = "";
+  const primary = models.resolve(role, override);
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        const parsed = JSON.parse(line) as { message?: { content?: string }; error?: string };
-        if (parsed.error) throw new Error(parsed.error);
-        const content = parsed.message?.content ?? "";
-        full += content;
-        push(guard.push(content));
-      }
-    }
-  } finally {
-    push(guard.end());
-    if (guard.found.size) {
-      hive.log("guard", "redacted", [...guard.found].join(", "), task.id);
-    }
+    return await attempt(primary);
+  } catch (error) {
+    const fb = override ? null : models.resolveFallback(role);
+    if (signal.aborted || (error as { gotTokens?: boolean }).gotTokens || !fb || fb.ref === primary.ref) throw error;
+    const msg = error instanceof Error ? error.message : String(error);
+    push(`\n[${primary.ref} failed (${msg.slice(0, 120)}); switching to ${fb.ref}]\n\n`);
+    hive.log(role, "fallback", `${primary.ref} → ${fb.ref}: ${msg}`, task.id);
+    return attempt(fb);
   }
-  return full;
 }
 
 // The system prompt only holds text that stays the same between calls, so
@@ -334,8 +344,8 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
     const answer = await runBrowserAgent({
       task: request,
       session,
-      chat: jsonChat,
-      model: task.model,
+      chat: roleJson("browser"),
+      model: "browser",
       maxSteps: BROWSER_MAX_STEPS,
       signal,
       extraRules: task.source === "voice" ? `When you answer: ${VOICE_STYLE}` : undefined,
@@ -360,6 +370,7 @@ async function agentTurn(
   request: string,
   signal: AbortSignal,
   push: (text: string) => void,
+  override?: string,
 ): Promise<string> {
   if (agent === "browser" && browsingEnabled(task)) {
     try {
@@ -371,13 +382,43 @@ async function agentTurn(
       hive.log("browser", "error", msg, task.id);
     }
   }
-  return streamChat(task, messages, signal, push);
+  return streamTurn(task, agent, messages, signal, push, override);
+}
+
+/** A board record for a delegated piece of work, shown under its parent card. */
+function addSubtask(parent: Task, agent: AgentTarget, prompt: string): Task {
+  const sub: Task = {
+    id: crypto.randomUUID(),
+    parentId: parent.id,
+    prompt,
+    title: prompt.split("\n")[0].slice(0, 80),
+    targetAgent: agent,
+    requestedAgent: agent,
+    routedBy: "user",
+    source: parent.source,
+    model: models.resolve(agent).ref,
+    status: "thinking",
+    createdAt: Date.now(),
+    startedAt: Date.now(),
+    events: [],
+  };
+  store.add(sub);
+  return sub;
+}
+
+function finishSubtask(sub: Task, status: AgentStatus, answer?: string, error?: string) {
+  sub.status = status;
+  sub.answer = answer ? redact(answer).text.slice(0, 20000) : undefined;
+  sub.error = error;
+  sub.finishedAt = Date.now();
+  store.save(sub);
 }
 
 async function runTask(task: Task) {
   const controller = new AbortController();
   task.controller = controller;
   task.startedAt = Date.now();
+  task.attempts = (task.attempts ?? 0) + 1;
   const timeout = setTimeout(() => {
     task.abortReason = "timeout";
     controller.abort();
@@ -404,11 +445,12 @@ async function runTask(task: Task) {
   const log = (agent: string, event: string, summary: string) => {
     if (useTeam) hive.log(agent, event, summary, task.id);
   };
+  let openSub: Task | null = null;
 
   try {
     if (task.requestedAgent === "auto") {
       emit(task, "routing");
-      const routed = await routeTask(jsonChat, OLLAMA_FAST_MODEL, task.prompt);
+      const routed = await routeTask(roleJson("router"), "router", task.prompt);
       task.targetAgent = routed.agent;
       task.routedBy = routed.reason === "keyword match" ? "keywords" : "router";
       log("router", "routed", `→ ${routed.agent} (${routed.reason}): ${task.prompt}`);
@@ -417,6 +459,10 @@ async function runTask(task: Task) {
     }
 
     const lead = task.targetAgent;
+    // A model picked for this task (evals compare models) beats the agent's own setting
+    const override = task.modelOverride;
+    task.model = models.resolve(lead, override).ref;
+    store.save(task);
     const delegate = canDelegate && lead === "planner";
     emit(task, "thinking");
     const first = await agentTurn(
@@ -429,6 +475,7 @@ async function runTask(task: Task) {
       task.prompt,
       controller.signal,
       push,
+      override,
     );
 
     const handoffs = delegate ? parseDelegations(first) : [];
@@ -440,8 +487,9 @@ async function runTask(task: Task) {
         flush();
         task.activeAgent = h.agent;
         task.delegatedTo.push(h.agent);
+        openSub = addSubtask(task, h.agent, h.task);
         log("planner", "delegated", `→ ${h.agent}: ${h.task}`);
-        emit(task, "delegating", `\n\n── ${TEAM[h.agent].name} ── ${h.task}\n\n`);
+        emit(task, "delegating", `\n\n── ${TEAM[h.agent].name} (${openSub.model}) ── ${h.task}\n\n`);
         emit(task, "thinking");
         const output = await agentTurn(
           task,
@@ -454,20 +502,24 @@ async function runTask(task: Task) {
           controller.signal,
           push,
         );
+        finishSubtask(openSub, "complete", output);
+        openSub = null;
         results.push({ agent: h.agent, task: h.task, output });
         log(h.agent, "finished", output);
       }
       flush();
       task.activeAgent = lead;
       emit(task, "thinking", `\n\n── ${TEAM[lead].name}: final answer ──\n\n`);
-      answer = await streamChat(
+      answer = await streamTurn(
         task,
+        lead,
         [
           { role: "system", content: systemPrompt(task, lead, { team: true, delegate: false }) },
           { role: "user", content: userMessage(lead, synthesisPrompt(task.prompt, results), task.prompt, true) },
         ],
         controller.signal,
         push,
+        override,
       );
     }
 
@@ -492,6 +544,7 @@ async function runTask(task: Task) {
       console.error(`Task ${task.id} failed:`, task.error);
       emit(task, "error", `\n\n[Error: ${task.error}]`);
     }
+    if (openSub) finishSubtask(openSub, task.status === "canceled" ? "canceled" : "error", undefined, task.error);
     log(task.activeAgent ?? task.targetAgent, task.status, task.error ?? "canceled");
   } finally {
     clearTimeout(timeout);
@@ -499,23 +552,25 @@ async function runTask(task: Task) {
     task.finishedAt = Date.now();
     task.controller = undefined;
     task.activeAgent = undefined;
+    store.save(task);
     notifyDone(task);
   }
 }
 
-// One task at a time: two agents sharing one GPU each run at half speed
+// --- Queue ------------------------------------------------------------------
+// One task at a time: two agents sharing one GPU each run at half speed. The
+// next task is picked by priority, board order and dependencies, preferring
+// one that uses the model already loaded (see pickNext).
 async function pump() {
   if (runningTaskId || backgroundBusy) return;
-  const nextId = queue.shift();
-  if (!nextId) return runBackgroundJob();
-  const task = tasks.get(nextId);
-  if (!task) return pump();
+  const task = pickNext(tasks, { lastModel: lastModelRef, modelOf: plannedModel, maxWaitMs: MODEL_GROUP_MAX_WAIT_MS });
+  if (!task) return runBackgroundJob();
   runningTaskId = task.id;
   try {
     await runTask(task);
   } finally {
     runningTaskId = null;
-    pruneHistory();
+    store.trim();
     void pump();
   }
 }
@@ -541,39 +596,75 @@ setInterval(() => {
   if (stats.decayed || stats.forgotten || stats.merged) hive.log("memory", "maintenance", JSON.stringify(stats));
 }, MEMORY_INTERVAL_MIN * 60 * 1000);
 
-function pruneHistory() {
-  const finished = [...tasks.values()]
-    .filter((t) => TERMINAL_STATUSES.includes(t.status))
-    .sort((a, b) => a.createdAt - b.createdAt);
-  while (tasks.size > MAX_TASK_HISTORY && finished.length) {
-    tasks.delete(finished.shift()!.id);
+// --- Creating and changing cards ---------------------------------------------
+const ROLE_LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", router: "Router", memory: "Memory" };
+
+/** "switch coder to claude" and friends change models without running a task. */
+function handleSwitch(text: string): string | null {
+  const cmd = parseSwitchCommand(text);
+  if (!cmd) return null;
+  const settings = models.settings();
+  const ref = resolveTarget(cmd.target, settings, models.providers());
+  if (!ref) {
+    const aliases = Object.keys(settings.aliases).join(", ");
+    return `I don't know a model called "${cmd.target}". Known names: ${aliases || "none"}. Add one on the Team page.`;
   }
+  const roles = cmd.role === "all" ? AGENT_KEYS : [cmd.role];
+  const err = models.update({ roles: Object.fromEntries(roles.map((r) => [r, { model: ref }])) as never });
+  if (err) return err;
+  hive.log("models", "switched", `${roles.join(", ")} → ${ref}`);
+  return `${cmd.role === "all" ? "Every agent" : ROLE_LABEL[cmd.role]} now uses ${ref}.`;
 }
 
 function createTask(input: unknown, extra: { chatId?: string } = {}): { task?: Task; status: number; error?: unknown } {
   const parsed = AgentTaskSchema.safeParse(input);
   if (!parsed.success) return { status: 400, error: parsed.error.flatten() };
-  if (queue.length >= MAX_QUEUE) return { status: 429, error: `Queue is full (${MAX_QUEUE} tasks)` };
-  const id = parsed.data.id ?? crypto.randomUUID();
+  const d = parsed.data;
+  const id = d.id ?? crypto.randomUUID();
   if (tasks.has(id)) return { status: 409, error: "A task with this id already exists" };
-  const requested = parsed.data.targetAgent;
+  const queueIt = d.column === "ready";
+  if (queueIt && store.queuedCount() >= MAX_QUEUE) return { status: 429, error: `Queue is full (${MAX_QUEUE} tasks)` };
+  const missing = d.dependsOn.filter((dep) => !tasks.has(dep));
+  if (missing.length) return { status: 400, error: `Unknown dependency: ${missing.join(", ")}` };
+  const now = Date.now();
+  const requested = d.targetAgent;
   const task: Task = {
     id,
-    prompt: parsed.data.prompt,
+    prompt: d.prompt,
+    title: d.title || d.prompt.split("\n")[0].slice(0, 80),
     // Until the router runs, an "auto" task is shown as the planner's
     targetAgent: requested === "auto" ? "planner" : requested,
     requestedAgent: requested,
     routedBy: requested === "auto" ? undefined : "user",
-    source: parsed.data.source,
-    model: parsed.data.model ?? OLLAMA_MODEL,
-    status: "queued",
-    createdAt: Date.now(),
+    source: d.source,
+    model: "",
+    modelOverride: d.model,
+    status: queueIt ? "queued" : "backlog",
+    priority: d.priority,
+    dependsOn: d.dependsOn,
+    needsReview: d.needsReview,
+    position: now,
+    createdAt: now,
+    queuedAt: queueIt ? now : undefined,
     events: [],
     chatId: extra.chatId,
   };
-  tasks.set(id, task);
-  queue.push(id);
-  emit(task, "queued", `> ${task.prompt}\n\n`);
+
+  // Model switches answer at once and show up as a finished card
+  const switched = d.source !== "eval" ? handleSwitch(d.prompt) : null;
+  if (switched) {
+    task.status = "complete";
+    task.answer = switched;
+    task.finishedAt = now;
+    store.add(task);
+    emit(task, "queued", `> ${task.prompt}\n\n`);
+    emit(task, "complete", switched);
+    notifyDone(task);
+    return { task, status: 202 };
+  }
+
+  store.add(task);
+  emit(task, task.status, `> ${task.prompt}\n\n`);
   void pump();
   return { task, status: 202 };
 }
@@ -582,7 +673,7 @@ function enqueue(input: unknown, res: Response) {
   const result = createTask(input);
   if (!result.task) return res.status(result.status).json({ error: result.error });
   // position 0 means it starts right away
-  const position = runningTaskId === result.task.id ? 0 : queue.indexOf(result.task.id) + 1;
+  const position = runningTaskId === result.task.id || result.task.status === "complete" ? 0 : store.queuedCount();
   res.status(202).json({ taskId: result.task.id, position });
 }
 
@@ -591,9 +682,7 @@ function cancel(taskId: string | undefined, res: Response) {
   if (!task || TERMINAL_STATUSES.includes(task.status)) {
     return res.status(404).json({ error: "Task not found or already finished" });
   }
-  const queuedAt = queue.indexOf(task.id);
-  if (queuedAt >= 0) {
-    queue.splice(queuedAt, 1);
+  if (task.status === "queued" || task.status === "backlog") {
     task.finishedAt = Date.now();
     emit(task, "canceled", "[Removed from queue]");
     notifyDone(task);
@@ -602,6 +691,68 @@ function cancel(taskId: string | undefined, res: Response) {
     task.controller?.abort();
   }
   res.status(200).json({ status: "canceled", taskId: task.id });
+}
+
+function retry(task: Task): string | null {
+  if (!TERMINAL_STATUSES.includes(task.status)) return "Only finished, failed or canceled cards can be retried";
+  if (store.queuedCount() >= MAX_QUEUE) return `Queue is full (${MAX_QUEUE} tasks)`;
+  for (const sub of store.children(task.id)) store.archiveOne(sub.id);
+  Object.assign(task, {
+    error: undefined,
+    interrupted: undefined,
+    answer: undefined,
+    delegatedTo: undefined,
+    acceptedAt: undefined,
+    finishedAt: undefined,
+    startedAt: undefined,
+    queuedAt: Date.now(),
+  });
+  if (task.requestedAgent === "auto") task.routedBy = undefined;
+  emit(task, "queued", `\n\n── Attempt ${(task.attempts ?? 0) + 1} ──\n\n`);
+  void pump();
+  return null;
+}
+
+function patchTask(task: Task, input: unknown): { error?: string } {
+  const parsed = TaskPatchSchema.safeParse(input);
+  if (!parsed.success) return { error: JSON.stringify(parsed.error.flatten()) };
+  const p = parsed.data;
+  const editable = task.status === "backlog" || task.status === "queued";
+  if (!editable && (p.prompt || p.targetAgent || p.dependsOn || p.column)) return { error: "Only cards in Backlog or Ready can be changed" };
+  if (p.dependsOn) {
+    if (p.dependsOn.includes(task.id)) return { error: "A card can't depend on itself" };
+    const missing = p.dependsOn.filter((d) => !tasks.has(d));
+    if (missing.length) return { error: `Unknown dependency: ${missing.join(", ")}` };
+    // Refuse cycles: walk the dependency graph from each new dependency
+    const seen = new Set<string>();
+    const stack = [...p.dependsOn];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (id === task.id) return { error: "That would create a dependency loop" };
+      if (seen.has(id)) continue;
+      seen.add(id);
+      stack.push(...(tasks.get(id)?.dependsOn ?? []));
+    }
+    task.dependsOn = p.dependsOn;
+  }
+  if (p.title !== undefined) task.title = p.title || task.prompt.split("\n")[0].slice(0, 80);
+  if (p.prompt) task.prompt = p.prompt;
+  if (p.priority) task.priority = p.priority;
+  if (p.needsReview !== undefined) task.needsReview = p.needsReview;
+  if (p.position !== undefined) task.position = p.position;
+  if (p.targetAgent) {
+    task.requestedAgent = p.targetAgent;
+    task.targetAgent = p.targetAgent === "auto" ? "planner" : p.targetAgent;
+    task.routedBy = p.targetAgent === "auto" ? undefined : "user";
+  }
+  if (p.column && boardColumn(task) !== p.column) {
+    if (p.column === "ready" && store.queuedCount() >= MAX_QUEUE) return { error: `Queue is full (${MAX_QUEUE} tasks)` };
+    task.queuedAt = p.column === "ready" ? Date.now() : undefined;
+    emit(task, p.column === "ready" ? "queued" : "backlog");
+  }
+  store.save(task);
+  void pump();
+  return {};
 }
 
 // --- Telegram ---------------------------------------------------------------
@@ -625,8 +776,8 @@ if (TELEGRAM_BOT_TOKEN) {
       return result.task ? { taskId: result.task.id } : { error: String(typeof result.error === "string" ? result.error : "invalid task") };
     },
     queueText: () => {
-      const active = [...tasks.values()].filter((t) => !TERMINAL_STATUSES.includes(t.status));
-      return active.map((t) => `${t.id.slice(0, 8)} ${t.status} ${t.targetAgent}: ${t.prompt.slice(0, 60)}`).join("\n") || "Queue is empty.";
+      const active = [...tasks.values()].filter((t) => !t.parentId && !TERMINAL_STATUSES.includes(t.status) && t.status !== "backlog");
+      return active.map((t) => `${t.id.slice(0, 8)} ${t.status} ${t.targetAgent}: ${t.title ?? t.prompt.slice(0, 60)}`).join("\n") || "Queue is empty.";
     },
     log: (event, summary) => hive.log("telegram", event, summary),
   });
@@ -642,31 +793,33 @@ app.get("/health", async (_req: Request, res: Response) => {
   } catch {
     // reported as null below
   }
-  res.status(200).json({ status: "ok", service: "ts-harness", port: PORT, model: OLLAMA_MODEL, ollama });
+  res.status(200).json({ status: "ok", service: "ts-harness", port: PORT, model: models.resolve("planner").ref, ollama });
 });
 
 // GPU and queue state for the Mission Control system tile
 app.get("/api/system", async (_req: Request, res: Response) => {
   const queueInfo = {
     running: runningTaskId,
-    queued: queue.length,
-    fastModel: OLLAMA_FAST_MODEL,
+    queued: store.queuedCount(),
+    fastModel: models.resolve("router").ref,
     telegram: Boolean(telegram),
     obsidian: Boolean(OBSIDIAN_VAULT),
     browser: Boolean(BROWSER_CDP_URL),
     memories: memory.list().length,
+    lastModel: lastModelRef,
   };
+  const model = models.resolve("planner").ref;
   try {
     const r = await fetch(`${OLLAMA_BASE_URL}/api/ps`, { signal: AbortSignal.timeout(2000) });
     const ps = (await r.json()) as { models?: { name: string; size: number; size_vram: number }[] };
-    const models = (ps.models ?? []).map((m) => ({
+    const loaded = (ps.models ?? []).map((m) => ({
       name: m.name,
       sizeGB: Math.round((m.size / 1024 ** 3) * 10) / 10,
       vramPct: m.size > 0 ? Math.round((100 * m.size_vram) / m.size) : 0,
     }));
-    res.json({ ollama: "up", url: OLLAMA_BASE_URL, model: OLLAMA_MODEL, models, ...queueInfo });
+    res.json({ ollama: "up", url: OLLAMA_BASE_URL, model, models: loaded, ...queueInfo });
   } catch {
-    res.json({ ollama: "down", url: OLLAMA_BASE_URL, model: OLLAMA_MODEL, models: [], ...queueInfo });
+    res.json({ ollama: "down", url: OLLAMA_BASE_URL, model, models: [], ...queueInfo });
   }
 });
 
@@ -676,19 +829,121 @@ app.post("/api/agent/run", requireToken, (req, res) => enqueue(req.body, res));
 app.post("/api/agent/:id/cancel", requireToken, (req, res) => cancel(String(req.params.id), res));
 
 app.get("/api/tasks", (_req: Request, res: Response) => {
-  const list = [...tasks.values()].sort((a, b) => b.createdAt - a.createdAt).map(summarize);
+  const list = [...tasks.values()].filter((t) => !t.parentId).sort((a, b) => b.createdAt - a.createdAt).map(summarize);
   res.json(list);
 });
 
 app.get("/api/tasks/:id", (req: Request, res: Response) => {
   const task = tasks.get(String(req.params.id));
   if (!task) return res.status(404).json({ error: "Task not found" });
-  res.json({ ...summarize(task), events: task.events });
+  res.json({
+    ...summarize(task),
+    answer: task.answer,
+    plannedModel: plannedModel(task),
+    waitingOn: waitingOn(task, tasks),
+    subtasks: store.children(task.id).map((s) => ({ ...summarize(s), answer: s.answer })),
+    events: store.events(task.id),
+  });
+});
+
+// --- Board ------------------------------------------------------------------
+app.get("/api/board", (_req: Request, res: Response) => {
+  const cards = [...tasks.values()]
+    .filter((t) => !t.parentId)
+    .map((t) => {
+      const subs = store.children(t.id);
+      return {
+        ...summarize(t),
+        column: boardColumn(t),
+        plannedModel: t.model || plannedModel(t),
+        waitingOn: waitingOn(t, tasks),
+        subtasks: subs.map((s) => ({ id: s.id, title: s.title, targetAgent: s.targetAgent, status: s.status, model: s.model })),
+        preview: (t.answer ?? t.error ?? "").slice(0, 160),
+      };
+    })
+    .sort((a, b) => (a.position ?? a.createdAt) - (b.position ?? b.createdAt));
+  res.json({ columns: ["backlog", "ready", "running", "review", "done", "failed"], cards, running: runningTaskId });
+});
+
+app.post("/api/tasks", requireToken, (req, res) => {
+  const result = createTask({ source: "ui", ...req.body });
+  if (!result.task) return res.status(result.status).json({ error: result.error });
+  res.status(201).json(summarize(result.task));
+});
+
+app.patch("/api/tasks/:id", requireToken, (req, res) => {
+  const task = tasks.get(String(req.params.id));
+  if (!task || task.parentId) return res.status(404).json({ error: "Task not found" });
+  const result = patchTask(task, req.body);
+  if (result.error) return res.status(400).json({ error: result.error });
+  res.json(summarize(task));
+});
+
+app.post("/api/tasks/:id/retry", requireToken, (req, res) => {
+  const task = tasks.get(String(req.params.id));
+  if (!task || task.parentId) return res.status(404).json({ error: "Task not found" });
+  const err = retry(task);
+  if (err) return res.status(400).json({ error: err });
+  res.json(summarize(task));
+});
+
+app.post("/api/tasks/:id/accept", requireToken, (req, res) => {
+  const task = tasks.get(String(req.params.id));
+  if (!task || task.status !== "complete") return res.status(400).json({ error: "Only finished cards can be accepted" });
+  task.acceptedAt = Date.now();
+  store.save(task);
+  void pump(); // cards waiting on this one may now run
+  res.json(summarize(task));
+});
+
+app.post("/api/tasks/:id/archive", requireToken, (req, res) => {
+  const task = tasks.get(String(req.params.id));
+  if (!task || task.parentId) return res.status(404).json({ error: "Task not found" });
+  if (RUNNING_STATUSES.includes(task.status)) return res.status(400).json({ error: "Cancel the card before removing it" });
+  store.archive(task.id);
+  res.json({ ok: true });
+});
+
+// --- Models (Team page) -----------------------------------------------------
+app.get("/api/models", (_req, res) => {
+  const providers = models.providers().map((p) => ({
+    id: p.id,
+    name: p.name,
+    kind: p.kind,
+    local: p.local,
+    baseUrl: p.baseUrl,
+    apiKeyEnv: p.apiKeyEnv,
+    keySet: p.apiKeyEnv ? Boolean(process.env[p.apiKeyEnv]) : null,
+  }));
+  const resolved = Object.fromEntries(MODEL_ROLES.map((r) => [r, models.resolve(r).ref]));
+  res.json({ settings: models.settings(), resolved, providers, usage: store.usageToday() });
+});
+
+app.get("/api/models/available", async (req, res) => {
+  const p = models.providers().find((x) => x.id === String(req.query.provider ?? "ollama"));
+  if (!p) return res.status(404).json({ error: "Unknown provider" });
+  res.json({ provider: p.id, models: await listModels(p) });
+});
+
+app.get("/api/models/check", async (_req, res) => {
+  const providers = models.providers();
+  const results = await Promise.all(providers.map(async (p) => ({ id: p.id, ...(await checkProvider(p)) })));
+  res.json(results);
+});
+
+app.put("/api/models", requireToken, (req, res) => {
+  const err = models.update(req.body ?? {});
+  if (err) return res.status(400).json({ error: err });
+  hive.log("models", "updated", "Team model settings changed");
+  void pump();
+  res.json({ settings: models.settings() });
 });
 
 // Team, hive mind and memory
 app.get("/api/agents", (_req, res) => {
-  res.json(AGENT_KEYS.map((k) => ({ key: k, name: TEAM[k].name, role: TEAM[k].role, canDelegate: k === "planner" })));
+  res.json(
+    AGENT_KEYS.map((k) => ({ key: k, name: TEAM[k].name, role: TEAM[k].role, canDelegate: k === "planner", model: models.resolve(k).ref })),
+  );
 });
 app.get("/api/hive", (req, res) => {
   res.json(hive.recent(Math.min(Number(req.query.limit) || 100, 500)));
@@ -717,6 +972,9 @@ app.post("/cancel", requireToken, (req, res) => cancel(req.body?.taskId, res));
 
 app.listen(PORT, HOST, () => {
   console.log(`ts-harness listening on http://${HOST}:${PORT}`);
-  console.log(`Ollama: ${OLLAMA_BASE_URL}  model: ${OLLAMA_MODEL}  fast: ${OLLAMA_FAST_MODEL}  num_ctx: ${OLLAMA_NUM_CTX}`);
-  console.log(`Data: ${DATA_DIR}  Obsidian: ${OBSIDIAN_VAULT || "off"}  Telegram: ${telegram ? "on" : "off"}`);
+  console.log(`Ollama: ${OLLAMA_BASE_URL}  Jarvis: ${models.resolve("planner").ref}  router: ${models.resolve("router").ref}`);
+  console.log(`Data: ${DATA_DIR}  Obsidian: ${OBSIDIAN_VAULT || "off"}  Telegram: ${telegram ? "on" : "off"}  Browser: ${BROWSER_CDP_URL || "off"}`);
+  if (recovered) console.log(`Recovered ${recovered} task(s) interrupted by the last shutdown; they wait for Retry.`);
+  // Cards that were queued before the restart pick up where they left off
+  void pump();
 });

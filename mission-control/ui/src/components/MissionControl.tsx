@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentStatus, RequestedAgent } from "../../../src/schemas/agent";
 import { HARNESS_URL, authHeaders } from "../config";
 import { TERMINAL, useAgentStream } from "../useAgentStream";
+import Board from "./Board";
 import BrowserPane from "./BrowserPane";
 import PreviewPane from "./PreviewPane";
+import TeamPage from "./TeamPage";
 
 interface SystemInfo {
   ollama: "up" | "down";
@@ -37,9 +39,11 @@ interface MemoryItem {
 
 type RightTab = "commands" | "hive" | "memory";
 type CenterTab = "output" | "preview" | "browser";
+type View = "console" | "board" | "team";
 
 const STATUS_STYLES: Record<AgentStatus, string> = {
   idle: "bg-slate-700 text-slate-200",
+  backlog: "bg-slate-800 text-slate-400",
   queued: "bg-slate-700 text-slate-200",
   routing: "bg-sky-700/80 text-white",
   delegating: "bg-fuchsia-700/80 text-white",
@@ -63,6 +67,23 @@ export default function MissionControl() {
   const [targetAgent, setTargetAgent] = useState<RequestedAgent>("auto");
   const [rightTab, setRightTab] = useState<RightTab>("commands");
   const [centerTab, setCenterTab] = useState<CenterTab>("output");
+  const [view, setView] = useState<View>(() => (["board", "team"].includes(location.hash.slice(1)) ? (location.hash.slice(1) as View) : "console"));
+  useEffect(() => {
+    if (location.hash.slice(1) !== (view === "console" ? "" : view)) history.pushState(null, "", view === "console" ? location.pathname : `#${view}`);
+  }, [view]);
+  // Follow the address bar (back/forward, or a pasted #board / #team link)
+  useEffect(() => {
+    const onHash = () => {
+      const h = location.hash.slice(1);
+      setView(h === "board" || h === "team" ? h : "console");
+    };
+    window.addEventListener("hashchange", onHash);
+    window.addEventListener("popstate", onHash);
+    return () => {
+      window.removeEventListener("hashchange", onHash);
+      window.removeEventListener("popstate", onHash);
+    };
+  }, []);
   const [hive, setHive] = useState<HiveEntry[]>([]);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [newMemory, setNewMemory] = useState("");
@@ -157,6 +178,23 @@ export default function MissionControl() {
         <div className="flex items-center gap-3">
           <div className={`h-3 w-3 rounded-full ${connectionDot}`} title={`Harness: ${connection}`} />
           <h1 className="font-semibold text-lg tracking-wide">Mission Control — Sandcastle & Jarvis</h1>
+          <nav className="ml-4 flex gap-1 text-xs">
+            {(
+              [
+                ["console", "Console"],
+                ["board", "Board"],
+                ["team", "Team"],
+              ] as [View, string][]
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setView(key)}
+                className={`px-3 py-1 rounded-md font-medium ${view === key ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200"}`}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
         </div>
         <div className="flex items-center gap-3 text-sm font-mono">
           <span className="text-cyan-400">
@@ -183,6 +221,9 @@ export default function MissionControl() {
         </div>
       </header>
 
+      {view === "board" && <Board />}
+      {view === "team" && <TeamPage />}
+      {view === "console" && (<>
       {/* LEFT: TASK HISTORY */}
       <aside className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-4 min-h-0">
         <div className="flex-1 min-h-0 flex flex-col">
@@ -402,6 +443,7 @@ export default function MissionControl() {
           </div>
         </div>
       </aside>
+      </>)}
     </div>
   );
 }

@@ -9,6 +9,8 @@ export const RequestedAgentSchema = z.enum(["auto", "planner", "browser", "coder
 
 export const AgentStatusSchema = z.enum([
   "idle",
+  // On the board but not queued yet
+  "backlog",
   "queued",
   "routing",
   "thinking",
@@ -24,14 +26,44 @@ export const AgentStatusSchema = z.enum([
 // Where a task came from; voice tasks get spoken-style answers and are read aloud
 export const TaskSourceSchema = z.enum(["ui", "voice", "api", "eval", "telegram"]);
 
+export const PrioritySchema = z.enum(["low", "normal", "high"]);
+
+// Kanban columns. A task's column is worked out from its status (see boardColumn).
+export const BoardColumnSchema = z.enum(["backlog", "ready", "running", "review", "done", "failed"]);
+
+// A model reference: "provider/model", e.g. "ollama/qwen3:14b" or
+// "openrouter/anthropic/claude-sonnet-4.5". A bare name like "qwen3:14b" means Ollama.
+export const ModelRefSchema = z.string().regex(/^[\w.:\/@-]{1,120}$/);
+
 export const AgentTaskSchema = z.object({
   id: z.string().uuid().optional(),
   prompt: z.string().trim().min(1).max(20000),
   targetAgent: RequestedAgentSchema.default("planner"),
   source: TaskSourceSchema.default("api"),
-  // Ollama model for this task only (evals compare models); defaults to OLLAMA_MODEL
-  model: z.string().regex(/^[\w.:\/-]{1,100}$/).optional(),
+  // Model for this task only (evals compare models); otherwise the agent's own model
+  model: ModelRefSchema.optional(),
   context: z.record(z.string(), z.unknown()).optional(),
+  // Board fields
+  title: z.string().trim().max(200).optional(),
+  priority: PrioritySchema.default("normal"),
+  // Card ids that must be complete before this one runs
+  dependsOn: z.array(z.string().uuid()).max(10).default([]),
+  // Finished cards wait in the Review column until accepted
+  needsReview: z.boolean().default(false),
+  // "backlog" parks the card; "ready" queues it
+  column: z.enum(["backlog", "ready"]).default("ready"),
+});
+
+export const TaskPatchSchema = z.object({
+  title: z.string().trim().max(200).optional(),
+  prompt: z.string().trim().min(1).max(20000).optional(),
+  targetAgent: RequestedAgentSchema.optional(),
+  priority: PrioritySchema.optional(),
+  dependsOn: z.array(z.string().uuid()).max(10).optional(),
+  needsReview: z.boolean().optional(),
+  // Move between backlog and ready, or reorder within a column
+  column: z.enum(["backlog", "ready"]).optional(),
+  position: z.number().optional(),
 });
 
 export const AgentStreamPayloadSchema = z.object({
@@ -52,6 +84,7 @@ export const TaskSummarySchema = z.object({
   // Set when the router picked targetAgent
   routedBy: z.enum(["user", "router", "keywords"]).optional(),
   source: TaskSourceSchema,
+  // The model that ran (or will run) the task, as a model reference
   model: z.string(),
   // Agents that worked on the task through delegation, in order
   delegatedTo: z.array(AgentTargetSchema).optional(),
@@ -60,14 +93,45 @@ export const TaskSummarySchema = z.object({
   startedAt: z.number().optional(),
   finishedAt: z.number().optional(),
   error: z.string().optional(),
+  // Board fields
+  title: z.string().optional(),
+  priority: PrioritySchema.optional(),
+  dependsOn: z.array(z.string()).optional(),
+  needsReview: z.boolean().optional(),
+  acceptedAt: z.number().optional(),
+  parentId: z.string().optional(),
+  position: z.number().optional(),
+  // Set when a restart cut the run short; the card waits for Retry
+  interrupted: z.boolean().optional(),
+  attempts: z.number().optional(),
 });
 
 export type AgentTarget = z.infer<typeof AgentTargetSchema>;
 export type RequestedAgent = z.infer<typeof RequestedAgentSchema>;
 export type AgentStatus = z.infer<typeof AgentStatusSchema>;
 export type TaskSource = z.infer<typeof TaskSourceSchema>;
+export type Priority = z.infer<typeof PrioritySchema>;
+export type BoardColumn = z.infer<typeof BoardColumnSchema>;
 export type AgentTask = z.infer<typeof AgentTaskSchema>;
+export type TaskPatch = z.infer<typeof TaskPatchSchema>;
 export type AgentStreamPayload = z.infer<typeof AgentStreamPayloadSchema>;
 export type TaskSummary = z.infer<typeof TaskSummarySchema>;
 
 export const TERMINAL_STATUSES: readonly AgentStatus[] = ["complete", "canceled", "error"];
+
+export function boardColumn(t: Pick<TaskSummary, "status" | "needsReview" | "acceptedAt">): BoardColumn {
+  switch (t.status) {
+    case "backlog":
+    case "idle":
+      return "backlog";
+    case "queued":
+      return "ready";
+    case "complete":
+      return t.needsReview && !t.acceptedAt ? "review" : "done";
+    case "canceled":
+    case "error":
+      return "failed";
+    default:
+      return "running";
+  }
+}

@@ -22,6 +22,47 @@ your existing Mission Control. Your UI, the `/api/agent/*` routes, the legacy
 | **No silent thinking** | `makeJsonChat` in `src/hq/ollama.ts` | Routing and memory calls send `think: false` to models that support it, so qwen3 answers right away instead of reasoning first. |
 | **Preflight** | `scripts/preflight.ts` | `npm run preflight` checks the whole chain and prints a latency budget (see below). |
 
+## Board, per-agent models and saved history (Phases 0–2)
+
+**Saved history (Phase 0).** Tasks, their output and settings live in `data/mission-control.db`
+(Node's built-in SQLite, no packages). A restart loses nothing: queued cards carry on, and a
+run that was cut off mid-way comes back in **Failed** marked *interrupted*, waiting for you to
+press **Retry**. It isn't re-run on its own.
+
+**A different model for each agent (Phase 1).** On the **Team** page each agent (Jarvis,
+Coder, Browser, File, Security, plus the Router and Memory helpers) gets:
+- a model from any provider: `ollama/…` (local GPU), `lmstudio/…`, or a cloud provider once its
+  key is in `.env` (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`),
+  or any OpenAI-compatible server you add (vLLM, Groq, a second Ollama…);
+- a **fallback** used if the model fails before answering, or once a cloud model passes its
+  **daily token cap**;
+- context size, temperature and thinking on/off;
+- today's token use.
+
+Keys are only ever read from `.env`; the database and dashboard never see them. Delegated
+handoffs use each teammate's own model (the output header says which). Say or type
+`switch to claude`, `switch coder to local`, `use openrouter/x for the browser` or `go local`
+in the dashboard, Telegram or voice; nicknames like `claude` are set on the Team page.
+Your one GPU can only hold so much, so the queue prefers a card that uses the model already
+loaded (for at most `MODEL_GROUP_MAX_WAIT_MS`, default 60 s). Setting
+`OLLAMA_MAX_LOADED_MODELS=2` for Ollama on Windows keeps the main and helper models loaded together.
+
+**Kanban board (Phase 2).** The **Board** view has Backlog → Ready → Running → Review → Done / Failed.
+- **+ New card**: task, agent (or auto-route), priority, cards it waits for, and whether you
+  want to review the result. Park it in Backlog or queue it in Ready.
+- **Drag** Backlog ⇄ Ready to queue or park, Review → Done to accept, Failed/Done → Ready to
+  run again. Drop a card on another card to reorder. Ready runs by priority, then board order.
+- **Dependencies**: a card waits until the cards it depends on are done (and accepted, if they
+  need review). Dependency loops are refused.
+- **Card panel** (click a card): status, agent and model, each handoff with its own model and
+  answer, the full output, the code preview, and the actions that fit (Queue, Edit, Accept,
+  Retry, Cancel, Remove).
+- Tasks from the console, Telegram, voice and the API all appear on the board too.
+
+Board API: `GET /api/board`, `POST /api/tasks` (`title`, `prompt`, `targetAgent`, `priority`,
+`dependsOn`, `needsReview`, `column`), `PATCH /api/tasks/:id`, `POST /api/tasks/:id/retry|accept|archive`.
+Models API: `GET /api/models`, `PUT /api/models`, `GET /api/models/available?provider=…`, `GET /api/models/check`.
+
 Browser safety:
 - Every request the page makes (navigations, redirects, images, scripts) is checked; anything aimed at localhost, `*.local` or your private network (10.x, 172.16–31.x, 192.168.x, Tailscale 100.64.x) is blocked, so a web page can't steer the agent into your router, Proxmox or the harness.
 - Page text is passed to the model as untrusted data, and the agent is told never to sign in, enter passwords, payment or personal details, buy or post.
@@ -82,6 +123,6 @@ or "part runs on CPU: lower OLLAMA_NUM_CTX"). Exit code 1 if anything fails.
 ## Tests
 
 ```bash
-npm test        # HQ unit tests, no Ollama needed
+npm test        # HQ unit tests (20), no Ollama needed
 npm run eval    # your existing eval suite, unchanged
 ```

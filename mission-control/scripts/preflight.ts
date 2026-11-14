@@ -252,6 +252,36 @@ async function main() {
       else report("FAIL", "Task through queue", finalStatus ? `ended as ${finalStatus}` : "timed out");
     });
 
+    await check("Agent models", async () => {
+      const m = await getJson<{ resolved: Record<string, string>; providers: { id: string; local: boolean }[] }>(`${HARNESS}/api/models`);
+      const checks = await getJson<{ id: string; ok: boolean; detail: string }[]>(`${HARNESS}/api/models/check`, undefined, 20000);
+      let installed = new Set<string>();
+      try {
+        const tags = await getJson<{ models: { name: string }[] }>(`${OLLAMA}/api/tags`);
+        installed = new Set(tags.models.flatMap((t) => [t.name, t.name.replace(/:latest$/, "")]));
+      } catch {
+        // reported by the Ollama check above
+      }
+      const ollamaModels = new Set<string>();
+      for (const [role, ref] of Object.entries(m.resolved)) {
+        const slash = ref.indexOf("/");
+        const provider = ref.slice(0, slash);
+        const model = ref.slice(slash + 1);
+        if (provider === "ollama") {
+          ollamaModels.add(model);
+          if (!installed.has(model)) report("FAIL", `${role} model`, `${ref} is not installed: ollama pull ${model}`);
+        } else {
+          const c = checks.find((x) => x.id === provider);
+          report(c?.ok ? "PASS" : "FAIL", `${role} model`, `${ref}${c ? ` (${c.detail})` : " (provider missing)"}`);
+        }
+      }
+      const missing = [...ollamaModels].filter((x) => !installed.has(x));
+      if (!missing.length) report("PASS", "Agent models", `local models ready: ${[...ollamaModels].join(", ")}`);
+      if (ollamaModels.size > 2) {
+        report("WARN", "Model swapping", `${ollamaModels.size} different local models: each swap reloads the GPU. Set OLLAMA_MAX_LOADED_MODELS=2 on Windows and keep sizes small.`);
+      }
+    });
+
     await check("Memory write", async () => {
       const text = `Preflight check ${new Date().toISOString()}`;
       const created = await getJson<{ id: number }>(`${HARNESS}/api/memories`, {
