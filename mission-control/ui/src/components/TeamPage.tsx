@@ -56,6 +56,7 @@ const ROLES: { key: string; what: string }[] = [
   { key: "browser", what: "Decides each browsing step" },
   { key: "file", what: "Notes, vault and files" },
   { key: "security_audit", what: "Defensive reviews" },
+  { key: "vision", what: "Reads attached pictures (needs a vision model)" },
   { key: "router", what: "Picks the agent for auto tasks (fast model)" },
   { key: "memory", what: "Extracts memories between tasks (fast model)" },
 ];

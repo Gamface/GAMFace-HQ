@@ -40,6 +40,8 @@ import {
   withLiveContext,
 } from "./hq/team";
 import { TelegramBot } from "./hq/telegram";
+import { privateBlock } from "./hq/privacy";
+import { Uploads } from "./hq/uploads";
 
 // --- Config (env vars, see .env.example) ------------------------------------
 const PORT = Number(process.env.PORT) || 3008;
@@ -50,6 +52,8 @@ const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11435"
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen3:14b";
 // Default for the router and memory roles; falls back to OLLAMA_MODEL
 const OLLAMA_FAST_MODEL = process.env.OLLAMA_FAST_MODEL || OLLAMA_MODEL;
+// Default for the vision agent; it must be able to read images (qwen3.5, gemma4:12b, ...)
+const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL || "qwen3.5:latest";
 const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX) || 8192;
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || "30m";
 const OLLAMA_THINK = process.env.OLLAMA_THINK === "true";
@@ -91,7 +95,15 @@ const VOICE_STYLE =
 // --- State ------------------------------------------------------------------
 const store = new TaskStore(DATA_DIR);
 const { recovered } = store.load();
-const models = new ModelRegistry(store, { model: OLLAMA_MODEL, fastModel: OLLAMA_FAST_MODEL, numCtx: OLLAMA_NUM_CTX, think: OLLAMA_THINK, monthlyBudgetUsd: DEFAULT_MONTHLY_BUDGET_USD });
+const models = new ModelRegistry(store, {
+  model: OLLAMA_MODEL,
+  fastModel: OLLAMA_FAST_MODEL,
+  visionModel: OLLAMA_VISION_MODEL,
+  numCtx: OLLAMA_NUM_CTX,
+  think: OLLAMA_THINK,
+  monthlyBudgetUsd: DEFAULT_MONTHLY_BUDGET_USD,
+});
+const uploads = new Uploads(DATA_DIR);
 const hive = new Hive(DATA_DIR);
 const notices = new Notices(store);
 // Every model request goes through the gateway: local-only lock, spend caps, private-context rule
@@ -112,7 +124,8 @@ let nextEventId = Math.max(Date.now(), store.maxEventId() + 1);
 
 const app = express();
 app.use(cors({ origin: CORS_ORIGINS }));
-app.use(express.json({ limit: "1mb" }));
+// Room for a 10 MB picture sent as base64
+app.use(express.json({ limit: "16mb" }));
 
 function requireToken(req: Request, res: Response, next: NextFunction) {
   if (!HARNESS_TOKEN || req.headers.authorization === `Bearer ${HARNESS_TOKEN}`) return next();
@@ -473,7 +486,13 @@ async function runTask(task: Task) {
   let openSub: Task | null = null;
 
   try {
-    if (task.requestedAgent === "auto") {
+    const images = (task.images ?? []).map((id) => uploads.base64(id)).filter((b): b is string => Boolean(b));
+    if (task.requestedAgent === "auto" && images.length) {
+      // Pictures go to the agent that can see them
+      task.targetAgent = "vision";
+      task.routedBy = "router";
+      log("router", "routed", `→ vision (pictures attached): ${task.prompt}`);
+    } else if (task.requestedAgent === "auto") {
       emit(task, "routing");
       const routed = await routeTask(roleJson("router"), "router", task.prompt);
       task.targetAgent = routed.agent;
@@ -489,14 +508,55 @@ async function runTask(task: Task) {
     task.model = models.resolve(lead, override).ref;
     store.save(task);
     const delegate = canDelegate && lead === "planner";
-    emit(task, "thinking");
     let usedPrivate = false;
+
+    // Only the vision agent can see pictures. When another agent leads, Vision reads
+    // them first and the lead gets its description, which is private like the pictures.
+    let request = task.prompt;
+    if (images.length && lead !== "vision") {
+      openSub = addSubtask(task, "vision", `Describe the ${images.length} attached picture(s) for: ${task.prompt}`);
+      task.activeAgent = "vision";
+      emit(task, "delegating", `── ${TEAM.vision.name} (${openSub.model}) ── reading ${images.length} picture(s)\n\n`);
+      emit(task, "thinking");
+      const seen = await streamTurn(
+        task,
+        "vision",
+        [
+          { role: "system", content: systemPrompt(task, "vision", { team: false, delegate: false }) },
+          {
+            role: "user",
+            content: `Describe what the attached picture(s) show, in the detail another agent needs for this request:\n${task.prompt}`,
+            images,
+          },
+        ],
+        controller.signal,
+        push,
+      );
+      if (seen.ref) openSub.model = seen.ref;
+      finishSubtask(openSub, "complete", seen.text);
+      openSub = null;
+      usedPrivate ||= seen.sawPrivate;
+      task.activeAgent = lead;
+      flush();
+      emit(task, "thinking", `\n\n── ${TEAM[lead].name} ──\n\n`);
+      request = `${task.prompt}\n\n${privateBlock(
+        `DESCRIPTION OF THE ATTACHED PICTURES (from Jarvis Vision):\n${seen.text}`,
+        "(The attached pictures and their description stay on the user's PC and are withheld from cloud models.)",
+      )}`;
+    } else {
+      emit(task, "thinking");
+    }
+
     const firstTurn = await agentTurn(
       task,
       lead,
       [
         { role: "system", content: systemPrompt(task, lead, { team: useTeam, delegate }) },
-        { role: "user", content: userMessage(lead, task.prompt, task.prompt, useTeam) },
+        {
+          role: "user",
+          content: userMessage(lead, request, task.prompt, useTeam),
+          ...(lead === "vision" && images.length ? { images } : {}),
+        },
       ],
       task.prompt,
       controller.signal,
@@ -529,7 +589,12 @@ async function runTask(task: Task) {
           h.agent,
           [
             { role: "system", content: systemPrompt(task, h.agent, { team: true, delegate: false }) },
-            { role: "user", content: userMessage(h.agent, h.task, h.task, true) },
+            {
+              role: "user",
+              content: userMessage(h.agent, h.task, h.task, true),
+              // A handoff to Vision brings the card's pictures with it
+              ...(h.agent === "vision" && images.length ? { images } : {}),
+            },
           ],
           h.task,
           controller.signal,
@@ -643,7 +708,7 @@ setInterval(() => {
 }, MEMORY_INTERVAL_MIN * 60 * 1000);
 
 // --- Creating and changing cards ---------------------------------------------
-const ROLE_LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", router: "Router", memory: "Memory" };
+const ROLE_LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", vision: "Vision", router: "Router", memory: "Memory" };
 
 /** "switch coder to claude" and friends change models without running a task. */
 function handleSwitch(text: string): string | null {
@@ -672,6 +737,7 @@ function createTask(input: unknown, extra: { chatId?: string } = {}): { task?: T
   if (queueIt && store.queuedCount() >= MAX_QUEUE) return { status: 429, error: `Queue is full (${MAX_QUEUE} tasks)` };
   const missing = d.dependsOn.filter((dep) => !tasks.has(dep));
   if (missing.length) return { status: 400, error: `Unknown dependency: ${missing.join(", ")}` };
+  if (d.images.some((id) => !uploads.exists(id))) return { status: 400, error: "Unknown picture: upload it with POST /api/uploads first" };
   // Routine runs are forced read-only and get exactly one destination
   const routine = routineFields(d, { telegramChat: telegram ? [...TELEGRAM_ALLOWED][0] : undefined, vault: OBSIDIAN_VAULT || undefined });
   if ("error" in routine) return { status: 400, error: routine.error };
@@ -695,6 +761,7 @@ function createTask(input: unknown, extra: { chatId?: string } = {}): { task?: T
     readOnly: routine.readOnly || undefined,
     deliverTo: routine.deliverTo,
     allowedSites: d.allowedSites.length ? d.allowedSites : undefined,
+    images: d.images.length ? d.images : undefined,
     position: now,
     createdAt: now,
     queuedAt: queueIt ? now : undefined,
@@ -799,6 +866,12 @@ function patchTask(task: Task, input: unknown): { error?: string } {
     task.readOnly = p.readOnly || undefined;
   }
   if (p.allowedSites !== undefined) task.allowedSites = p.allowedSites.length ? p.allowedSites : undefined;
+  if (p.images !== undefined) {
+    if (!editable) return { error: "Only cards in Backlog or Ready can change their pictures" };
+    const missing = p.images.filter((id) => !uploads.exists(id));
+    if (missing.length) return { error: "Unknown picture: upload it first" };
+    task.images = p.images.length ? p.images : undefined;
+  }
   if (p.position !== undefined) task.position = p.position;
   if (p.targetAgent) {
     task.requestedAgent = p.targetAgent;
@@ -1039,6 +1112,24 @@ app.get("/api/hive", (req, res) => {
   res.json(hive.recent(Math.min(Number(req.query.limit) || 100, 500)));
 });
 app.get("/api/memories", (_req, res) => res.json(memory.list()));
+// Pictures for cards: upload as base64 (a data: URL is fine), then pass the id in "images"
+app.post("/api/uploads", requireToken, (req, res) => {
+  const data = typeof req.body?.data === "string" ? req.body.data : "";
+  const out = uploads.save(data);
+  if ("error" in out) return res.status(400).json({ error: out.error });
+  res.status(201).json(out);
+});
+app.get("/api/uploads/:id", (req, res) => {
+  const img = uploads.read(String(req.params.id));
+  if (!img) return res.status(404).json({ error: "Picture not found" });
+  res.setHeader("Content-Type", img.type);
+  res.setHeader("Content-Length", String(img.buf.length));
+  res.setHeader("Cache-Control", "private, max-age=31536000, immutable");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Content-Security-Policy", "default-src 'none'");
+  res.end(img.buf);
+});
+
 app.post("/api/memories", requireToken, (req, res) => {
   const text = typeof req.body?.text === "string" ? req.body.text : "";
   const id = memory.add(text, "shared", 0.7, req.body?.pinned !== false);

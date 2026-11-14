@@ -5,7 +5,7 @@ import type { TaskStore } from "./taskstore";
 // Which model each agent uses. Settings live in the database (edited on the
 // Team page or with "switch <agent> to <model>"), with defaults from .env.
 
-export const MODEL_ROLES = ["planner", "coder", "browser", "file", "security_audit", "router", "memory"] as const;
+export const MODEL_ROLES = ["planner", "coder", "browser", "file", "security_audit", "vision", "router", "memory"] as const;
 export type ModelRole = (typeof MODEL_ROLES)[number];
 
 export interface RoleSettings {
@@ -68,6 +68,8 @@ export interface ModelDefaults {
   fastModel: string;
   numCtx: number;
   think: boolean;
+  /** Default model for the vision agent (must be able to read images) */
+  visionModel?: string;
   /** Overall monthly cap that applies until one is saved on the Team page (clearing it there means no cap) */
   monthlyBudgetUsd?: number;
 }
@@ -90,7 +92,7 @@ export class ModelRegistry {
     for (const r of MODEL_ROLES) {
       const background = r === "router" || r === "memory";
       roles[r] = {
-        model: background ? fast : main,
+        model: background ? fast : r === "vision" ? `ollama/${this.defaults.visionModel ?? "qwen3.5:latest"}` : main,
         numCtx: this.defaults.numCtx,
         think: background ? false : this.defaults.think,
         localOnly: LOCAL_ONLY_BY_DEFAULT.includes(r),
@@ -211,7 +213,9 @@ export class ModelRegistry {
     const providers = this.providers();
     const fb = s.fallback ? parseModelRef(s.fallback, providers) : null;
     const main = parseModelRef(s.model, providers);
-    const pick = fb?.provider.local ? fb : main?.provider.local ? main : parseModelRef(`ollama/${this.defaults.model}`, providers)!;
+    // The vision agent's last resort is the local vision model, since a text model can't read pictures
+    const defaultLocal = role === "vision" ? (this.defaults.visionModel ?? "qwen3.5:latest") : this.defaults.model;
+    const pick = fb?.provider.local ? fb : main?.provider.local ? main : parseModelRef(`ollama/${defaultLocal}`, providers)!;
     return { role, ref: `${pick.provider.id}/${pick.model}`, provider: pick.provider, model: pick.model, settings: s };
   }
 
@@ -239,6 +243,8 @@ const ROLE_NAMES: Record<string, ModelRole> = {
   security: "security_audit",
   security_audit: "security_audit",
   auditor: "security_audit",
+  vision: "vision",
+  eyes: "vision",
   router: "router",
   memory: "memory",
 };

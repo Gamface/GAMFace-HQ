@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AGENT_COLORS, AGENT_LABELS, getJson, send, splitModel } from "../api";
+import { AGENT_COLORS, AGENT_LABELS, getJson, imageUrl, send, splitModel } from "../api";
 import type { BoardCard } from "../api";
 import { CardForm } from "./NewCardDialog";
 import PreviewPane from "./PreviewPane";
@@ -23,6 +23,7 @@ interface Detail {
   readOnly?: boolean;
   allowedSites?: string[];
   usedPrivate?: boolean;
+  images?: string[];
   acceptedAt?: number;
   interrupted?: boolean;
   attempts?: number;
@@ -125,6 +126,15 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
             </div>
           )}
           {d && d.waitingOn.length > 0 && <p className="mt-2 text-xs text-amber-300">⏳ Waiting on: {d.waitingOn.map(titleOf).join(", ")}</p>}
+          {d?.images && d.images.length > 0 && (
+            <div className="flex flex-wrap gap-2 mt-3">
+              {d.images.map((id) => (
+                <a key={id} href={imageUrl(id)} target="_blank" rel="noreferrer" title="Open full size">
+                  <img src={imageUrl(id)} alt="attached picture" className="h-20 w-20 object-cover rounded border border-slate-700 hover:border-cyan-500" />
+                </a>
+              ))}
+            </div>
+          )}
           {d?.interrupted && <p className="mt-2 text-xs text-amber-300">⚠ A restart cut this run short. Retry to run it again.</p>}
           {d && (
             <div className="flex flex-wrap gap-2 mt-3">
@@ -180,6 +190,7 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
                 needsReview: Boolean(d.needsReview),
                 readOnly: Boolean(d.readOnly),
                 allowedSites: d.allowedSites ?? [],
+                images: d.images ?? [],
               }}
               cards={cards}
               selfId={id}

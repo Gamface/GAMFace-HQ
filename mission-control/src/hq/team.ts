@@ -6,7 +6,7 @@ import { privateBlock, sanitize } from "./privacy";
 // The agent team: who is on it, how tasks get routed, and how the lead hands
 // work to teammates. Keys match AgentTargetSchema in ../schemas/agent.ts.
 
-export type AgentKey = "planner" | "coder" | "browser" | "file" | "security_audit";
+export type AgentKey = "planner" | "coder" | "browser" | "file" | "security_audit" | "vision";
 
 export interface TeamMember {
   key: AgentKey;
@@ -51,6 +51,13 @@ export const TEAM: Record<AgentKey, TeamMember> = {
     prompt:
       "You are Jarvis Defensive Security Auditor. Review the described system for exposed ports, weak configuration and missing hardening, and give prioritized, defensive fixes.",
   },
+  vision: {
+    key: "vision",
+    name: "Jarvis Vision",
+    role: "reads pictures: screenshots, photos, diagrams, documents",
+    prompt:
+      "You are Jarvis Vision. Look carefully at the attached pictures and answer about what they actually show: read text exactly, describe layouts, errors, diagrams and details. Say plainly when something is unclear or not visible.",
+  },
 };
 
 export const AGENT_KEYS = Object.keys(TEAM) as AgentKey[];
@@ -65,6 +72,7 @@ export function rosterText(exclude?: AgentKey): string {
 const KEYWORDS: [AgentKey, RegExp][] = [
   ["coder", /\b(code|script|function|bug|debug|python|typescript|javascript|regex|compile|refactor|npm|dockerfile)\b/i],
   ["security_audit", /\b(security|vulnerab\w*|audit|harden\w*|firewall|cve|exposed|open ports?)\b/i],
+  ["vision", /\b(screenshot|picture|photo|image|diagram|this pic)\b/i],
   ["file", /\b(notes?|obsidian|vault|files?|folder|organi[sz]e)\b/i],
   ["browser", /\b(search|look up|latest|news|website|web|price of)\b/i],
 ];

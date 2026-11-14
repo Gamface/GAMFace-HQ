@@ -3,9 +3,11 @@ import { z } from "zod";
 // Shared by the harness (src/ui.ts) and the Mission Control UI (ui/), so this
 // file is the single source of truth for task and event shapes.
 
-export const AgentTargetSchema = z.enum(["planner", "browser", "coder", "file", "security_audit"]);
+export const AgentTargetSchema = z.enum(["planner", "browser", "coder", "file", "security_audit", "vision"]);
 // What a client may ask for: a specific agent, or "auto" to let the router pick
-export const RequestedAgentSchema = z.enum(["auto", "planner", "browser", "coder", "file", "security_audit"]);
+export const RequestedAgentSchema = z.enum(["auto", "planner", "browser", "coder", "file", "security_audit", "vision"]);
+// An attached picture, by its upload id (see hq/uploads.ts)
+export const ImageIdSchema = z.string().regex(/^[a-f0-9]{64}\.(png|jpg|gif|webp)$/);
 
 export const AgentStatusSchema = z.enum([
   "idle",
@@ -61,6 +63,8 @@ export const AgentTaskSchema = z.object({
   allowedSites: z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{1,253}$/)).max(10).default([]),
   // Routine runs only: where the result is sent (default: the dashboard)
   deliverTo: DeliverySchema.optional(),
+  // Pictures for the vision agent to look at
+  images: z.array(ImageIdSchema).max(6).default([]),
 });
 
 export const TaskPatchSchema = z.object({
@@ -75,6 +79,7 @@ export const TaskPatchSchema = z.object({
   position: z.number().optional(),
   readOnly: z.boolean().optional(),
   allowedSites: z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{1,253}$/)).max(10).optional(),
+  images: z.array(ImageIdSchema).max(6).optional(),
 });
 
 export const AgentStreamPayloadSchema = z.object({
@@ -118,7 +123,8 @@ export const TaskSummarySchema = z.object({
   readOnly: z.boolean().optional(),
   allowedSites: z.array(z.string()).optional(),
   deliverTo: DeliverySchema.optional(),
-  // True when the answer was produced from private material (vault notes, memories)
+  images: z.array(z.string()).optional(),
+  // True when the answer was produced from private material (vault notes, memories, pictures)
   usedPrivate: z.boolean().optional(),
 });
 

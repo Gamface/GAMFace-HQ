@@ -23,6 +23,21 @@ export async function send<T = unknown>(method: "POST" | "PATCH" | "PUT", path: 
   return data as T;
 }
 
+/** Uploads a picture and returns its id, for a card's "images". */
+export async function uploadImage(file: Blob): Promise<string> {
+  if (!file.type.startsWith("image/")) throw new Error("Only pictures can be attached");
+  const data = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(new Error("Couldn't read the picture"));
+    r.readAsDataURL(file);
+  });
+  const out = await send<{ id: string }>("POST", "/api/uploads", { data });
+  return out.id;
+}
+
+export const imageUrl = (id: string) => `${HARNESS_URL}/api/uploads/${id}`;
+
 /** "ollama/qwen2.5-coder:14b" → { name: "qwen2.5-coder:14b", provider: "ollama" } */
 export function splitModel(ref?: string | null): { name: string; provider: string } {
   if (!ref) return { name: "auto", provider: "" };
@@ -37,6 +52,7 @@ export const AGENT_LABELS: Record<string, string> = {
   browser: "Browser",
   file: "File",
   security_audit: "Security",
+  vision: "Vision",
   router: "Router",
   memory: "Memory",
 };
@@ -47,6 +63,7 @@ export const AGENT_COLORS: Record<string, string> = {
   browser: "bg-sky-800/70 text-sky-100",
   file: "bg-amber-800/70 text-amber-100",
   security_audit: "bg-rose-800/70 text-rose-100",
+  vision: "bg-emerald-800/70 text-emerald-100",
 };
 
 export interface SubtaskCard {
@@ -74,6 +91,7 @@ export interface BoardCard {
   deliverTo?: "dashboard" | "telegram" | "obsidian";
   allowedSites?: string[];
   usedPrivate?: boolean;
+  images?: string[];
   interrupted?: boolean;
   attempts?: number;
   position?: number;

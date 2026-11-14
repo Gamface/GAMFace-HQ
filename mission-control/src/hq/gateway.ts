@@ -2,7 +2,7 @@ import type { ModelRegistry, ModelRole, Resolved } from "./models";
 import type { Notices } from "./notices";
 import type { ChatMessage } from "./ollama";
 import { resolvePrivate } from "./privacy";
-import { chatOnce, chatStream } from "./providers";
+import { chatOnce, chatStream, supportsVision } from "./providers";
 import type { TaskStore } from "./taskstore";
 
 // The one place model requests leave Mission Control. Every call (agent turns,
@@ -40,7 +40,7 @@ export interface Prepared {
   notes: string[];
 }
 
-const LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", router: "Router", memory: "Memory" };
+const LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", vision: "Vision", router: "Router", memory: "Memory" };
 const MARKERS = /[⟦⟧]/;
 
 /** Dollars, with enough decimals to be useful for small caps. */
@@ -93,6 +93,16 @@ export class ModelGateway {
       r = local;
     }
 
+    // 1c. Pictures are private: they go to a cloud model only if the agent may send private context
+    const hasImages = messages.some((m) => m.images?.length);
+    if (hasImages && !r.provider.local && !r.settings.allowPrivateToCloud) {
+      const local = this.models.localFor(role);
+      const msg = `${who} was given pictures, which stay on your PC, so it used ${local.ref} instead of ${r.ref}.`;
+      notes.push(msg);
+      this.notices.add("local-only", `images:${role}:${r.ref}`, msg);
+      r = local;
+    }
+
     // 2. Spend caps (cloud only)
     if (!r.provider.local) {
       const settings = this.models.settings();
@@ -130,9 +140,18 @@ export class ModelGateway {
       if (res.hadPrivate && allow) sawPrivate = true;
       return { ...m, content: res.text };
     });
+    // An answer about your pictures is private too
+    if (hasImages) sawPrivate = true;
     // Belt and braces: nothing marked may survive into a request
     if (out.some((m) => MARKERS.test(m.content))) throw new Error("Private-context markers survived preparation; request blocked");
     return { r, messages: out, sawPrivate, notes };
+  }
+
+  /** Pictures need a model that can read them; say which one to pick instead of sending them nowhere. */
+  private async checkVision(p: Prepared) {
+    if (!p.messages.some((m) => m.images?.length)) return;
+    if (await supportsVision(p.r.provider, p.r.model)) return;
+    throw new Error(`${p.r.ref} can't read pictures. On the Team page, give the Vision agent a vision model (for example ollama/qwen3.5:latest or ollama/gemma4:12b).`);
   }
 
   private cost(r: Resolved, promptTokens: number, completionTokens: number): number {
@@ -162,6 +181,7 @@ export class ModelGateway {
     const attempt = async (candidate: Resolved): Promise<CallResult> => {
       const p = this.prepare(role, messages, candidate, opts);
       p.notes.forEach(onNote);
+      await this.checkVision(p);
       const s = p.r.settings;
       let gotTokens = false;
       try {
@@ -194,6 +214,7 @@ export class ModelGateway {
     const attempt = async (candidate: Resolved): Promise<CallResult> => {
       const p = this.prepare(role, messages, candidate, opts);
       p.notes.forEach(onNote);
+      await this.checkVision(p);
       try {
         const out = await chatOnce(p.r.provider, p.r.model, p.messages, { json: true, think: false, temperature: 0.1, numCtx: p.r.settings.numCtx, keepAlive: this.keepAlive });
         this.record(role, p.r, p.messages, out.text, out);

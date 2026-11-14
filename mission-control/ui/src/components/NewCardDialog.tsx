@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import { AGENT_LABELS, send } from "../api";
 import type { BoardCard } from "../api";
+import ImageAttach, { imageFiles, useImageUploads } from "./ImageAttach";
 
 // Form for a new card (also reused for editing a card in Backlog or Ready).
 
@@ -14,6 +15,7 @@ export interface CardFields {
   needsReview: boolean;
   readOnly: boolean;
   allowedSites: string[];
+  images: string[];
 }
 
 export function CardForm({
@@ -37,10 +39,12 @@ export function CardForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof CardFields>(k: K, v: CardFields[K]) => setF((prev) => ({ ...prev, [k]: v }));
+  const uploader = useImageUploads(f.images, (ids) => set("images", ids));
   const candidates = cards.filter((c) => c.id !== selfId && c.column !== "failed").sort((a, b) => b.createdAt - a.createdAt);
 
   const submit = async () => {
     if (!f.prompt.trim()) return setError("Describe the task.");
+    if (uploader.busy) return setError("Wait for the pictures to finish uploading.");
     setBusy(true);
     try {
       await onSubmit(f);
@@ -66,15 +70,23 @@ export function CardForm({
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void submit();
           }}
-          placeholder="What should the agent do? (Ctrl+Enter to save)"
+          onPaste={(e) => {
+            const files = imageFiles(e.clipboardData?.items);
+            if (files.length) {
+              e.preventDefault();
+              void uploader.add(files);
+            }
+          }}
+          placeholder="What should the agent do? (Ctrl+Enter to save; paste pictures here)"
           autoFocus
         />
       </label>
+      <ImageAttach value={f.images} onChange={(ids) => set("images", ids)} uploader={uploader} />
       <div className="grid grid-cols-2 gap-3">
         <label className="block">
           <span className="text-xs text-slate-400">Agent</span>
           <select className={input} value={f.targetAgent} onChange={(e) => set("targetAgent", e.target.value)}>
-            {["auto", "planner", "coder", "browser", "file", "security_audit"].map((k) => (
+            {["auto", "planner", "coder", "browser", "file", "security_audit", "vision"].map((k) => (
               <option key={k} value={k}>
                 {AGENT_LABELS[k]}
                 {k === "planner" ? " (can delegate)" : ""}
@@ -170,7 +182,7 @@ export default function NewCardDialog({
       <div className="w-full max-w-lg bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
         <h2 className="text-base font-semibold text-slate-100 mb-3">New card</h2>
         <CardForm
-          initial={{ title: "", prompt: "", targetAgent: "auto", priority: "normal", dependsOn: [], needsReview: false, readOnly: false, allowedSites: [] }}
+          initial={{ title: "", prompt: "", targetAgent: "auto", priority: "normal", dependsOn: [], needsReview: false, readOnly: false, allowedSites: [], images: [] }}
           cards={cards}
           submitLabel={where === "ready" ? "Add & queue" : "Add to Backlog"}
           onCancel={onClose}

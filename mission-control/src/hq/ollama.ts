@@ -4,6 +4,8 @@
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
+  /** Pictures as base64, for vision models */
+  images?: string[];
 }
 
 export type JsonChat = (model: string, messages: ChatMessage[]) => Promise<Record<string, unknown>>;

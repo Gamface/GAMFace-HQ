@@ -5,6 +5,7 @@ import { TERMINAL, useAgentStream } from "../useAgentStream";
 import Board from "./Board";
 import NoticesBar from "./NoticesBar";
 import BrowserPane from "./BrowserPane";
+import ImageAttach, { imageFiles, useImageUploads } from "./ImageAttach";
 import PreviewPane from "./PreviewPane";
 import TeamPage from "./TeamPage";
 
@@ -65,6 +66,8 @@ export default function MissionControl() {
   const { connection, tasks, statusEvents } = useAgentStream(HARNESS_URL);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
+  const [images, setImages] = useState<string[]>([]);
+  const uploader = useImageUploads(images, setImages);
   const [targetAgent, setTargetAgent] = useState<RequestedAgent>("auto");
   const [rightTab, setRightTab] = useState<RightTab>("commands");
   const [centerTab, setCenterTab] = useState<CenterTab>("output");
@@ -152,12 +155,13 @@ export default function MissionControl() {
       const res = await fetch(`${HARNESS_URL}/api/agent/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ id: crypto.randomUUID(), prompt, targetAgent, source: "ui" }),
+        body: JSON.stringify({ id: crypto.randomUUID(), prompt, targetAgent, source: "ui", images }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(typeof body.error === "string" ? body.error : JSON.stringify(body.error));
       setSelectedId(body.taskId);
       setPrompt("");
+      setImages([]);
     } catch (err) {
       setDispatchError(err instanceof Error ? err.message : String(err));
     }
@@ -271,6 +275,7 @@ export default function MissionControl() {
             <option value="auto">auto (route for me)</option>
             <option value="planner">planner (Lead — delegates)</option>
             <option value="security_audit">security_audit (Defensive Scan)</option>
+            <option value="vision">vision (Reads pictures)</option>
             <option value="coder">coder (TypeScript / Python)</option>
             <option value="browser">browser (Web Agent)</option>
             <option value="file">file (Vault & Disk)</option>
@@ -423,14 +428,22 @@ export default function MissionControl() {
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void handleRunTask();
             }}
-            placeholder="Dispatch a task (Ctrl+Enter)..."
+            onPaste={(e) => {
+              const files = imageFiles(e.clipboardData?.items);
+              if (files.length) {
+                e.preventDefault();
+                void uploader.add(files);
+              }
+            }}
+            placeholder="Dispatch a task (Ctrl+Enter). Paste pictures here too."
             className="w-full h-24 bg-slate-950 border border-slate-800 rounded-lg p-3 text-sm text-slate-200 resize-none focus:outline-none focus:border-cyan-500 font-mono"
           />
+          <ImageAttach value={images} onChange={setImages} uploader={uploader} compact />
           {dispatchError && <p className="text-rose-400 text-xs font-mono">{dispatchError}</p>}
           <div className="flex gap-2">
             <button
               onClick={() => void handleRunTask()}
-              disabled={!prompt.trim() || connection !== "open"}
+              disabled={!prompt.trim() || connection !== "open" || uploader.busy}
               className="flex-1 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 disabled:text-slate-400 text-white font-medium py-2 rounded-lg transition-colors text-sm shadow-lg shadow-cyan-950/50"
             >
               Dispatch to Agent

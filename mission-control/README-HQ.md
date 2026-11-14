@@ -111,6 +111,23 @@ runs. Each has one destination (`deliverTo`: `dashboard`, `telegram` or `obsidia
 in `HQ/routines`); its prompt can't switch models, and its findings stay on its card rather
 than in the hive log. Rules: `src/hq/routine.ts`.
 
+## Pictures
+
+Attach pictures (PNG, JPEG, GIF, WebP, up to 10 MB, 6 per card) to a new card or the
+Console box: pick them, drag them in, or paste a screenshot straight into the text box.
+- A card with pictures and **Auto-route** goes to the **Vision** agent.
+- If you pick another agent, Vision reads the pictures first and that agent gets its
+  description. When Jarvis delegates to `@vision`, the pictures go along.
+- Pictures are private, like your notes: they never go to a cloud model unless you tick
+  *Private → cloud* for the Vision agent, and answers about them are marked 🔒.
+- The Vision agent needs a model that can see. It defaults to `ollama/qwen3.5:latest`
+  (set `OLLAMA_VISION_MODEL` to change it); `gemma4:12b` also fits a 16 GB card. A model
+  that can't read pictures is refused with a message saying so.
+- Pictures are stored in `data/uploads/`, named by their content hash.
+
+API: `POST /api/uploads` with `{ "data": "<base64 or data: URL>" }` returns `{ id }`; pass
+ids in a card's `images`. `GET /api/uploads/:id` returns the picture.
+
 Browser safety:
 - Every request the page makes (navigations, redirects, images, scripts) is checked; anything aimed at localhost, `*.local` or your private network (10.x, 172.16–31.x, 192.168.x, Tailscale 100.64.x) is blocked, so a web page can't steer the agent into your router, Proxmox or the harness.
 - Page text is passed to the model as untrusted data, and the agent is told never to sign in, enter passwords, payment or personal details, buy or post.
