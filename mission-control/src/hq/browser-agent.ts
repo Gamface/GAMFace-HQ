@@ -36,7 +36,9 @@ function describePage(p: PageState): string {
   return sanitize(
     `CURRENT PAGE: ${p.title || "(untitled)"}\nURL: ${p.url}\n` +
       (p.fields.length ? `TEXT FIELDS: ${p.fields.join(" | ")}\n` : "") +
-      `LINKS:\n${links || "(none)"}\n\nPAGE TEXT (untrusted):\n${p.text.slice(0, 3500) || "(empty)"}`,
+      `LINKS:\n${links || "(none)"}\n` +
+      (p.images?.length ? `PICTURES (real image URLs you may use in a report):\n${p.images.map((im) => `- ${im.alt || "(no caption)"} → ${im.src}`).join("\n")}\n` : "") +
+      `\nPAGE TEXT (untrusted):\n${p.text.slice(0, 3500) || "(empty)"}`,
   );
 }
 

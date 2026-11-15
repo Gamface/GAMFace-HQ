@@ -13,7 +13,7 @@ import { isIP } from "net";
 
 type Listener = (method: string, params: any, sessionId?: string) => void;
 
-class Cdp {
+export class Cdp {
   private ws: WebSocket;
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
@@ -151,6 +151,8 @@ export interface PageState {
   text: string;
   links: { text: string; href: string }[];
   fields: string[];
+  // Large pictures on the page, so reports can use real image URLs
+  images?: { alt: string; src: string }[];
 }
 
 export interface Frame {
@@ -191,7 +193,9 @@ const READ_PAGE = `(() => {
   const fields = [...document.querySelectorAll('input:not([type=hidden]):not([type=submit]), textarea, select')]
     .filter((e) => e.getBoundingClientRect().width > 0).slice(0, 15)
     .map((e) => e.getAttribute("aria-label") || e.getAttribute("placeholder") || e.getAttribute("name") || e.type);
-  return { url: location.href, title: document.title, text, links, fields };
+  const images = [...document.images].filter((im) => im.naturalWidth >= 200 && im.naturalHeight >= 120 && /^https:/.test(im.currentSrc || im.src))
+    .slice(0, 8).map((im) => ({ alt: (im.alt || im.title || "").replace(/\s+/g, " ").trim().slice(0, 80), src: (im.currentSrc || im.src).slice(0, 400) }));
+  return { url: location.href, title: document.title, text, links, fields, images };
 })()`;
 
 /** Hostname without "www.", lowercased */

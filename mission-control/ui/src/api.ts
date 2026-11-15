@@ -38,6 +38,14 @@ export async function uploadImage(file: Blob): Promise<string> {
 
 export const imageUrl = (id: string) => `${HARNESS_URL}/api/uploads/${id}`;
 export const uploadUrl = imageUrl;
+export const fileUrl = (name: string, download = false) => `${HARNESS_URL}/api/files/${name}${download ? "?download=1" : ""}`;
+
+export interface CardFile {
+  name: string;
+  bytes: number;
+  pictures?: number;
+  at: number;
+}
 
 /** Converts audio to 16 kHz mono WAV in the browser, uploads it, and returns its id and length. */
 export async function uploadAudio(file: Blob): Promise<{ id: string; seconds: number }> {
@@ -110,6 +118,7 @@ export interface BoardCard {
   images?: string[];
   audio?: string[];
   replies?: number;
+  files?: CardFile[];
   interrupted?: boolean;
   attempts?: number;
   position?: number;

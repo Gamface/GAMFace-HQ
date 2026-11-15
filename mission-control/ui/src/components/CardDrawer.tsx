@@ -4,6 +4,8 @@ import type { BoardCard } from "../api";
 import { CardForm } from "./NewCardDialog";
 import PreviewPane from "./PreviewPane";
 import ReplyBox from "./ReplyBox";
+import FilesBar from "./FilesBar";
+import type { CardFile } from "../api";
 
 // Side panel for one card: what it is, where it stands, its handoffs and output,
 // and the actions that make sense for its column.
@@ -33,6 +35,7 @@ interface Detail {
   attempts?: number;
   error?: string;
   answer?: string;
+  files?: CardFile[];
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
@@ -194,6 +197,11 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
               )}
             </div>
           )}
+          {d && (d.files?.length || (d.answer && (col === "done" || col === "review"))) ? (
+            <div className="mt-3">
+              <FilesBar taskId={id} files={d.files} canMake={Boolean(d.answer) && (col === "done" || col === "review")} />
+            </div>
+          ) : null}
           {error && <p className="mt-2 text-xs text-rose-300">{error}</p>}
         </header>
 

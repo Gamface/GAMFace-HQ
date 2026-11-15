@@ -40,7 +40,7 @@ export const TEAM: Record<AgentKey, TeamMember> = {
   file: {
     key: "file",
     name: "Jarvis File",
-    role: "vault, notes and local files",
+    role: "the user's own vault notes and local files (not for writing new documents or reports)",
     prompt:
       "You are Jarvis File, an assistant for the user's vault and local files. You cannot read files yet, so explain which files or notes you would need and how you would organize them.",
   },
@@ -91,6 +91,8 @@ export async function routeTask(chat: JsonChat, model: string, prompt: string): 
           "You route a user's request to one agent.\n" +
           rosterText() +
           "\nPick planner for chit-chat, vague requests, or anything that needs several specialists. " +
+          "Writing a document, report or PDF goes to planner, or to browser when it needs current facts or real pictures from the web; " +
+          "file is only for reading or organizing the user's own notes. " +
           'Reply with JSON only: {"agent": "<key>", "reason": "<a few words>"}',
       },
       { role: "user", content: prompt.slice(0, 2000) },

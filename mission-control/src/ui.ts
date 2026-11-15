@@ -45,6 +45,7 @@ import { privateBlock } from "./hq/privacy";
 import { Uploads } from "./hq/uploads";
 import { splitWav } from "./hq/wav";
 import { closeRound, historyMessages } from "./hq/thread";
+import { FILE_ID, Files, buildReport, pdfInstructions, printPdf, wantsPdf } from "./hq/pdf";
 
 // --- Config (env vars, see .env.example) ------------------------------------
 const PORT = Number(process.env.PORT) || 3008;
@@ -110,6 +111,7 @@ const models = new ModelRegistry(store, {
   monthlyBudgetUsd: DEFAULT_MONTHLY_BUDGET_USD,
 });
 const uploads = new Uploads(DATA_DIR);
+const files = new Files(path.join(DATA_DIR, "files"));
 const hive = new Hive(DATA_DIR);
 const notices = new Notices(store);
 // Every model request goes through the gateway: local-only lock, spend caps, private-context rule
@@ -498,6 +500,9 @@ async function runTask(task: Task) {
     const ask = task.reply ?? task.prompt;
     const history = historyMessages(task.thread);
     const followUp = history.length > 0;
+    // "…as a PDF": the answer is written as a document and printed when the run ends
+    const makePdf = wantsPdf(ask);
+    const pdfNote = makePdf ? pdfInstructions(task.images ?? []) : "";
     const learned: string[] = [];
     const images = (task.images ?? []).map((id) => uploads.base64(id)).filter((b): b is string => Boolean(b));
 
@@ -598,6 +603,7 @@ async function runTask(task: Task) {
     } else {
       emit(task, "thinking");
     }
+    request += pdfNote;
 
     const firstTurn = await agentTurn(
       task,
@@ -612,7 +618,7 @@ async function runTask(task: Task) {
         },
       ],
       // The browser agent works from this text alone, so a reply carries the original request
-      followUp ? `${ask}\n\n(This follows up on the earlier request: ${task.prompt.slice(0, 500)})` : ask,
+      (followUp ? `${ask}\n\n(This follows up on the earlier request: ${task.prompt.slice(0, 500)})` : ask) + pdfNote,
       controller.signal,
       push,
       override,
@@ -676,7 +682,7 @@ async function runTask(task: Task) {
         [
           { role: "system", content: systemPrompt(task, lead, { team: true, delegate: false }) },
           ...history,
-          { role: "user", content: userMessage(lead, synthesisPrompt(ask, results), ask, true) },
+          { role: "user", content: userMessage(lead, synthesisPrompt(ask, results) + pdfNote, ask, true) },
         ],
         controller.signal,
         push,
@@ -696,6 +702,17 @@ async function runTask(task: Task) {
     log(lead, "complete", task.answer);
     // Read-only runs don't save memories either
     if (useTeam && !task.readOnly && task.answer) memoryJobs.push({ agent: lead, prompt: ask, answer: task.answer, private: usedPrivate });
+    if (makePdf && task.answer) {
+      emit(task, "executing_tool", "\n\n── Making the PDF ──\n");
+      const made = await makeReport(task);
+      push(
+        "error" in made
+          ? `[PDF not made: ${made.error}]\n`
+          : `📄 PDF saved: ${made.name}${made.pictures ? ` (${made.pictures} picture${made.pictures > 1 ? "s" : ""})` : ""}` +
+              `${made.missing ? `; ${made.missing} picture link(s) couldn't be used` : ""}. Open it from the card.\n`,
+      );
+      flush();
+    }
     emit(task, "complete");
   } catch (error: unknown) {
     flush();
@@ -889,6 +906,22 @@ function retry(task: Task): string | null {
   emit(task, "queued", `\n\n── Attempt ${(task.attempts ?? 0) + 1} ──\n\n`);
   void pump();
   return null;
+}
+
+/** Turns a card's answer into a PDF report and adds it to the card's files. */
+async function makeReport(task: Task): Promise<{ name: string; pictures: number; missing: number } | { error: string }> {
+  if (!BROWSER_CDP_URL) return { error: "PDFs are printed by the browser sidecar: set BROWSER_CDP_URL (see README-HQ)" };
+  if (!task.answer?.trim()) return { error: "This card has no answer to turn into a PDF" };
+  try {
+    const report = await buildReport(task.answer, { title: task.title || task.prompt.slice(0, 80), author: "Mission Control" }, { uploads, allowPrivate: BROWSER_ALLOW_PRIVATE });
+    for (const m of report.missing) hive.log(task.targetAgent, "pdf", `Picture skipped (${m.error}): ${m.src.slice(0, 120)}`, task.id);
+    const saved = files.save(report.title, await printPdf(report.html, BROWSER_CDP_URL));
+    task.files = [...(task.files ?? []).filter((f) => f.name !== saved.name), { ...saved, pictures: report.pictures, at: Date.now() }];
+    store.save(task);
+    return { name: saved.name, pictures: report.pictures, missing: report.missing.length };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /** Answers a finished card: the round so far joins its history and the card runs again on the reply. */
@@ -1147,6 +1180,26 @@ app.post("/api/tasks/:id/reply", requireToken, (req, res) => {
   const err = replyTo(task, req.body);
   if (err) return res.status(400).json({ error: err });
   res.json(summarize(task));
+});
+
+app.post("/api/tasks/:id/pdf", requireToken, async (req, res) => {
+  const task = tasks.get(String(req.params.id));
+  if (!task || task.parentId) return res.status(404).json({ error: "Task not found" });
+  if (!TERMINAL_STATUSES.includes(task.status)) return res.status(400).json({ error: "Wait for the card to finish" });
+  const made = await makeReport(task);
+  if ("error" in made) return res.status(400).json(made);
+  res.json({ ...made, url: `/api/files/${made.name}` });
+});
+
+app.get("/api/files/:name", (req, res) => {
+  const name = String(req.params.name);
+  const file = FILE_ID.test(name) ? files.read(name) : null;
+  if (!file) return res.status(404).json({ error: "File not found" });
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Length", String(file.length));
+  res.setHeader("Content-Disposition", `${req.query.download ? "attachment" : "inline"}; filename="${name}"`);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.end(file);
 });
 
 app.post("/api/tasks/:id/accept", requireToken, (req, res) => {

@@ -8,6 +8,7 @@ import BrowserPane from "./BrowserPane";
 import ImageAttach, { imageFiles, useImageUploads } from "./ImageAttach";
 import AudioAttach, { useAudioUploads } from "./AudioAttach";
 import ReplyBox from "./ReplyBox";
+import FilesBar from "./FilesBar";
 import PreviewPane from "./PreviewPane";
 import TeamPage from "./TeamPage";
 
@@ -332,7 +333,12 @@ export default function MissionControl() {
           </div>
         )}
         {centerTab === "output" && selected && !selectedActive && selected.source !== "eval" && (
-          <ReplyBox taskId={selected.id} agent={selected.agent} compact />
+          <>
+            <div className="px-3 pt-2">
+              <FilesBar taskId={selected.id} canMake={selected.status === "complete"} refreshKey={`${selected.status}-${selected.updatedAt}`} />
+            </div>
+            <ReplyBox taskId={selected.id} agent={selected.agent} compact />
+          </>
         )}
         {centerTab === "preview" && <PreviewPane output={selected?.output ?? ""} active={Boolean(selectedActive)} />}
         <BrowserPane

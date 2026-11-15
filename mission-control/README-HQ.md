@@ -128,6 +128,29 @@ Console box: pick them, drag them in, or paste a screenshot straight into the te
 API: `POST /api/uploads` with `{ "data": "<base64 or data: URL>" }` returns `{ id }`; pass
 ids in a card's `images`. `GET /api/uploads/:id` returns the picture.
 
+## PDF reports
+
+Ask for a PDF ("…as a PDF", "give me a report in pdf") and the agent writes the document
+itself in Markdown; when it finishes, Mission Control prints it to a styled A4 PDF (title
+header, sections, tables, pictures with captions, page numbers). The PDF appears on the
+card (📄 on the board, open or ⬇ download in the drawer and Console). Any finished card
+can also be turned into a PDF with **📄 Save as PDF**.
+- Pictures: the agent may use your attached pictures, or image URLs it actually saw on a
+  web page (the browser agent now sees each page's large pictures). Mission Control
+  downloads each one with the browser's address checks (no private-network addresses
+  unless `BROWSER_ALLOW_PRIVATE=true`), keeps only real PNG/JPEG/GIF/WebP files up to 8 MB,
+  and embeds them. Links that don't lead to a real picture are left out, and the
+  output says how many were skipped.
+- Printing uses the browser sidecar (`BROWSER_CDP_URL`) in a throwaway profile with
+  scripts off and every network request blocked, so a report can't load or run anything.
+  Only headless Chrome can print, so point `BROWSER_CDP_URL` at the sidecar.
+- Files are saved in `data/files/`.
+- "File" is for your own notes; requests to write a document or PDF now route to Jarvis
+  (or the browser agent when it needs the web).
+
+API: `POST /api/tasks/:id/pdf` makes a PDF from a finished card's answer and returns
+`{ name, url }`; `GET /api/files/:name` serves it (`?download=1` to download).
+
 ## Replying to cards
 
 When a card finishes (Done, Review or Failed), a **Reply** box sits under its output, in the

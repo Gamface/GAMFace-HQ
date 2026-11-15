@@ -161,6 +161,8 @@ export const TaskSummarySchema = z.object({
   reply: z.string().optional(),
   // How many times the card has been replied to (lists send this instead of the thread)
   replies: z.number().optional(),
+  // PDF reports made from the card's answer
+  files: z.array(z.object({ name: z.string(), bytes: z.number(), pictures: z.number().optional(), at: z.number() })).optional(),
 });
 
 export type AgentTarget = z.infer<typeof AgentTargetSchema>;
