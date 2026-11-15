@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
 
 import { parseWav } from "./wav";
+import { MAX_PDF_BYTES, isPdf } from "./docs";
 
 // Pictures and audio attached to cards. Each file is checked by its actual bytes
 // (PNG, JPEG, GIF, WebP pictures; WAV audio, which the dashboard converts every
@@ -14,8 +15,8 @@ export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 export const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 export const IMAGE_ID = /^[a-f0-9]{64}\.(png|jpg|gif|webp)$/;
 export const AUDIO_ID = /^[a-f0-9]{64}\.wav$/;
-const UPLOAD_ID = /^[a-f0-9]{64}\.(png|jpg|gif|webp|wav)$/;
-const TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", gif: "image/gif", webp: "image/webp", wav: "audio/wav" };
+const UPLOAD_ID = /^[a-f0-9]{64}\.(png|jpg|gif|webp|wav|pdf)$/;
+const TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", gif: "image/gif", webp: "image/webp", wav: "audio/wav", pdf: "application/pdf" };
 
 /** Works out the image type from its first bytes; null if it isn't a supported picture. */
 export function sniffImage(buf: Buffer): "png" | "jpg" | "gif" | "webp" | null {
@@ -35,17 +36,20 @@ export class Uploads {
   }
 
   /** Saves a picture or WAV audio from base64 (a data: URL is fine). Returns its id, or an error message. */
-  save(data: string, kind: "image" | "audio" = "image"): { id: string; type: string; bytes: number; seconds?: number } | { error: string } {
-    const what = kind === "audio" ? "audio" : "picture";
+  save(data: string, kind: "image" | "audio" | "pdf" = "image"): { id: string; type: string; bytes: number; seconds?: number } | { error: string } {
+    const what = kind === "audio" ? "audio" : kind === "pdf" ? "PDF" : "picture";
     const b64 = data.replace(/^data:[^;,]*;base64,/, "");
     if (!/^[A-Za-z0-9+/=\s]+$/.test(b64)) return { error: `Send the ${what} as base64` };
     const buf = Buffer.from(b64, "base64");
     if (!buf.length) return { error: `The ${what} is empty` };
-    const max = kind === "audio" ? MAX_AUDIO_BYTES : MAX_IMAGE_BYTES;
-    if (buf.length > max) return { error: `${kind === "audio" ? "Audio" : "Pictures"} can be at most ${max / 1024 / 1024} MB` };
+    const max = kind === "audio" ? MAX_AUDIO_BYTES : kind === "pdf" ? MAX_PDF_BYTES : MAX_IMAGE_BYTES;
+    if (buf.length > max) return { error: `${kind === "audio" ? "Audio" : kind === "pdf" ? "PDFs" : "Pictures"} can be at most ${max / 1024 / 1024} MB` };
     let ext: string | null;
     let seconds: number | undefined;
-    if (kind === "audio") {
+    if (kind === "pdf") {
+      if (!isPdf(buf)) return { error: "That file isn't a PDF" };
+      ext = "pdf";
+    } else if (kind === "audio") {
       const wav = parseWav(buf);
       if (!wav) return { error: "Audio must be WAV (the dashboard converts recordings automatically)" };
       ext = "wav";

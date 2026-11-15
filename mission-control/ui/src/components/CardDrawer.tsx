@@ -5,7 +5,8 @@ import { CardForm } from "./NewCardDialog";
 import PreviewPane from "./PreviewPane";
 import ReplyBox from "./ReplyBox";
 import FilesBar from "./FilesBar";
-import type { CardFile } from "../api";
+import { DocChip } from "./DocAttach";
+import type { CardFile, DocInfo } from "../api";
 
 // Side panel for one card: what it is, where it stands, its handoffs and output,
 // and the actions that make sense for its column.
@@ -28,6 +29,7 @@ interface Detail {
   usedPrivate?: boolean;
   images?: string[];
   audio?: string[];
+  documents?: string[];
   thread?: { role: "user" | "agent"; text: string }[];
   reply?: string;
   acceptedAt?: number;
@@ -138,6 +140,7 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
             </div>
           )}
           {d && d.waitingOn.length > 0 && <p className="mt-2 text-xs text-amber-300">⏳ Waiting on: {d.waitingOn.map(titleOf).join(", ")}</p>}
+          {d?.documents && d.documents.length > 0 && <DocChips ids={d.documents} />}
           {d?.audio && d.audio.length > 0 && (
             <div className="flex flex-col gap-1">
               {d.audio.map((id, i) => (
@@ -219,6 +222,7 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
                 allowedSites: d.allowedSites ?? [],
                 images: d.images ?? [],
                 audio: d.audio ?? [],
+                documents: d.documents ?? [],
               }}
               cards={cards}
               selfId={id}
@@ -275,6 +279,24 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
           )
         )}
       </aside>
+    </div>
+  );
+}
+
+/** The card's PDFs, with names looked up from the harness. */
+function DocChips({ ids }: { ids: string[] }) {
+  const [info, setInfo] = useState<Record<string, DocInfo>>({});
+  useEffect(() => {
+    for (const id of ids)
+      getJson<DocInfo>(`/api/uploads/${id}/info`)
+        .then((d) => setInfo((m) => ({ ...m, [id]: d })))
+        .catch(() => {});
+  }, [ids.join(",")]);
+  return (
+    <div className="flex flex-wrap gap-2">
+      {ids.map((id) => (
+        <DocChip key={id} id={id} info={info[id]} />
+      ))}
     </div>
   );
 }

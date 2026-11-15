@@ -128,6 +128,30 @@ Console box: pick them, drag them in, or paste a screenshot straight into the te
 API: `POST /api/uploads` with `{ "data": "<base64 or data: URL>" }` returns `{ id }`; pass
 ids in a card's `images`. `GET /api/uploads/:id` returns the picture.
 
+## Reading PDFs
+
+Attach PDFs to a new card, the Console or a reply: pick or drop them (📑, up to 4 per card,
+25 MB each). Leave the task box empty and it becomes "Summarize the attached PDF."
+- The harness pulls the text out on your PC with pdf.js (run `npm install` once after
+  pulling; it's a new dependency). Nothing in the file runs, fonts aren't loaded and
+  nothing is fetched. Broken or password-protected files are refused at upload.
+- Short PDFs go to the agent whole, with page markers. Long ones are read in parts by
+  **Jarvis File** (its model, local only by default): each part gets notes on what helps
+  with your request, with page numbers, and the agent answers from those notes. The
+  output shows each part as it's read. At most 10 parts are read (`MAX_DOC_PARTS`), so
+  very long documents may have their last pages skipped; the output says which.
+  How much counts as short depends on `OLLAMA_NUM_CTX` (about 2.4 characters per token
+  of context).
+- Scanned PDFs have no text to read: they're flagged "⚠ scanned?". Attach screenshots of
+  their pages as pictures and Vision reads them.
+- PDF contents are private, like pictures and audio: they never go to a cloud model
+  unless you allow it, and answers that used them are marked 🔒.
+- Auto-routing now sends questions about attached PDFs and notes to File or Jarvis.
+
+API: `POST /api/uploads` with `{ "data": "<base64 PDF>", "kind": "pdf", "name": "x.pdf" }`
+returns `{ id, name, pages, scanned }`; pass ids in a card's `documents`.
+`GET /api/uploads/:id/info` returns the name and page count.
+
 ## PDF reports
 
 Ask for a PDF ("…as a PDF", "give me a report in pdf") and the agent writes the document

@@ -46,6 +46,8 @@ import { Uploads } from "./hq/uploads";
 import { splitWav } from "./hq/wav";
 import { closeRound, historyMessages } from "./hq/thread";
 import { FILE_ID, Files, buildReport, pdfInstructions, printPdf, wantsPdf } from "./hq/pdf";
+import { DOC_ID, DocCache, cleanName, extractPdf, partsOf, withPageMarks } from "./hq/docs";
+import type { PdfText } from "./hq/docs";
 
 // --- Config (env vars, see .env.example) ------------------------------------
 const PORT = Number(process.env.PORT) || 3008;
@@ -112,6 +114,20 @@ const models = new ModelRegistry(store, {
 });
 const uploads = new Uploads(DATA_DIR);
 const files = new Files(path.join(DATA_DIR, "files"));
+const docCache = new DocCache(path.join(DATA_DIR, "uploads"));
+// A long PDF is read in at most this many parts (about 14,000 characters each)
+const MAX_DOC_PARTS = Number(process.env.MAX_DOC_PARTS) || 10;
+
+/** A PDF's text, from the cache or pulled out again. */
+async function docText(id: string): Promise<PdfText | null> {
+  const cached = docCache.get(id);
+  if (cached) return cached;
+  const buf = DOC_ID.test(id) ? uploads.bytes(id) : null;
+  if (!buf) return null;
+  const doc = await extractPdf(buf);
+  docCache.set(id, doc);
+  return doc;
+}
 const hive = new Hive(DATA_DIR);
 const notices = new Notices(store);
 // Every model request goes through the gateway: local-only lock, spend caps, private-context rule
@@ -132,7 +148,7 @@ let nextEventId = Math.max(Date.now(), store.maxEventId() + 1);
 
 const app = express();
 app.use(cors({ origin: CORS_ORIGINS }));
-// Room for a 25 MB audio clip (or a 10 MB picture) sent as base64
+// Room for a 25 MB PDF or audio clip (or a 10 MB picture) sent as base64
 app.use(express.json({ limit: "40mb" }));
 
 function requireToken(req: Request, res: Response, next: NextFunction) {
@@ -538,6 +554,81 @@ async function runTask(task: Task) {
       );
     }
 
+    // Attached PDFs: short ones go to the agent whole; long ones are read in parts by
+    // Jarvis File, which keeps what matters for the request. Their text is private.
+    let docsBlock = "";
+    let docPeek = "";
+    const docIds = task.documents ?? [];
+    if (docIds.length) {
+      emit(task, "executing_tool", `── Reading ${docIds.length} PDF${docIds.length > 1 ? "s" : ""} (${models.resolve("file").ref}) ──\n\n`);
+      // Leave room in the model's context for instructions, history and the answer
+      const budget = Math.max(6000, Math.floor((OLLAMA_NUM_CTX * 2.4) / docIds.length));
+      const sections: string[] = [];
+      for (const id of docIds) {
+        let doc: PdfText | null;
+        try {
+          doc = await docText(id);
+        } catch (e) {
+          push(`[${e instanceof Error ? e.message : String(e)}]\n`);
+          continue;
+        }
+        if (!doc) {
+          push("[An attached PDF is missing from the uploads folder]\n");
+          continue;
+        }
+        const label = `"${doc.name}" (${doc.totalPages} page${doc.totalPages === 1 ? "" : "s"}${doc.totalPages > doc.pages.length ? `, first ${doc.pages.length} read` : ""})`;
+        if (doc.scanned) push(`[${doc.name} has little or no text, so it may be scanned. Attach screenshots of its pages as pictures for Vision to read.]\n`);
+        const whole = withPageMarks(doc);
+        docPeek ||= whole.slice(0, 600);
+        if (whole.length <= budget) {
+          push(`${label}: given in full (${whole.length.toLocaleString("en-US")} characters).\n`);
+          sections.push(`CONTENTS OF THE ATTACHED PDF ${label}:\n${whole}`);
+          continue;
+        }
+        const parts = partsOf(doc, Math.min(budget, 14000));
+        const kept = parts.slice(0, MAX_DOC_PARTS);
+        push(`${label} is long: reading it in ${kept.length} parts${parts.length > kept.length ? ` (pages ${kept[kept.length - 1].to + 1}–${doc.pages.length} are skipped)` : ""}.\n`);
+        const notes: string[] = [];
+        for (const [k, part] of kept.entries()) {
+          const out = await gateway.stream(
+            "file",
+            [
+              { role: "system", content: "You are Jarvis File. You read one part of a document for another agent and write notes it can answer from." },
+              {
+                role: "user",
+                content:
+                  `REQUEST: ${ask}\n\nPART ${k + 1} OF ${kept.length} of ${label}, pages ${part.from + 1}–${part.to}:\n` +
+                  `${privateBlock(part.text, "(This part of the document is withheld from cloud models.)")}\n\n` +
+                  "Write concise notes (at most 200 words) on everything in this part that helps with the request: facts, figures, names, dates and short quotes, each with its page number. " +
+                  "If nothing here is relevant, reply only: Nothing relevant.",
+              },
+            ],
+            controller.signal,
+            () => {},
+            (note) => {
+              push(`[${note}]\n`);
+              hive.log("file", "policy", note, task.id);
+            },
+          );
+          const text = out.text.trim();
+          const nothing = /^nothing relevant\.?$/i.test(text);
+          push(`  pages ${part.from + 1}–${part.to}: ${nothing ? "nothing relevant" : "notes taken"}\n`);
+          if (!nothing && text) notes.push(`Pages ${part.from + 1}–${part.to}:\n${text}`);
+        }
+        sections.push(
+          `NOTES ON THE ATTACHED PDF ${label}, read in ${kept.length} parts by Jarvis File (cite the page numbers):\n` +
+            (notes.join("\n\n") || "(No part of the document was relevant to the request.)"),
+        );
+      }
+      push("\n");
+      flush();
+      if (sections.length) {
+        heardPrivate = true;
+        learned.push(sections.join("\n\n").slice(0, 6000));
+        docsBlock = privateBlock(sections.join("\n\n"), "(The attached PDFs and their contents stay on the user's PC and are withheld from cloud models.)");
+      }
+    }
+
     if (task.requestedAgent === "auto" && images.length) {
       // Pictures go to the agent that can see them
       task.targetAgent = "vision";
@@ -547,9 +638,8 @@ async function runTask(task: Task) {
       emit(task, "routing");
       // Route on what was said too; the router's text limit can't cut a private block open
       const routeAsk = followUp ? `Follow-up to: ${task.prompt.slice(0, 300)}\nReply: ${ask}` : ask;
-      const routeText = transcript
-        ? `${routeAsk.slice(0, 1100)}\n\n${privateBlock(`AUDIO TRANSCRIPT: ${transcript.slice(0, 600)}`, "(audio is attached)")}`
-        : routeAsk;
+      const extras = [transcript && `AUDIO TRANSCRIPT: ${transcript.slice(0, 600)}`, docPeek && `START OF THE ATTACHED PDF: ${docPeek}`].filter(Boolean).join("\n\n");
+      const routeText = extras ? `${routeAsk.slice(0, 1100)}\n\n${privateBlock(extras, "(audio or a PDF is attached)")}` : routeAsk;
       const routed = await routeTask(roleJson("router"), "router", routeText);
       task.targetAgent = routed.agent;
       task.routedBy = routed.reason === "keyword match" ? "keywords" : "router";
@@ -568,7 +658,7 @@ async function runTask(task: Task) {
 
     // Only the vision agent can see pictures. When another agent leads, Vision reads
     // them first and the lead gets its description, which is private like the pictures.
-    let request = transcriptBlock ? `${ask}\n\n${transcriptBlock}` : ask;
+    let request = [ask, transcriptBlock, docsBlock].filter(Boolean).join("\n\n");
     if (images.length && lead !== "vision") {
       openSub = addSubtask(task, "vision", `Describe the ${images.length} attached picture(s) for: ${ask}`);
       task.activeAgent = "vision";
@@ -812,6 +902,7 @@ function createTask(input: unknown, extra: { chatId?: string } = {}): { task?: T
   if (missing.length) return { status: 400, error: `Unknown dependency: ${missing.join(", ")}` };
   if (d.images.some((id) => !uploads.exists(id))) return { status: 400, error: "Unknown picture: upload it with POST /api/uploads first" };
   if (d.audio.some((id) => !uploads.exists(id))) return { status: 400, error: "Unknown audio: upload it with POST /api/uploads first" };
+  if (d.documents.some((id) => !uploads.exists(id))) return { status: 400, error: "Unknown PDF: upload it with POST /api/uploads first" };
   // Routine runs are forced read-only and get exactly one destination
   const routine = routineFields(d, { telegramChat: telegram ? [...TELEGRAM_ALLOWED][0] : undefined, vault: OBSIDIAN_VAULT || undefined });
   if ("error" in routine) return { status: 400, error: routine.error };
@@ -837,6 +928,7 @@ function createTask(input: unknown, extra: { chatId?: string } = {}): { task?: T
     allowedSites: d.allowedSites.length ? d.allowedSites : undefined,
     images: d.images.length ? d.images : undefined,
     audio: d.audio.length ? d.audio : undefined,
+    documents: d.documents.length ? d.documents : undefined,
     position: now,
     createdAt: now,
     queuedAt: queueIt ? now : undefined,
@@ -932,12 +1024,13 @@ function replyTo(task: Task, input: unknown): string | null {
   if (!TERMINAL_STATUSES.includes(task.status)) return "Wait for the card to finish before replying";
   if (task.source === "eval") return "Eval runs can't be replied to";
   if (store.queuedCount() >= MAX_QUEUE) return `Queue is full (${MAX_QUEUE} tasks)`;
-  if ([...r.images, ...r.audio].some((id) => !uploads.exists(id))) return "Unknown attachment: upload it with POST /api/uploads first";
+  if ([...r.images, ...r.audio, ...r.documents].some((id) => !uploads.exists(id))) return "Unknown attachment: upload it with POST /api/uploads first";
   const now = Date.now();
   task.thread = closeRound(task, now);
   task.reply = r.message;
   task.images = r.images.length ? r.images : undefined;
   task.audio = r.audio.length ? r.audio : undefined;
+  task.documents = r.documents.length ? r.documents : undefined;
   task.privateNotes = undefined;
   if (r.targetAgent === "auto") {
     task.requestedAgent = "auto";
@@ -998,6 +1091,11 @@ function patchTask(task: Task, input: unknown): { error?: string } {
     task.readOnly = p.readOnly || undefined;
   }
   if (p.allowedSites !== undefined) task.allowedSites = p.allowedSites.length ? p.allowedSites : undefined;
+  if (p.documents !== undefined) {
+    if (!editable) return { error: "Only cards in Backlog or Ready can change their PDFs" };
+    if (p.documents.some((id) => !uploads.exists(id))) return { error: "Unknown PDF: upload it first" };
+    task.documents = p.documents.length ? p.documents : undefined;
+  }
   if (p.audio !== undefined) {
     if (!editable) return { error: "Only cards in Backlog or Ready can change their audio" };
     if (p.audio.some((id) => !uploads.exists(id))) return { error: "Unknown audio: upload it first" };
@@ -1279,13 +1377,28 @@ app.get("/api/hive", (req, res) => {
 });
 app.get("/api/memories", (_req, res) => res.json(memory.list()));
 // Pictures for cards: upload as base64 (a data: URL is fine), then pass the id in "images"
-app.post("/api/uploads", requireToken, (req, res) => {
+app.post("/api/uploads", requireToken, async (req, res) => {
   const data = typeof req.body?.data === "string" ? req.body.data : "";
   // Audio is sent as WAV; the dashboard converts recordings before uploading
-  const kind = req.body?.kind === "audio" || /^data:audio\//.test(data) ? "audio" : "image";
+  const kind =
+    req.body?.kind === "pdf" || /^data:application\/pdf/.test(data) ? "pdf" : req.body?.kind === "audio" || /^data:audio\//.test(data) ? "audio" : "image";
   const out = uploads.save(data, kind);
   if ("error" in out) return res.status(400).json({ error: out.error });
-  res.status(201).json(out);
+  if (kind !== "pdf") return res.status(201).json(out);
+  // PDFs are read once, here, so a broken or locked file is caught before it's attached
+  try {
+    const name = cleanName(req.body?.name);
+    const doc = { ...(docCache.get(out.id) ?? (await extractPdf(uploads.bytes(out.id)!, name))), name };
+    docCache.set(out.id, doc);
+    res.status(201).json({ ...out, name, pages: doc.totalPages, scanned: doc.scanned, title: doc.title });
+  } catch (e) {
+    res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+app.get("/api/uploads/:id/info", (req, res) => {
+  const doc = docCache.get(String(req.params.id));
+  if (!doc) return res.status(404).json({ error: "PDF not found" });
+  res.json({ id: req.params.id, name: doc.name, pages: doc.totalPages, scanned: doc.scanned, title: doc.title });
 });
 app.get("/api/uploads/:id", (req, res) => {
   const img = uploads.read(String(req.params.id));
@@ -1294,7 +1407,9 @@ app.get("/api/uploads/:id", (req, res) => {
   res.setHeader("Content-Length", String(img.buf.length));
   res.setHeader("Cache-Control", "private, max-age=31536000, immutable");
   res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("Content-Security-Policy", "default-src 'none'");
+  // PDFs open in the browser's own viewer, which a strict policy would block
+  if (img.type === "application/pdf") res.setHeader("Content-Disposition", "inline");
+  else res.setHeader("Content-Security-Policy", "default-src 'none'");
   res.end(img.buf);
 });
 

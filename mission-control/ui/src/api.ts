@@ -38,6 +38,30 @@ export async function uploadImage(file: Blob): Promise<string> {
 
 export const imageUrl = (id: string) => `${HARNESS_URL}/api/uploads/${id}`;
 export const uploadUrl = imageUrl;
+/** What an empty task box means when only attachments were given. */
+export function defaultPrompt(audio: number, documents: number): string {
+  if (documents && !audio) return `Summarize the attached PDF${documents > 1 ? "s" : ""}.`;
+  return "Listen to the attached audio and respond.";
+}
+
+export interface DocInfo {
+  id: string;
+  name: string;
+  pages: number;
+  scanned?: boolean;
+}
+
+/** Uploads a PDF; the harness reads it right away, so a broken or locked file fails here. */
+export async function uploadPdf(file: File): Promise<DocInfo> {
+  const data = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(new Error("Couldn't read the file"));
+    r.readAsDataURL(file);
+  });
+  return send<DocInfo>("POST", "/api/uploads", { data, kind: "pdf", name: file.name });
+}
+
 export const fileUrl = (name: string, download = false) => `${HARNESS_URL}/api/files/${name}${download ? "?download=1" : ""}`;
 
 export interface CardFile {
@@ -119,6 +143,7 @@ export interface BoardCard {
   audio?: string[];
   replies?: number;
   files?: CardFile[];
+  documents?: string[];
   interrupted?: boolean;
   attempts?: number;
   position?: number;

@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { AGENT_LABELS, send } from "../api";
+import { AGENT_LABELS, defaultPrompt, send } from "../api";
 import AudioAttach, { useAudioUploads } from "./AudioAttach";
+import DocAttach, { useDocUploads } from "./DocAttach";
 import ImageAttach, { imageFiles, useImageUploads } from "./ImageAttach";
 
 // Reply to a finished card. The same agent picks the conversation back up with the
@@ -15,25 +16,29 @@ export default function ReplyBox({ taskId, agent, onSent, compact }: { taskId: s
   const [audio, setAudio] = useState<string[]>([]);
   const imgUp = useImageUploads(images, setImages);
   const audUp = useAudioUploads(audio, setAudio);
+  const [documents, setDocuments] = useState<string[]>([]);
+  const docUp = useDocUploads(documents, setDocuments);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showAttach, setShowAttach] = useState(false);
 
-  const canSend = (text.trim() || audio.length) && !busy && !imgUp.busy && !audUp.busy;
+  const canSend = (text.trim() || audio.length || documents.length) && !busy && !imgUp.busy && !audUp.busy && !docUp.busy;
   const submit = async () => {
     if (!canSend) return;
     setBusy(true);
     setError(null);
     try {
       await send("POST", `/api/tasks/${taskId}/reply`, {
-        message: text.trim() || "Listen to the attached audio and respond.",
+        message: text.trim() || defaultPrompt(audio.length, documents.length),
         images,
         audio,
+        documents,
         targetAgent: to,
       });
       setText("");
       setImages([]);
       setAudio([]);
+      setDocuments([]);
       setShowAttach(false);
       onSent?.();
     } catch (e) {
@@ -67,12 +72,13 @@ export default function ReplyBox({ taskId, agent, onSent, compact }: { taskId: s
         <div className="space-y-1.5">
           <ImageAttach value={images} onChange={setImages} uploader={imgUp} compact />
           <AudioAttach value={audio} onChange={setAudio} uploader={audUp} compact />
+          <DocAttach value={documents} onChange={setDocuments} uploader={docUp} compact />
         </div>
       )}
       <div className="flex items-center gap-2 text-xs">
         <button type="button" onClick={() => setShowAttach((v) => !v)} className="text-slate-400 hover:text-cyan-300">
           📎 {showAttach ? "Hide attachments" : "Attach"}
-          {images.length + audio.length > 0 ? ` (${images.length + audio.length})` : ""}
+          {images.length + audio.length + documents.length > 0 ? ` (${images.length + audio.length + documents.length})` : ""}
         </button>
         <label className="flex items-center gap-1 text-slate-500 ml-auto">
           To

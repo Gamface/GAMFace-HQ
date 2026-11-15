@@ -72,7 +72,7 @@ test("history is limited in turns and length, and cutting never opens a private 
 });
 
 test("reply input: defaults to the same agent; empty messages are refused", () => {
-  assert.deepEqual(TaskReplySchema.parse({ message: " use the browser " }), { message: "use the browser", images: [], audio: [], targetAgent: "same" });
+  assert.deepEqual(TaskReplySchema.parse({ message: " use the browser " }), { message: "use the browser", images: [], audio: [], documents: [], targetAgent: "same" });
   assert.equal(TaskReplySchema.safeParse({ message: "   " }).success, false);
   assert.equal(TaskReplySchema.parse({ message: "x", targetAgent: "browser" }).targetAgent, "browser");
   assert.equal(TaskReplySchema.safeParse({ message: "x", targetAgent: "audio" }).success, false);

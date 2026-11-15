@@ -5,6 +5,7 @@ import { z } from "zod";
 
 export const AgentTargetSchema = z.enum(["planner", "browser", "coder", "file", "security_audit", "vision"]);
 // An attached audio clip (WAV), by its upload id
+export const DocIdSchema = z.string().regex(/^[a-f0-9]{64}\.pdf$/);
 export const AudioIdSchema = z.string().regex(/^[a-f0-9]{64}\.wav$/);
 // What a client may ask for: a specific agent, or "auto" to let the router pick
 export const RequestedAgentSchema = z.enum(["auto", "planner", "browser", "coder", "file", "security_audit", "vision"]);
@@ -69,6 +70,8 @@ export const AgentTaskSchema = z.object({
   images: z.array(ImageIdSchema).max(6).default([]),
   // Audio clips, transcribed before the agent starts
   audio: z.array(AudioIdSchema).max(4).default([]),
+  // Attached PDFs, by upload id
+  documents: z.array(DocIdSchema).max(4).default([]),
 });
 
 /** A reply to a finished card: the same agent continues the conversation. */
@@ -76,6 +79,8 @@ export const TaskReplySchema = z.object({
   message: z.string().trim().min(1).max(20000),
   images: z.array(ImageIdSchema).max(6).default([]),
   audio: z.array(AudioIdSchema).max(4).default([]),
+  // Attached PDFs, by upload id
+  documents: z.array(DocIdSchema).max(4).default([]),
   // "same" keeps the agent that answered; "auto" routes the reply again
   targetAgent: z.union([z.literal("same"), RequestedAgentSchema]).default("same"),
 });
@@ -89,6 +94,7 @@ export const ThreadTurnSchema = z.object({
   private: z.boolean().optional(),
   images: z.array(z.string()).optional(),
   audio: z.array(z.string()).optional(),
+  documents: z.array(z.string()).optional(),
   // What the agent learned from attachments (transcripts, picture descriptions); private
   notes: z.string().optional(),
   at: z.number(),
@@ -108,6 +114,7 @@ export const TaskPatchSchema = z.object({
   allowedSites: z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{1,253}$/)).max(10).optional(),
   images: z.array(ImageIdSchema).max(6).optional(),
   audio: z.array(AudioIdSchema).max(4).optional(),
+  documents: z.array(DocIdSchema).max(4).optional(),
 });
 
 export const AgentStreamPayloadSchema = z.object({
@@ -153,6 +160,7 @@ export const TaskSummarySchema = z.object({
   deliverTo: DeliverySchema.optional(),
   images: z.array(z.string()).optional(),
   audio: z.array(z.string()).optional(),
+  documents: z.array(z.string()).optional(),
   // True when the answer was produced from private material (vault notes, memories, pictures)
   usedPrivate: z.boolean().optional(),
   // Earlier turns, when the card has been replied to; the current round is reply ?? prompt

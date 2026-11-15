@@ -7,6 +7,8 @@ import NoticesBar from "./NoticesBar";
 import BrowserPane from "./BrowserPane";
 import ImageAttach, { imageFiles, useImageUploads } from "./ImageAttach";
 import AudioAttach, { useAudioUploads } from "./AudioAttach";
+import DocAttach, { useDocUploads } from "./DocAttach";
+import { defaultPrompt } from "../api";
 import ReplyBox from "./ReplyBox";
 import FilesBar from "./FilesBar";
 import PreviewPane from "./PreviewPane";
@@ -73,6 +75,8 @@ export default function MissionControl() {
   const uploader = useImageUploads(images, setImages);
   const [audio, setAudio] = useState<string[]>([]);
   const audioUp = useAudioUploads(audio, setAudio);
+  const [documents, setDocuments] = useState<string[]>([]);
+  const docUp = useDocUploads(documents, setDocuments);
   const [targetAgent, setTargetAgent] = useState<RequestedAgent>("auto");
   const [rightTab, setRightTab] = useState<RightTab>("commands");
   const [centerTab, setCenterTab] = useState<CenterTab>("output");
@@ -154,7 +158,7 @@ export default function MissionControl() {
   }, [statusEvents.length, hive.length, rightTab]);
 
   const handleRunTask = async () => {
-    if (!prompt.trim() && !audio.length) return;
+    if (!prompt.trim() && !audio.length && !documents.length) return;
     setDispatchError(null);
     try {
       const res = await fetch(`${HARNESS_URL}/api/agent/run`, {
@@ -162,11 +166,12 @@ export default function MissionControl() {
         headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({
           id: crypto.randomUUID(),
-          prompt: prompt.trim() || "Listen to the attached audio and respond.",
+          prompt: prompt.trim() || defaultPrompt(audio.length, documents.length),
           targetAgent,
           source: "ui",
           images,
           audio,
+          documents,
         }),
       });
       const body = await res.json();
@@ -175,6 +180,7 @@ export default function MissionControl() {
       setPrompt("");
       setImages([]);
       setAudio([]);
+      setDocuments([]);
     } catch (err) {
       setDispatchError(err instanceof Error ? err.message : String(err));
     }
@@ -461,11 +467,12 @@ export default function MissionControl() {
           />
           <ImageAttach value={images} onChange={setImages} uploader={uploader} compact />
           <AudioAttach value={audio} onChange={setAudio} uploader={audioUp} compact />
+          <DocAttach value={documents} onChange={setDocuments} uploader={docUp} compact />
           {dispatchError && <p className="text-rose-400 text-xs font-mono">{dispatchError}</p>}
           <div className="flex gap-2">
             <button
               onClick={() => void handleRunTask()}
-              disabled={(!prompt.trim() && !audio.length) || connection !== "open" || uploader.busy || audioUp.busy}
+              disabled={(!prompt.trim() && !audio.length && !documents.length) || connection !== "open" || uploader.busy || audioUp.busy || docUp.busy}
               className="flex-1 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 disabled:text-slate-400 text-white font-medium py-2 rounded-lg transition-colors text-sm shadow-lg shadow-cyan-950/50"
             >
               Dispatch to Agent
