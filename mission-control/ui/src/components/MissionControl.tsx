@@ -37,12 +37,13 @@ interface HiveEntry {
 }
 
 interface MemoryItem {
-  id: number;
+  id: string;
   agent: string;
   text: string;
   importance: number;
   pinned: boolean;
   hits: number;
+  private?: boolean;
 }
 
 type RightTab = "commands" | "hive" | "memory";
@@ -437,9 +438,21 @@ export default function MissionControl() {
                     {m.pinned ? "📌 " : ""}
                     {m.text}
                     <div className="text-[10px] text-slate-600">
-                      {m.agent} · importance {m.importance.toFixed(2)} · used {m.hits}×
+                      {m.agent} · importance {m.importance.toFixed(2)} · used {m.hits}× ·{" "}
+                      {m.private === false ? (
+                        <span title="Cloud models and cloud MCP clients (e.g. Claude Code) can see this">☁ shared</span>
+                      ) : (
+                        <span title="Never sent to a cloud model">🔒 private</span>
+                      )}
                     </div>
                   </div>
+                  <button
+                    onClick={() => void memoryAction(`/${m.id}/${m.private === false ? "private" : "share"}`)}
+                    className="text-slate-500 hover:text-slate-200"
+                    title={m.private === false ? "Hide from cloud models again" : "Let cloud models and Claude Code see this memory"}
+                  >
+                    {m.private === false ? "Make private" : "Share"}
+                  </button>
                   <button onClick={() => void memoryAction(`/${m.id}/${m.pinned ? "unpin" : "pin"}`)} className="text-slate-500 hover:text-slate-200">
                     {m.pinned ? "Unpin" : "Pin"}
                   </button>

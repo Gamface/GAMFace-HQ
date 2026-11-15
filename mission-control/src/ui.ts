@@ -19,6 +19,8 @@ import { runBrowserAgent } from "./hq/browser-agent";
 import { StreamGuard, redact } from "./hq/guard";
 import { Hive } from "./hq/hive";
 import { Memory } from "./hq/memory";
+import { startBrain, type Brain } from "./brain";
+import { brainEnabled } from "./brain/db";
 import { ModelGateway } from "./hq/gateway";
 import type { CallOptions } from "./hq/gateway";
 import { deliveryText, hiveSummary, isRoutine, routineFields, routinePatchError, saveRoutineNote } from "./hq/routine";
@@ -189,7 +191,11 @@ function roleJson(role: ModelRole, opts: CallOptions = {}): JsonChat {
   };
 }
 
+// Memory starts in data/memories.json; when the brain is configured (DATABASE_URL) it
+// moves to the shared Postgres store at startup, before any task runs.
 const memory = new Memory(DATA_DIR, roleJson("memory"), "memory");
+let brain: Brain | null = null;
+const CANON_SYNC_MIN = Number(process.env.CANON_SYNC_MIN) || 5;
 
 /** The model a queued task will run on, for grouping same-model work (null when auto-routed). */
 function plannedModel(t: Task): string | null {
@@ -369,9 +375,16 @@ function systemPrompt(task: Task, agent: AgentTarget, opts: { team: boolean; del
 }
 
 // The parts that change on every call ride along with the request
-function userMessage(agent: AgentTarget, text: string, recallFor: string, team: boolean) {
+async function userMessage(agent: AgentTarget, text: string, recallFor: string, team: boolean): Promise<string> {
   if (!team) return text;
-  return withLiveContext(text, { hive: hive.promptText(), hivePublic: hive.publicText(), memories: memory.recall(recallFor, agent) });
+  let memories: string[] = [];
+  try {
+    memories = await memory.recall(recallFor, agent);
+  } catch (error) {
+    // A memory outage shouldn't stop the task; the run goes ahead without recalled memories
+    hive.log("memory", "error", `recall failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return withLiveContext(text, { hive: hive.promptText(), hivePublic: hive.publicText(), memories });
 }
 
 const browsingEnabled = (task: Task) => Boolean(BROWSER_CDP_URL) && task.source !== "eval";
@@ -728,7 +741,7 @@ async function runTask(task: Task) {
         ...history,
         {
           role: "user",
-          content: userMessage(lead, request, ask, useTeam),
+          content: await userMessage(lead, request, ask, useTeam),
           ...(lead === "vision" && images.length ? { images } : {}),
         },
       ],
@@ -766,7 +779,7 @@ async function runTask(task: Task) {
             { role: "system", content: systemPrompt(task, h.agent, { team: true, delegate: false }) },
             {
               role: "user",
-              content: userMessage(h.agent, h.task, h.task, true),
+              content: await userMessage(h.agent, h.task, h.task, true),
               // A handoff to Vision brings the card's pictures with it
               ...(h.agent === "vision" && images.length ? { images } : {}),
             },
@@ -797,7 +810,7 @@ async function runTask(task: Task) {
         [
           { role: "system", content: systemPrompt(task, lead, { team: true, delegate: false }) },
           ...history,
-          { role: "user", content: userMessage(lead, synthesisPrompt(ask, results) + pdfNote, ask, true) },
+          { role: "user", content: await userMessage(lead, synthesisPrompt(ask, results) + pdfNote, ask, true) },
         ],
         controller.signal,
         push,
@@ -891,8 +904,12 @@ async function runBackgroundJob() {
 }
 
 setInterval(() => {
-  const stats = memory.maintain();
-  if (stats.decayed || stats.forgotten || stats.merged) hive.log("memory", "maintenance", JSON.stringify(stats));
+  memory
+    .maintain()
+    .then((stats) => {
+      if (stats.decayed || stats.forgotten || stats.merged) hive.log("memory", "maintenance", JSON.stringify(stats));
+    })
+    .catch((error) => hive.log("memory", "error", `maintenance failed: ${error instanceof Error ? error.message : String(error)}`));
 }, MEMORY_INTERVAL_MIN * 60 * 1000);
 
 // --- Creating and changing cards ---------------------------------------------
@@ -1217,7 +1234,8 @@ app.get("/api/system", async (_req: Request, res: Response) => {
     telegram: Boolean(telegram),
     obsidian: Boolean(OBSIDIAN_VAULT),
     browser: Boolean(BROWSER_CDP_URL),
-    memories: memory.list().length,
+    memories: await memory.count().catch(() => 0),
+    memoryStore: memory.storeKind,
     lastModel: lastModelRef,
     notices: notices.list().length,
   };
@@ -1404,7 +1422,13 @@ app.get("/api/agents", (_req, res) => {
 app.get("/api/hive", (req, res) => {
   res.json(hive.recent(Math.min(Number(req.query.limit) || 100, 500)));
 });
-app.get("/api/memories", (_req, res) => res.json(memory.list()));
+app.get("/api/memories", async (_req, res) => {
+  try {
+    res.json(await memory.list());
+  } catch (e) {
+    res.status(503).json({ error: `Memory unavailable: ${e instanceof Error ? e.message : String(e)}` });
+  }
+});
 // Pictures for cards: upload as base64 (a data: URL is fine), then pass the id in "images"
 app.post("/api/uploads", requireToken, async (req, res) => {
   const data = typeof req.body?.data === "string" ? req.body.data : "";
@@ -1442,19 +1466,27 @@ app.get("/api/uploads/:id", (req, res) => {
   res.end(img.buf);
 });
 
-app.post("/api/memories", requireToken, (req, res) => {
+app.post("/api/memories", requireToken, async (req, res) => {
   const text = typeof req.body?.text === "string" ? req.body.text : "";
-  const id = memory.add(text, "shared", 0.7, req.body?.pinned !== false);
+  // Typed by you, so private unless you say otherwise ("private": false lets cloud models see it)
+  const id = await memory.add(text, "shared", 0.7, req.body?.pinned !== false, req.body?.private !== false);
   if (id === null) return res.status(400).json({ error: "Memory text is too short" });
   res.status(201).json({ id });
 });
-app.post("/api/memories/maintain", requireToken, (_req, res) => res.json(memory.maintain()));
-app.post("/api/memories/:id/:action", requireToken, (req, res) => {
-  const id = Number(req.params.id);
-  const action = String(req.params.action);
-  const ok =
-    action === "pin" ? memory.setPinned(id, true) : action === "unpin" ? memory.setPinned(id, false) : action === "delete" ? memory.remove(id) : null;
-  if (ok === null) return res.status(400).json({ error: "Unknown action" });
+app.post("/api/memories/maintain", requireToken, async (_req, res) => res.json(await memory.maintain()));
+app.post("/api/memories/:id/:action", requireToken, async (req, res) => {
+  const id = String(req.params.id);
+  const actions: Record<string, () => Promise<boolean>> = {
+    pin: () => memory.setPinned(id, true),
+    unpin: () => memory.setPinned(id, false),
+    // "share" lets cloud models (and cloud MCP clients such as Claude Code) see it; "private" hides it again
+    share: () => memory.setPrivate(id, false),
+    private: () => memory.setPrivate(id, true),
+    delete: () => memory.remove(id),
+  };
+  const run = actions[String(req.params.action)];
+  if (!run) return res.status(400).json({ error: "Unknown action" });
+  const ok = await run();
   res.status(ok ? 200 : 404).json({ ok });
 });
 
@@ -1544,7 +1576,47 @@ app.get("/api/routines/:id/runs", (req, res) => {
   res.json(runs);
 });
 
-app.listen(PORT, HOST, () => {
+// --- Brain: shared memory and canon over MCP ---------------------------------
+if (brainEnabled()) {
+  // Loaded only when configured, so Mission Control still runs without Postgres
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { createMcpRouter } = require("./brain/mcp-server") as typeof import("./brain/mcp-server");
+  app.use("/mcp", createMcpRouter());
+}
+app.get("/api/brain", async (_req, res) => {
+  res.json({
+    enabled: Boolean(brain),
+    memoryStore: memory.storeKind,
+    memories: await memory.count().catch(() => null),
+    mcp: brain ? "/mcp" : null,
+    vaultCanon: Boolean(brain && OBSIDIAN_VAULT),
+  });
+});
+app.post("/api/brain/sync-canon", requireToken, async (_req, res) => {
+  if (!brain) return res.status(409).json({ error: "The brain isn't configured (DATABASE_URL)" });
+  if (!OBSIDIAN_VAULT) return res.status(409).json({ error: "No Obsidian vault is set up (OBSIDIAN_VAULT)" });
+  try {
+    res.json(await brain.syncCanon());
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+async function start() {
+  if (brainEnabled()) {
+    brain = await startBrain({
+      dataDir: DATA_DIR,
+      vault: OBSIDIAN_VAULT,
+      canonEveryMin: CANON_SYNC_MIN,
+      log: (s) => console.log(`[brain] ${s}`),
+    });
+    memory.useStore(brain.memory);
+    console.log(`[brain] shared memory on (${await memory.count()} memories); MCP at /mcp`);
+  }
+  app.listen(PORT, HOST, onListening);
+}
+
+function onListening() {
   console.log(`ts-harness listening on http://${HOST}:${PORT}`);
   console.log(`Ollama: ${OLLAMA_BASE_URL}  Jarvis: ${models.resolve("planner").ref}  router: ${models.resolve("router").ref}`);
   console.log(`Data: ${DATA_DIR}  Obsidian: ${OBSIDIAN_VAULT || "off"}  Telegram: ${telegram ? "on" : "off"}  Browser: ${BROWSER_CDP_URL || "off"}`);
@@ -1554,4 +1626,11 @@ app.listen(PORT, HOST, () => {
   scheduler.start();
   const active = scheduler.list().filter((r) => r.enabled).length;
   console.log(`Routines: ${active} active (time zone ${ROUTINE_TZ})`);
+}
+
+start().catch((err) => {
+  // Without its memory store Mission Control would silently lose memories, so it stops;
+  // Docker restarts it once the database is reachable
+  console.error(`[brain] startup failed: ${err instanceof Error ? err.message : err}`);
+  process.exit(1);
 });

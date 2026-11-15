@@ -7,20 +7,27 @@
     "start": "tsx src/ui.ts",
     "typecheck": "tsc --noEmit",
     "eval": "tsx evals/run.ts",
-    "test": "tsx --test tests/hq.test.ts tests/board.test.ts tests/policy.test.ts tests/routine.test.ts tests/vision.test.ts tests/audio.test.ts tests/reply.test.ts tests/pdf.test.ts tests/docs.test.ts tests/scheduler.test.ts",
-    "preflight": "tsx scripts/preflight.ts"
+    "test": "tsx --test tests/hq.test.ts tests/board.test.ts tests/policy.test.ts tests/routine.test.ts tests/vision.test.ts tests/audio.test.ts tests/reply.test.ts tests/pdf.test.ts tests/docs.test.ts tests/scheduler.test.ts tests/colibri.test.ts tests/brain.test.ts",
+    "preflight": "tsx scripts/preflight.ts",
+    "brain:migrate": "tsx src/brain/migrate.ts",
+    "brain:token": "tsx src/brain/token.ts",
+    "brain:backfill": "tsx src/brain/backfill.ts",
+    "test:brain": "tsx --test tests/brain-db.test.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.0",
     "cors": "^2.8.6",
     "dotenv": "^18.0.9",
     "express": "^5.3.0",
     "pdfjs-dist": "^6.2.108",
+    "pg": "^8.16.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.6",
+    "@types/pg": "^8.15.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }

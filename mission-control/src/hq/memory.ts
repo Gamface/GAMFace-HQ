@@ -8,7 +8,7 @@ import { JsonStore } from "./store";
 // Pinned memories never decay or get removed.
 
 export interface MemoryItem {
-  id: number;
+  id: string;
   agent: string; // "shared" or an agent key
   text: string;
   importance: number;
@@ -16,11 +16,35 @@ export interface MemoryItem {
   hits: number;
   createdAt: number;
   lastUsed: number;
+  /** Cloud models never see a private memory. Memories are private unless marked otherwise. */
+  private: boolean;
+}
+
+export type NewMemory = Omit<MemoryItem, "id" | "hits">;
+export type MemoryPatch = Partial<Pick<MemoryItem, "importance" | "pinned" | "hits" | "lastUsed" | "private">>;
+
+/**
+ * Where memories live. The JSON file (data/memories.json) is the original
+ * store; the brain store keeps them in the shared Postgres database so
+ * outside clients (Claude Code over MCP) can use the same memory.
+ */
+export interface MemoryStore {
+  readonly kind: string;
+  /** HQ's own memories (facts), any order */
+  list(): Promise<MemoryItem[]>;
+  /** One owner's memories, for spotting duplicates */
+  owned(agent: string): Promise<MemoryItem[]>;
+  insert(item: NewMemory): Promise<string>;
+  update(id: string, patch: MemoryPatch): Promise<boolean>;
+  remove(ids: string[]): Promise<number>;
+  /** Up to `limit` relevant memory texts for an agent (its own, shared and pinned ones); bumps their use counters */
+  recall(query: string, agent: string, limit: number): Promise<string[]>;
+  count(): Promise<number>;
 }
 
 interface MemoryData {
   nextId: number;
-  items: MemoryItem[];
+  items: (Omit<MemoryItem, "id" | "private"> & { id: number; private?: boolean })[];
 }
 
 const DAY = 86_400_000;
@@ -55,68 +79,51 @@ export function similarity(a: string, b: string): number {
   return total ? (2 * overlap) / total : 0;
 }
 
-export class Memory {
+/** The original store: a JSON file, with word-overlap recall. */
+export class JsonMemoryStore implements MemoryStore {
+  readonly kind = "json";
   private store: JsonStore<MemoryData>;
-  private chat: JsonChat;
-  private model: string;
 
-  constructor(dataDir: string, chat: JsonChat, model: string) {
+  constructor(dataDir: string) {
     this.store = new JsonStore<MemoryData>(dataDir, "memories.json", { nextId: 1, items: [] });
-    this.chat = chat;
-    this.model = model;
   }
 
-  list(): MemoryItem[] {
-    return [...this.store.data.items].sort(
-      (a, b) => Number(b.pinned) - Number(a.pinned) || b.importance - a.importance || b.id - a.id,
-    );
+  private view(m: MemoryData["items"][number]): MemoryItem {
+    return { ...m, id: String(m.id), private: m.private ?? true };
   }
 
-  add(text: string, agent = "shared", importance = 0.5, pinned = false): number | null {
-    text = text.trim();
-    if (text.length < 8) return null;
-    const now = Date.now();
-    const dup = this.store.data.items.find((m) => m.agent === agent && similarity(m.text, text) >= MERGE_SIMILARITY);
-    if (dup) {
-      dup.importance = Math.min(1, dup.importance + 0.1);
-      dup.lastUsed = now;
-      dup.pinned = dup.pinned || pinned;
-      this.store.save();
-      return dup.id;
-    }
-    const item: MemoryItem = {
-      id: this.store.data.nextId++,
-      agent,
-      text: text.slice(0, 500),
-      importance: Math.max(0, Math.min(1, importance)),
-      pinned,
-      hits: 0,
-      createdAt: now,
-      lastUsed: now,
-    };
-    this.store.data.items.push(item);
+  async list() {
+    return this.store.data.items.map((m) => this.view(m));
+  }
+
+  async owned(agent: string) {
+    return this.store.data.items.filter((m) => m.agent === agent).map((m) => this.view(m));
+  }
+
+  async insert(item: NewMemory) {
+    const id = this.store.data.nextId++;
+    this.store.data.items.push({ ...item, id, hits: 0 });
     this.store.save();
-    return item.id;
+    return String(id);
   }
 
-  setPinned(id: number, pinned: boolean) {
-    const m = this.store.data.items.find((x) => x.id === id);
-    if (m) {
-      m.pinned = pinned;
-      this.store.save();
-    }
-    return Boolean(m);
+  async update(id: string, patch: MemoryPatch) {
+    const m = this.store.data.items.find((x) => String(x.id) === id);
+    if (!m) return false;
+    Object.assign(m, patch);
+    this.store.save();
+    return true;
   }
 
-  remove(id: number) {
+  async remove(ids: string[]) {
+    const drop = new Set(ids);
     const before = this.store.data.items.length;
-    this.store.data.items = this.store.data.items.filter((x) => x.id !== id);
+    this.store.data.items = this.store.data.items.filter((x) => !drop.has(String(x.id)));
     this.store.save();
-    return this.store.data.items.length < before;
+    return before - this.store.data.items.length;
   }
 
-  /** Memories relevant to a prompt, for one agent (its own plus shared ones). */
-  recall(query: string, agent: string, limit = 6): string[] {
+  async recall(query: string, agent: string, limit: number) {
     const q = words(query);
     const now = Date.now();
     const scored = this.store.data.items
@@ -137,8 +144,153 @@ export class Memory {
     return scored.map((s) => s.m.text);
   }
 
+  async count() {
+    return this.store.data.items.length;
+  }
+
+  /** Raw items, for the one-time import into the brain */
+  legacyItems() {
+    return this.store.data.items.map((m) => ({ ...m, private: m.private ?? true }));
+  }
+}
+
+export interface MaintenancePlan {
+  updates: { id: string; patch: MemoryPatch }[];
+  remove: string[];
+  stats: { decayed: number; forgotten: number; merged: number };
+}
+
+/**
+ * Decay, forgetting and merging, as a plan any store can apply. Unpinned
+ * memories fade with disuse; faded ones are forgotten; near-duplicates with the
+ * same owner merge into the more important one. Pinned memories are kept as they are.
+ */
+export function planMaintenance(items: MemoryItem[], now = Date.now()): MaintenancePlan {
+  const stats = { decayed: 0, forgotten: 0, merged: 0 };
+  const updates = new Map<string, MemoryPatch>();
+  const remove: string[] = [];
+  const keep: MemoryItem[] = [];
+  for (const m of items) {
+    if (m.pinned) {
+      keep.push({ ...m });
+      continue;
+    }
+    const idleDays = Math.max(0, (now - m.lastUsed) / DAY);
+    const next = m.importance * DECAY_PER_DAY ** idleDays;
+    if (next < FORGET_BELOW) {
+      stats.forgotten++;
+      remove.push(m.id);
+      continue;
+    }
+    const copy = { ...m };
+    if (Math.abs(next - m.importance) > 1e-4) {
+      copy.importance = next;
+      copy.lastUsed = now; // don't charge the same idle time twice
+      updates.set(m.id, { importance: next, lastUsed: now });
+      stats.decayed++;
+    }
+    keep.push(copy);
+  }
+  keep.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.importance - a.importance);
+  const gone = new Set<string>();
+  for (let i = 0; i < keep.length; i++) {
+    const a = keep[i];
+    if (gone.has(a.id)) continue;
+    for (const b of keep.slice(i + 1)) {
+      if (gone.has(b.id) || b.pinned || a.agent !== b.agent) continue;
+      if (similarity(a.text, b.text) >= MERGE_SIMILARITY) {
+        a.importance = Math.min(1, Math.max(a.importance, b.importance) + 0.05);
+        a.hits += b.hits;
+        // The merged memory stays private if either half was
+        a.private = a.private || b.private;
+        updates.set(a.id, { ...(updates.get(a.id) ?? {}), importance: a.importance, hits: a.hits, private: a.private });
+        gone.add(b.id);
+        stats.merged++;
+      }
+    }
+  }
+  for (const id of gone) {
+    remove.push(id);
+    updates.delete(id);
+  }
+  return { updates: [...updates].map(([id, patch]) => ({ id, patch })), remove, stats };
+}
+
+export class Memory {
+  private store: MemoryStore;
+  private chat: JsonChat;
+  private model: string;
+
+  /** `store` may be a data folder, for the JSON store. */
+  constructor(store: MemoryStore | string, chat: JsonChat, model: string) {
+    this.store = typeof store === "string" ? new JsonMemoryStore(store) : store;
+    this.chat = chat;
+    this.model = model;
+  }
+
+  /** Switch storage (e.g. to the brain once it has started). */
+  useStore(store: MemoryStore) {
+    this.store = store;
+  }
+
+  get storeKind() {
+    return this.store.kind;
+  }
+
+  async list(): Promise<MemoryItem[]> {
+    return (await this.store.list()).sort(
+      (a, b) => Number(b.pinned) - Number(a.pinned) || b.importance - a.importance || b.createdAt - a.createdAt,
+    );
+  }
+
+  count() {
+    return this.store.count();
+  }
+
+  async add(text: string, agent = "shared", importance = 0.5, pinned = false, isPrivate = true): Promise<string | null> {
+    text = text.trim();
+    if (text.length < 8) return null;
+    const now = Date.now();
+    const dup = (await this.store.owned(agent)).find((m) => similarity(m.text, text) >= MERGE_SIMILARITY);
+    if (dup) {
+      await this.store.update(dup.id, {
+        importance: Math.min(1, dup.importance + 0.1),
+        lastUsed: now,
+        pinned: dup.pinned || pinned,
+        private: dup.private || isPrivate,
+      });
+      return dup.id;
+    }
+    return this.store.insert({
+      agent,
+      text: text.slice(0, 500),
+      importance: Math.max(0, Math.min(1, importance)),
+      pinned,
+      createdAt: now,
+      lastUsed: now,
+      private: isPrivate,
+    });
+  }
+
+  setPinned(id: string, pinned: boolean) {
+    return this.store.update(id, { pinned });
+  }
+
+  setPrivate(id: string, isPrivate: boolean) {
+    return this.store.update(id, { private: isPrivate });
+  }
+
+  async remove(id: string) {
+    return (await this.store.remove([id])) > 0;
+  }
+
+  /** Memories relevant to a prompt, for one agent (its own plus shared ones). */
+  recall(query: string, agent: string, limit = 6): Promise<string[]> {
+    return this.store.recall(query, agent, limit);
+  }
+
   /** Ask the model which durable facts from one exchange are worth keeping. */
-  /** `privateAnswer`: the answer was written from private material, so a cloud model must not see it. */
+  /** `privateAnswer`: the answer was written from private material, so a cloud model must not see it, and its facts stay private. */
   async extract(agent: string, prompt: string, answer: string, privateAnswer = false): Promise<string[]> {
     const shown = sanitize(answer.slice(0, 3000));
     const data = await this.chat(this.model, [
@@ -159,51 +311,15 @@ export class Memory {
       if (typeof item.text !== "string" || !item.text.trim()) continue;
       const importance = Number(item.importance);
       const owner = item.shared === false ? agent : "shared";
-      if (this.add(item.text, owner, Number.isFinite(importance) ? importance : 0.5) !== null) saved.push(item.text);
+      if ((await this.add(item.text, owner, Number.isFinite(importance) ? importance : 0.5, false, privateAnswer)) !== null) saved.push(item.text);
     }
     return saved;
   }
 
-  maintain(now = Date.now()) {
-    let decayed = 0;
-    let forgotten = 0;
-    let merged = 0;
-    const keep: MemoryItem[] = [];
-    for (const m of this.store.data.items) {
-      if (m.pinned) {
-        keep.push(m);
-        continue;
-      }
-      const idleDays = Math.max(0, (now - m.lastUsed) / DAY);
-      const next = m.importance * DECAY_PER_DAY ** idleDays;
-      if (next < FORGET_BELOW) {
-        forgotten++;
-        continue;
-      }
-      if (Math.abs(next - m.importance) > 1e-4) {
-        m.importance = next;
-        m.lastUsed = now; // don't charge the same idle time twice
-        decayed++;
-      }
-      keep.push(m);
-    }
-    keep.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.importance - a.importance);
-    const gone = new Set<number>();
-    for (let i = 0; i < keep.length; i++) {
-      const a = keep[i];
-      if (gone.has(a.id)) continue;
-      for (const b of keep.slice(i + 1)) {
-        if (gone.has(b.id) || b.pinned || a.agent !== b.agent) continue;
-        if (similarity(a.text, b.text) >= MERGE_SIMILARITY) {
-          a.importance = Math.min(1, Math.max(a.importance, b.importance) + 0.05);
-          a.hits += b.hits;
-          gone.add(b.id);
-          merged++;
-        }
-      }
-    }
-    this.store.data.items = keep.filter((m) => !gone.has(m.id));
-    this.store.save();
-    return { decayed, forgotten, merged };
+  async maintain(now = Date.now()) {
+    const plan = planMaintenance(await this.store.list(), now);
+    for (const u of plan.updates) await this.store.update(u.id, u.patch);
+    if (plan.remove.length) await this.store.remove(plan.remove);
+    return plan.stats;
   }
 }
