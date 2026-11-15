@@ -49,6 +49,8 @@ import { FILE_ID, Files, buildReport, pdfInstructions, printPdf, wantsPdf } from
 import { DOC_ID, DocCache, cleanName, extractPdf, partsOf, withPageMarks } from "./hq/docs";
 import type { PdfText } from "./hq/docs";
 import { Scheduler } from "./hq/scheduler";
+import { ApprovalCenter, ApprovalPolicySchema } from "./hq/approvals";
+import type { ActionRequest, Approval } from "./hq/approvals";
 import { upcoming, parseSchedule, validTimeZone } from "./hq/schedule";
 
 // --- Config (env vars, see .env.example) ------------------------------------
@@ -144,6 +146,85 @@ async function docText(id: string): Promise<PdfText | null> {
 }
 const hive = new Hive(DATA_DIR);
 const notices = new Notices(store);
+
+// --- Approvals (Phase 4) -------------------------------------------------------
+// Typing, submitting and button clicks wait for the user's answer (approvals.ts)
+
+/** One line saying what an agent wants to do. */
+function describeAction(a: Pick<Approval, "kind" | "target" | "text" | "site">): string {
+  const text = a.text ? `“${a.text.length > 120 ? `${a.text.slice(0, 120)}…` : a.text}”` : "";
+  switch (a.kind) {
+    case "search":
+      return text ? `search for ${text} on ${a.site}` : `run the search “${a.target}” on ${a.site}`;
+    case "type":
+      return `type ${text} into “${a.target}” on ${a.site}`;
+    case "submit":
+      return text ? `type ${text} into “${a.target}” and submit it on ${a.site}` : `submit “${a.target}” on ${a.site}`;
+    default:
+      return `click “${a.target}” on ${a.site}`;
+  }
+}
+
+// Pausing a card's time limit while it waits for an answer
+const taskTimers = new Map<string, { pause: () => void; resume: () => void }>();
+
+const approvals = new ApprovalCenter({
+  onRequest: (a) => {
+    const t = tasks.get(a.taskId);
+    if (t) {
+      t.awaitingApproval = a.id;
+      emit(
+        t,
+        "executing_tool",
+        `\n⏸ Waiting for your approval to ${describeAction(a)}${a.risk === "high" ? " (high risk)" : ""}. ` +
+          `Answer on the dashboard${telegram ? " or in Telegram" : ""} within ${approvals.policy.timeoutMinutes} minutes.\n`,
+      );
+    }
+    hive.log(a.agent, "approval", `waiting: ${describeAction(a)}`, a.taskId);
+    notifyApproval(a);
+  },
+  onDecision: (a) => {
+    store.logApproval(a);
+    const t = tasks.get(a.taskId);
+    if (t && t.awaitingApproval === a.id) {
+      t.awaitingApproval = undefined;
+      const line =
+        a.status === "approved"
+          ? `✓ Approved${a.scope === "card" ? ` (and the rest of this card's ${a.kind === "click" ? "clicks" : "typing"} on ${a.site})` : ""}`
+          : a.status === "expired"
+            ? "✗ No answer in time, so it wasn't done"
+            : a.status === "denied"
+              ? `✗ Declined${a.note ? `: ${a.note}` : ""}`
+              : "✗ Canceled";
+      emit(t, "executing_tool", `${line}\n`);
+    }
+    if (a.decidedBy !== "policy" && a.decidedBy !== "card-grant") hive.log(a.agent, "approval", `${a.status}: ${describeAction(a)}`, a.taskId);
+  },
+});
+approvals.policy = ApprovalPolicySchema.parse(store.getSetting("approvalPolicy", {}));
+
+/** Asks before an action, with the card's time limit paused while it waits. */
+async function askApproval(task: Task, agent: string, req: ActionRequest, signal: AbortSignal): Promise<string | null> {
+  const timers = taskTimers.get(task.id);
+  timers?.pause();
+  try {
+    return await approvals.check(req, { taskId: task.id, taskTitle: task.title || task.prompt, agent, unattended: isRoutine(task), signal });
+  } finally {
+    timers?.resume();
+  }
+}
+
+/** Sends a waiting request to Telegram, with buttons. */
+function notifyApproval(a: Approval) {
+  if (!telegram) return;
+  const t = tasks.get(a.taskId);
+  const chat = t?.chatId ?? [...TELEGRAM_ALLOWED][0];
+  if (!chat) return;
+  const text =
+    `⏸ ${TEAM[a.agent as AgentTarget]?.name ?? a.agent} wants to ${describeAction(a)}${a.risk === "high" ? " ⚠ HIGH RISK" : ""}\n` +
+    `Card: ${a.taskTitle}\nPage: ${a.url}\n\nAnswer within ${approvals.policy.timeoutMinutes} min, or /approve ${a.code} · /deny ${a.code}`;
+  telegram.sendApproval(chat, text, a.code, a.risk === "normal").catch((e) => hive.log("telegram", "error", String(e)));
+}
 // Every model request goes through the gateway: local-only lock, spend caps, private-context rule
 const gateway = new ModelGateway(models, store, notices, OLLAMA_KEEP_ALIVE);
 gateway.onServed = (ref) => {
@@ -390,6 +471,10 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
   const session = new BrowserSession({
     allowPrivate: BROWSER_ALLOW_PRIVATE,
     readOnly: task.readOnly ? { allowedSites: sites } : undefined,
+    // Runs that may act ask before typing, submitting or clicking a button
+    gate: task.readOnly ? undefined : (req) => askApproval(task, "browser", req, signal),
+    // A routine that may act still stays on its own sites
+    sites: !task.readOnly && isRoutine(task) && task.allowedSites?.length ? [...task.allowedSites, "html.duckduckgo.com"] : undefined,
     onFrame: (f: Frame) => broadcastBrowser({ type: "frame", taskId: task.id, ...f }),
     onBlocked: (url, reason) => {
       broadcastBrowser({ type: "blocked", taskId: task.id, url, reason });
@@ -417,7 +502,8 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
         [
           task.readOnly
             ? `READ-ONLY RUN: you may only open pages on ${sites.join(", ")} and follow links there. Typing, buttons and forms are disabled; use web search via navigate.`
-            : "",
+            : "Typing, submitting and clicking buttons ask the user first and may be declined. If an action is declined, don't try it again; find another way or answer. " +
+              "Never type passwords, payment details or ID numbers: tell the user to enter those themselves.",
           task.source === "voice" ? `When you answer: ${VOICE_STYLE}` : "",
         ]
           .filter(Boolean)
@@ -494,22 +580,40 @@ async function runTask(task: Task) {
   task.controller = controller;
   task.startedAt = Date.now();
   task.attempts = (task.attempts ?? 0) + 1;
-  // Routine runs are read-only whatever the stored card says
-  if (isRoutine(task)) task.readOnly = true;
+  // Routine runs are read-only unless their routine may act (with approvals)
+  if (isRoutine(task)) task.readOnly = !task.mayAct;
   const onTimeout = () => {
     task.abortReason = "timeout";
     controller.abort();
   };
   let limitMs = taskTimeoutMs(task.targetAgent, task.targetAgent === "planner");
   let timeout = setTimeout(onTimeout, limitMs);
+  // Time spent waiting for the user's approval doesn't count against the limit
+  let pausedMs = 0;
+  let pausedAt = 0;
+  const elapsed = () => Date.now() - task.startedAt! - pausedMs;
   // Once the lead agent is known (after auto-routing), a slower agent can extend the limit
   const extendLimit = (agent: string, delegates: boolean) => {
     const want = taskTimeoutMs(agent, delegates);
     if (want <= limitMs) return;
-    clearTimeout(timeout);
-    timeout = setTimeout(onTimeout, Math.max(0, want - (Date.now() - task.startedAt!)));
     limitMs = want;
+    if (pausedAt) return;
+    clearTimeout(timeout);
+    timeout = setTimeout(onTimeout, Math.max(0, want - elapsed()));
   };
+  taskTimers.set(task.id, {
+    pause: () => {
+      if (pausedAt) return;
+      pausedAt = Date.now();
+      clearTimeout(timeout);
+    },
+    resume: () => {
+      if (!pausedAt) return;
+      pausedMs += Date.now() - pausedAt;
+      pausedAt = 0;
+      timeout = setTimeout(onTimeout, Math.max(0, limitMs - elapsed()));
+    },
+  });
 
   // Batch tokens so the UI gets ~10 frames per second instead of one per token
   let pending = "";
@@ -810,13 +914,13 @@ async function runTask(task: Task) {
     task.usedPrivate = usedPrivate || undefined;
     task.privateNotes = learned.join("\n\n") || undefined;
     // Read-only runs don't write to the vault
-    const notes = task.readOnly ? [] : saveNotes(OBSIDIAN_VAULT, redact(answer).text);
+    const notes = task.readOnly || isRoutine(task) ? [] : saveNotes(OBSIDIAN_VAULT, redact(answer).text);
     if (notes.length) push(`\n\n(Saved to vault: ${notes.map((n) => path.basename(n)).join(", ")})`);
     flush();
     task.answer = redact(answer.replace(/<note title="[^"]*">[\s\S]*?<\/note>/g, "")).text.trim();
     log(lead, "complete", task.answer);
     // Read-only runs don't save memories either
-    if (useTeam && !task.readOnly && task.answer) memoryJobs.push({ agent: lead, prompt: ask, answer: task.answer, private: usedPrivate });
+    if (useTeam && !task.readOnly && !isRoutine(task) && task.answer) memoryJobs.push({ agent: lead, prompt: ask, answer: task.answer, private: usedPrivate });
     if (makePdf && task.answer) {
       emit(task, "executing_tool", "\n\n── Making the PDF ──\n");
       const made = await makeReport(task);
@@ -848,6 +952,9 @@ async function runTask(task: Task) {
   } finally {
     clearTimeout(timeout);
     clearInterval(flushTimer);
+    taskTimers.delete(task.id);
+    approvals.endTask(task.id);
+    task.awaitingApproval = undefined;
     task.finishedAt = Date.now();
     task.controller = undefined;
     task.activeAgent = undefined;
@@ -915,7 +1022,7 @@ function handleSwitch(text: string): string | null {
   return `${cmd.role === "all" ? "Every agent" : ROLE_LABEL[cmd.role]} now uses ${ref}.`;
 }
 
-function createTask(input: unknown, extra: { chatId?: string; routineId?: string } = {}): { task?: Task; status: number; error?: unknown } {
+function createTask(input: unknown, extra: { chatId?: string; routineId?: string; mayAct?: boolean } = {}): { task?: Task; status: number; error?: unknown } {
   const parsed = AgentTaskSchema.safeParse(input);
   if (!parsed.success) return { status: 400, error: parsed.error.flatten() };
   const d = parsed.data;
@@ -929,7 +1036,7 @@ function createTask(input: unknown, extra: { chatId?: string; routineId?: string
   if (d.audio.some((id) => !uploads.exists(id))) return { status: 400, error: "Unknown audio: upload it with POST /api/uploads first" };
   if (d.documents.some((id) => !uploads.exists(id))) return { status: 400, error: "Unknown PDF: upload it with POST /api/uploads first" };
   // Routine runs are forced read-only and get exactly one destination
-  const routine = routineFields(d, { telegramChat: telegram ? [...TELEGRAM_ALLOWED][0] : undefined, vault: OBSIDIAN_VAULT || undefined });
+  const routine = routineFields(d, { telegramChat: telegram ? [...TELEGRAM_ALLOWED][0] : undefined, vault: OBSIDIAN_VAULT || undefined }, d.source === "routine" && extra.mayAct);
   if ("error" in routine) return { status: 400, error: routine.error };
   const now = Date.now();
   const requested = d.targetAgent;
@@ -960,6 +1067,7 @@ function createTask(input: unknown, extra: { chatId?: string; routineId?: string
     events: [],
     chatId: extra.chatId ?? routine.chatId,
     routineId: d.source === "routine" ? extra.routineId : undefined,
+    mayAct: d.source === "routine" && extra.mayAct ? true : undefined,
   };
 
   // Model switches answer at once and show up as a finished card
@@ -1192,6 +1300,8 @@ if (TELEGRAM_BOT_TOKEN) {
       return active.map((t) => `${t.id.slice(0, 8)} ${t.status} ${t.targetAgent}: ${t.title ?? t.prompt.slice(0, 60)}`).join("\n") || "Queue is empty.";
     },
     log: (event, summary) => hive.log("telegram", event, summary),
+    decide: (code, approve, scope) => approvals.decide(code, approve, "telegram", scope),
+    pendingText: () => approvals.pending().map((a) => `${a.code}: ${describeAction(a)}${a.risk === "high" ? " ⚠" : ""} (card: ${a.taskTitle})`).join("\n"),
   });
   telegram.start();
 }
@@ -1463,6 +1573,36 @@ app.get("/stream", handleStream);
 app.post("/command", requireToken, (req, res) => enqueue(req.body, res));
 app.post("/cancel", requireToken, (req, res) => cancel(req.body?.taskId, res));
 
+// --- Approvals API -----------------------------------------------------------
+app.get("/api/approvals", (_req, res) => {
+  const pending = approvals.pending().map((a) => ({ ...a, summary: describeAction(a) }));
+  const history = store.approvalLog<Approval>(40).map((a) => ({ ...a, summary: describeAction(a) }));
+  res.json({ pending, history, policy: approvals.policy });
+});
+app.get("/api/approvals/:id/screenshot", (req, res) => {
+  const shot = approvals.screenshot(String(req.params.id));
+  if (!shot) return res.status(404).json({ error: "No screenshot" });
+  res.setHeader("Content-Type", "image/jpeg");
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.end(Buffer.from(shot, "base64"));
+});
+app.post("/api/approvals/:id", requireToken, (req, res) => {
+  const approve = req.body?.approve === true;
+  const scope = req.body?.scope === "card" ? "card" : "once";
+  const note = typeof req.body?.note === "string" ? req.body.note : undefined;
+  if (!approvals.decide(String(req.params.id), approve, "you", scope, note)) return res.status(409).json({ error: "That request isn't waiting any more" });
+  res.json({ ok: true });
+});
+app.put("/api/approvals/policy", requireToken, (req, res) => {
+  const parsed = ApprovalPolicySchema.safeParse({ ...approvals.policy, ...(req.body ?? {}) });
+  if (!parsed.success) return res.status(400).json({ error: "Invalid approval settings" });
+  approvals.policy = parsed.data;
+  store.setSetting("approvalPolicy", parsed.data);
+  hive.log("approval", "settings", JSON.stringify(parsed.data));
+  res.json(parsed.data);
+});
+
 // --- Routines (scheduled read-only cards) ------------------------------------
 const ROUTINE_TZ = process.env.ROUTINE_TZ || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 const ROUTINE_MIN_MINUTES = Math.max(1, Number(process.env.ROUTINE_MIN_MINUTES) || 5);
@@ -1473,7 +1613,7 @@ const scheduler = new Scheduler(
     start: (r) => {
       const out = createTask(
         { prompt: r.prompt, title: r.name, targetAgent: r.targetAgent, source: "routine", deliverTo: r.deliverTo, allowedSites: r.allowedSites, column: "ready" },
-        { routineId: r.id },
+        { routineId: r.id, mayAct: r.mayAct },
       );
       if (!out.task) return { error: typeof out.error === "string" ? out.error : "the card couldn't be created" };
       hive.log("routine", "started", `${r.name} (${r.label})`, out.task.id);

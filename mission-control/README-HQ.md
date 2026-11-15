@@ -126,11 +126,39 @@ runs. Each has one destination (`deliverTo`: `dashboard`, `telegram` or `obsidia
 in `HQ/routines`); its prompt can't switch models, and its findings stay on its card rather
 than in the hive log. Rules: `src/hq/routine.ts`.
 
+## Approvals (Phase 4)
+
+Agents now ask before they change anything on a web page. When the browser agent wants to
+type into a field, submit a form or click a button, the card pauses (⏸ on the board) and a
+bar appears at the top of every page: what it wants to do, a screenshot with the target
+outlined, and **Approve**, **Approve for this card on this site** or **Deny** (with an
+optional note the agent sees). Telegram gets the same request with buttons, and
+`/approvals`, `/approve <code>` and `/deny <code>` work there too.
+- Plain links are opened directly, like typing their address, so they never ask.
+- No answer within 15 minutes (Team page → Approvals) counts as "no". The card's own
+  time limit is paused while it waits.
+- Team page → **Approvals**: Ask / Allow / Block for typing, submitting, clicking and
+  searching (searching a site is allowed by default), and a record of every answer.
+- Rules no setting changes:
+  - Password, payment, bank, ID-number and one-time-code fields are never typed in, even
+    if you approve. The agent tells you to enter those yourself.
+  - Buy, pay, order, transfer, subscribe and delete-style buttons are marked HIGH RISK
+    and always ask; "this card on this site" doesn't cover them.
+  - Routines that may act always ask, even for actions set to Allow.
+- Read-only runs never act at all.
+- Vault notes no longer overwrite each other: a second note with the same name gets (2).
+
+API: `GET /api/approvals` (pending, recent answers, settings), `POST /api/approvals/:id`
+(`{ approve, scope?: "once" | "card", note? }`), `GET /api/approvals/:id/screenshot`,
+`PUT /api/approvals/policy`.
+
 ## Routines (scheduled runs)
 
 The **Routines** page runs requests on a schedule. Each run is a card on the board (⏱),
-always read-only, and its result goes to one place: the dashboard, Telegram, or a note in
-the vault's `HQ/routines` folder.
+read-only unless the routine has **May act** turned on, and its result goes to one place:
+the dashboard, Telegram, or a note in the vault's `HQ/routines` folder. A routine that may
+act can type, submit and click on its own sites only, and every such action waits for
+your approval (see Approvals).
 - Schedules in plain words or cron: `weekdays at 7:30am`, `every 2 hours`, `hourly`,
   `every hour at :30`, `daily at 6pm`, `mondays at 9am`, `mon, wed and fri at 6pm`,
   `weekends at noon`, `monthly on the 1st at 9:00`, or five cron fields
@@ -144,8 +172,8 @@ the vault's `HQ/routines` folder.
   PC was asleep are skipped, with a dashboard notice, unless the routine has
   **Catch up on a missed run**, which runs it once (not once per missed time).
 - Read-only means the browser can open pages, scroll, go back and follow links, only on
-  the routine's sites (or sites named in its request), and never types, submits or saves
-  notes or memories. Its findings stay on its card; the shared activity log only notes
+  the routine's sites (or sites named in its request), and never types or submits.
+  Routine runs never save notes or memories, whether they may act or not. Its findings stay on its card; the shared activity log only notes
   that it ran.
 - **Run now** starts a run at once; **Show runs** lists recent runs with their results and
   any PDFs. Turning a routine off keeps it and its history.

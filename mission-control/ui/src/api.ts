@@ -9,7 +9,7 @@ export async function getJson<T>(path: string): Promise<T> {
 }
 
 /** Sends a change and returns the JSON reply, throwing the server's error message on failure. */
-export async function send<T = unknown>(method: "POST" | "PATCH" | "PUT", path: string, body?: unknown): Promise<T> {
+export async function send<T = unknown>(method: "POST" | "PATCH" | "PUT" | "DELETE", path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${HARNESS_URL}${path}`, {
     method,
     headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -144,6 +144,7 @@ export interface BoardCard {
   replies?: number;
   files?: CardFile[];
   documents?: string[];
+  awaitingApproval?: string;
   interrupted?: boolean;
   attempts?: number;
   position?: number;

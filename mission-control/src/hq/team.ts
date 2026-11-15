@@ -172,8 +172,11 @@ export function saveNotes(vault: string, text: string): string[] {
     const safe = m[1].replace(/[^\w \-]/g, "").trim().slice(0, 80) || "note";
     const dir = path.join(vault, "HQ", "inbox");
     mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, `${new Date().toISOString().slice(0, 10)} ${safe}.md`);
-    writeFileSync(file, m[2].trim() + "\n");
+    // Never overwrite a note that's already there: add (2), (3)…
+    const base = `${new Date().toISOString().slice(0, 10)} ${safe}`;
+    let file = path.join(dir, `${base}.md`);
+    for (let n = 2; existsSync(file) && n < 1000; n++) file = path.join(dir, `${base} (${n}).md`);
+    writeFileSync(file, m[2].trim() + "\n", { flag: "wx" });
     saved.push(file);
   }
   return saved;

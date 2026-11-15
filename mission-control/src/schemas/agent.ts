@@ -88,6 +88,8 @@ export const RoutineInputSchema = z.object({
   enabled: z.boolean().default(true),
   // When the PC was off at run time: run once on start-up (true) or wait for the next time (false)
   catchUp: z.boolean().default(false),
+  // Runs may type, submit and click, each only after the user approves it; otherwise read-only
+  mayAct: z.boolean().default(false),
 });
 export const RoutinePatchSchema = RoutineInputSchema.partial();
 
@@ -204,6 +206,8 @@ export const TaskSummarySchema = z.object({
   replies: z.number().optional(),
   // The routine that created this card
   routineId: z.string().optional(),
+  // The approval request this card is waiting on
+  awaitingApproval: z.string().optional(),
   // PDF reports made from the card's answer
   files: z.array(z.object({ name: z.string(), bytes: z.number(), pictures: z.number().optional(), at: z.number() })).optional(),
 });

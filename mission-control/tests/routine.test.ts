@@ -29,7 +29,7 @@ test("a routine has one destination, and it must be set up", () => {
 });
 
 test("a routine card can't be edited out of read-only mode", () => {
-  assert.match(routinePatchError({ source: "routine" }, { readOnly: false })!, /always read-only/);
+  assert.match(routinePatchError({ source: "routine" }, { readOnly: false })!, /can.t be switched out of read-only/);
   assert.equal(routinePatchError({ source: "routine" }, { readOnly: true }), null);
   assert.equal(routinePatchError({ source: "routine" }, {}), null);
   assert.equal(routinePatchError({ source: "ui" }, { readOnly: false }), null);

@@ -203,6 +203,7 @@ function Card({
         {c.audio && c.audio.length > 0 && <span title={`${c.audio.length} audio clip(s) attached`}>🎧{c.audio.length > 1 ? c.audio.length : ""}</span>}
         {c.images && c.images.length > 0 && <span title={`${c.images.length} picture(s) attached`}>🖼{c.images.length > 1 ? c.images.length : ""}</span>}
         {c.source === "telegram" && <span title="From Telegram">✈</span>}
+        {c.awaitingApproval && <span title="Waiting for your approval" className="text-amber-300 animate-pulse">⏸</span>}
         {c.source === "routine" && <span title={`Routine run: always read-only. Result goes to: ${c.deliverTo ?? "dashboard"}`}>⏱</span>}
         {c.source === "voice" && <span title="Spoken">🎙</span>}
       </div>

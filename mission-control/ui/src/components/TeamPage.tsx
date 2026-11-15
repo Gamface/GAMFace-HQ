@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { AGENT_LABELS, getJson, send, splitModel } from "../api";
+import ApprovalsSettings from "./ApprovalsSettings";
 
 // Pick a model for each agent: provider + model, an optional fallback, and
 // per-agent settings. API keys stay in .env; this page only shows whether one is set.
@@ -558,6 +559,7 @@ export default function TeamPage() {
           </button>
         </section>
       </div>
+      <ApprovalsSettings />
     </div>
   );
 }

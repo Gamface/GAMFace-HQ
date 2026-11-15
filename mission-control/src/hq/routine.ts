@@ -2,11 +2,12 @@ import { mkdirSync, writeFileSync } from "fs";
 import path from "path";
 import { redact } from "./guard";
 
-// Rules for routine runs (cards a schedule creates, source "routine"). Until
-// the approval rules of Phase 4 exist, the server makes every routine run
-// read-only, whatever the request says:
-//   - the browser can only open pages, scroll, go back and follow links
-//   - no notes are written to the vault and no memories are saved
+// Rules for routine runs (cards a schedule creates, source "routine"). A routine
+// run is read-only unless its routine has "may act" turned on:
+//   - read-only: the browser can only open pages, scroll, go back and follow links
+//   - may act: it can also type, submit and click buttons, but every such action
+//     waits for the user's approval (approvals.ts), and it stays on its sites
+//   - either way, no notes are written to the vault and no memories are saved
 //   - the result goes to the routine's own destination and nowhere else
 // These are checked when the card is created, when it is edited, and again
 // when it runs, so neither a client nor a stored card can switch them off.
@@ -28,7 +29,12 @@ export interface RoutineFields {
 }
 
 /** Works out a new card's read-only flag and destination. Returns an error message when the destination can't be used. */
-export function routineFields(input: { source: string; readOnly?: boolean; deliverTo?: Delivery }, env: RoutineEnv): RoutineFields | { error: string } {
+export function routineFields(
+  input: { source: string; readOnly?: boolean; deliverTo?: Delivery },
+  env: RoutineEnv,
+  /** Set by the server from the routine itself, never by a client */
+  mayAct = false,
+): RoutineFields | { error: string } {
   if (input.source !== "routine") {
     if (input.deliverTo) return { error: "Only routine runs have a destination" };
     return { readOnly: Boolean(input.readOnly) };
@@ -36,14 +42,14 @@ export function routineFields(input: { source: string; readOnly?: boolean; deliv
   const deliverTo = input.deliverTo ?? "dashboard";
   if (deliverTo === "telegram" && !env.telegramChat) return { error: "Telegram isn't set up (TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_CHAT_IDS), so a routine can't deliver there" };
   if (deliverTo === "obsidian" && !env.vault) return { error: "No Obsidian vault is set up (OBSIDIAN_VAULT), so a routine can't deliver there" };
-  return { readOnly: true, deliverTo, chatId: deliverTo === "telegram" ? env.telegramChat : undefined };
+  return { readOnly: !mayAct, deliverTo, chatId: deliverTo === "telegram" ? env.telegramChat : undefined };
 }
 
 export const isRoutine = (task: { source: string }) => task.source === "routine";
 
 /** Refuses edits that would take a routine card out of read-only mode. */
 export function routinePatchError(task: { source: string }, patch: { readOnly?: boolean }): string | null {
-  if (isRoutine(task) && patch.readOnly === false) return "Routine runs are always read-only until approval rules exist";
+  if (isRoutine(task) && patch.readOnly === false) return "A routine card can't be switched out of read-only here: turn on “May act” on the routine instead";
   return null;
 }
 

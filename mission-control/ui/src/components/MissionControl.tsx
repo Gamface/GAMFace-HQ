@@ -14,6 +14,7 @@ import FilesBar from "./FilesBar";
 import PreviewPane from "./PreviewPane";
 import TeamPage from "./TeamPage";
 import RoutinesPage from "./RoutinesPage";
+import ApprovalsBar from "./ApprovalsBar";
 
 interface SystemInfo {
   ollama: "up" | "down";
@@ -248,6 +249,11 @@ export default function MissionControl() {
           </span>
         </div>
       </header>
+
+      {/* Actions waiting for the user's OK float over every page */}
+      <div className="fixed top-[84px] left-1/2 -translate-x-1/2 w-[min(1100px,96vw)] z-40 shadow-2xl shadow-black/70 rounded-lg bg-slate-950">
+        <ApprovalsBar />
+      </div>
 
       {view === "board" && <Board />}
       {view === "team" && <TeamPage />}

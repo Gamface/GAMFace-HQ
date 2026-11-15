@@ -20,6 +20,8 @@ export interface Task extends TaskSummary {
   queuedAt?: number;
   // A model chosen for this task only; otherwise the agent's own model is used
   modelOverride?: string;
+  // Routine cards whose routine may act (with approvals); set by the server only
+  mayAct?: boolean;
   // Transcripts and picture descriptions from this round, kept for the conversation history (private)
   privateNotes?: string;
 }
@@ -60,6 +62,7 @@ export class TaskStore {
       CREATE INDEX IF NOT EXISTS events_task ON events(task_id, event_id);
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS routines (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, at INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS usage (
         day TEXT NOT NULL, agent TEXT NOT NULL, model TEXT NOT NULL,
         prompt_tokens INTEGER NOT NULL DEFAULT 0, completion_tokens INTEGER NOT NULL DEFAULT 0,
@@ -220,6 +223,15 @@ export class TaskStore {
     const day = new Date().toISOString().slice(0, 10);
     const row = this.db.prepare("SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS n FROM usage WHERE day = ? AND agent = ?").get(day, agent) as { n: number };
     return row.n;
+  }
+
+  /** Every approval decision, for the record. */
+  logApproval(a: { id: string; createdAt: number }) {
+    this.db.prepare("INSERT INTO approvals (id, at, data) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(a.id, a.createdAt, JSON.stringify(a));
+  }
+
+  approvalLog<T>(limit = 50): T[] {
+    return (this.db.prepare("SELECT data FROM approvals ORDER BY at DESC LIMIT ?").all(limit) as { data: string }[]).map((r) => JSON.parse(r.data) as T);
   }
 
   routines(): Routine[] {

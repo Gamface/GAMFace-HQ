@@ -6,6 +6,7 @@ import PreviewPane from "./PreviewPane";
 import ReplyBox from "./ReplyBox";
 import FilesBar from "./FilesBar";
 import { DocChip } from "./DocAttach";
+import ApprovalsBar from "./ApprovalsBar";
 import type { CardFile, DocInfo } from "../api";
 
 // Side panel for one card: what it is, where it stands, its handoffs and output,
@@ -206,6 +207,9 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
             </div>
           ) : null}
           {error && <p className="mt-2 text-xs text-rose-300">{error}</p>}
+          <div className="mt-3">
+            <ApprovalsBar taskId={id} />
+          </div>
         </header>
 
         {d && editing ? (

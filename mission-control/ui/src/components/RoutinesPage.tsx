@@ -18,6 +18,7 @@ interface Routine {
   allowedSites: string[];
   enabled: boolean;
   catchUp: boolean;
+  mayAct: boolean;
   nextRunAt?: number;
   lastRunAt?: number;
   lastStatus?: string;
@@ -39,7 +40,7 @@ interface Run {
   preview: string;
   files?: CardFile[];
 }
-type Draft = Pick<Routine, "name" | "prompt" | "schedule" | "targetAgent" | "deliverTo" | "enabled" | "catchUp"> & { sites: string; timezone: string };
+type Draft = Pick<Routine, "name" | "prompt" | "schedule" | "targetAgent" | "deliverTo" | "enabled" | "catchUp" | "mayAct"> & { sites: string; timezone: string };
 
 const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const AGENTS = ["auto", "planner", "browser", "coder", "file", "security_audit"];
@@ -170,7 +171,14 @@ function RoutineForm({ initial, info, onSave, onCancel }: { initial: Draft; info
         <label className="flex items-center gap-2" title="If the PC was off or asleep when it was due, run once when Mission Control is back">
           <input type="checkbox" checked={d.catchUp} onChange={(e) => set("catchUp", e.target.checked)} /> Catch up on a missed run
         </label>
-        <span className="text-[11px] text-slate-500">Runs are read-only: pages can be opened and read, but nothing is typed, submitted or saved.</span>
+        <label className="flex items-center gap-2" title="Let runs type, submit and click buttons. Each action waits for your approval on the dashboard or in Telegram.">
+          <input type="checkbox" checked={d.mayAct} onChange={(e) => set("mayAct", e.target.checked)} /> May act (asks you first)
+        </label>
+        <span className="text-[11px] text-slate-500">
+          {d.mayAct
+            ? "Runs may type, submit and click on its sites, but every action waits for your approval; no answer in time means no. Passwords and payment details are never typed."
+            : "Runs are read-only: pages can be opened and read, but nothing is typed, submitted or saved."}
+        </span>
         <div className="ml-auto flex gap-2">
           <button type="button" onClick={onCancel} className="px-3 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300">
             Cancel
@@ -230,7 +238,7 @@ export default function RoutinesPage() {
   }, []);
 
   const blank: Draft = useMemo(
-    () => ({ name: "", prompt: "", schedule: "", targetAgent: "auto", deliverTo: "dashboard", enabled: true, catchUp: false, sites: "", timezone: BROWSER_TZ }),
+    () => ({ name: "", prompt: "", schedule: "", targetAgent: "auto", deliverTo: "dashboard", enabled: true, catchUp: false, mayAct: false, sites: "", timezone: BROWSER_TZ }),
     [],
   );
   const toBody = (d: Draft) => ({
@@ -242,6 +250,7 @@ export default function RoutinesPage() {
     deliverTo: d.deliverTo,
     enabled: d.enabled,
     catchUp: d.catchUp,
+    mayAct: d.mayAct,
     allowedSites: d.sites
       .split(/[\s,]+/)
       .map((s) => s.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
@@ -323,6 +332,7 @@ export default function RoutinesPage() {
                   {r.timezone !== BROWSER_TZ && <span> ({r.timezone})</span>} · {r.targetAgent === "auto" ? "Auto-route" : AGENT_LABELS[r.targetAgent] ?? r.targetAgent} ·{" "}
                   {r.deliverTo === "dashboard" ? "dashboard" : r.deliverTo === "telegram" ? "→ Telegram" : "→ Obsidian"}
                   {r.allowedSites.length > 0 && <span> · {r.allowedSites.join(", ")}</span>}
+                  {r.mayAct ? <span className="text-amber-300"> · may act (asks first)</span> : <span> · read-only</span>}
                 </p>
               </div>
               <div className="ml-auto flex items-center gap-2 text-xs">

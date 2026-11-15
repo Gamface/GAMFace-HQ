@@ -1,4 +1,6 @@
 import { lookup } from "dns/promises";
+import { isSensitiveField } from "./approvals";
+import type { ActionRequest } from "./approvals";
 import { isIP } from "net";
 
 // A real Chrome the browser agent can drive, with a live screencast for the
@@ -186,6 +188,29 @@ const FIND_ELEMENT = `(kind, wanted) => {
   return label(best).slice(0, 80) || best.tagName.toLowerCase();
 }`;
 
+// What kind of thing the current target is: a plain link, a form submit, a search
+const TARGET_INFO = `(() => {
+  const el = window.__mcTarget;
+  const a = el.closest("a[href]");
+  const raw = a ? a.getAttribute("href") || "" : "";
+  const form = el.form || el.closest("form");
+  const t = (el.getAttribute("type") || "").toLowerCase();
+  const submits = !!form && ((el.tagName === "BUTTON" && (t === "" || t === "submit")) || (el.tagName === "INPUT" && (t === "submit" || t === "image")));
+  const method = form ? (form.getAttribute("method") || "get").toLowerCase() : "";
+  const search = !!form && method === "get" && !!form.querySelector('input[type=search], [role=searchbox], input[name=q], input[name=query], input[name=search]');
+  return { href: a ? a.href : "", scripted: !a || raw.startsWith("#") || /^javascript:/i.test(raw) || el.hasAttribute("onclick") || a.hasAttribute("onclick"), submits, search };
+})()`;
+
+const FIELD_INFO = `(() => {
+  const el = window.__mcTarget;
+  const form = el.form || el.closest("form");
+  const label = [el.getAttribute("aria-label"), el.getAttribute("placeholder"), el.id && document.querySelector('label[for="' + el.id + '"]')?.innerText, el.closest("label")?.innerText].filter(Boolean).join(" ").slice(0, 200);
+  const name = (el.getAttribute("name") || el.id || "").slice(0, 100);
+  const type = (el.getAttribute("type") || "").toLowerCase();
+  const search = type === "search" || el.getAttribute("role") === "searchbox" || /^(q|query|search|s|keywords?)$/i.test(name) || /\bsearch\b/i.test(label);
+  return { type, autocomplete: el.getAttribute("autocomplete") || "", name, label, search, method: form ? (form.getAttribute("method") || "get").toLowerCase() : "get" };
+})()`;
+
 const READ_PAGE = `(() => {
   const text = (document.body?.innerText || "").replace(/\\n{3,}/g, "\\n\\n").slice(0, 6000);
   const links = [...document.querySelectorAll("a[href]")].filter((a) => a.innerText.trim() && a.getBoundingClientRect().width > 0)
@@ -228,8 +253,14 @@ export interface ReadOnlyOptions {
   allowedSites: string[];
 }
 
+/** Asks before an action that changes something; resolves to null to go ahead, or why not. */
+export type ActionGate = (req: ActionRequest) => Promise<string | null>;
+
 export class BrowserSession {
   private cdp!: Cdp;
+  private gate: ActionGate | null;
+  // Sites a run that may act is kept to (routines); empty means anywhere
+  private sites: string[];
   private sessionId = "";
   private targetId = "";
   private contextId = "";
@@ -241,9 +272,18 @@ export class BrowserSession {
   private current = { url: "about:blank", title: "" };
 
   constructor(
-    opts: { allowPrivate?: boolean; readOnly?: ReadOnlyOptions; onFrame?: (f: Frame) => void; onBlocked?: (url: string, reason: string) => void } = {},
+    opts: {
+      allowPrivate?: boolean;
+      readOnly?: ReadOnlyOptions;
+      onFrame?: (f: Frame) => void;
+      onBlocked?: (url: string, reason: string) => void;
+      gate?: ActionGate;
+      sites?: string[];
+    } = {},
   ) {
     this.allowPrivate = Boolean(opts.allowPrivate);
+    this.gate = opts.gate ?? null;
+    this.sites = (opts.sites ?? []).map((x) => x.toLowerCase().replace(/^www\./, ""));
     this.readOnly = opts.readOnly ? { allowedSites: opts.readOnly.allowedSites.map((x) => x.toLowerCase().replace(/^www\./, "")) } : null;
     this.onFrame = opts.onFrame ?? (() => {});
     this.onBlocked = opts.onBlocked ?? (() => {});
@@ -256,7 +296,9 @@ export class BrowserSession {
       const { browserContextId } = await this.cdp.send("Target.createBrowserContext", { disposeOnDetach: true });
       this.contextId = browserContextId;
     }
-    const { targetId } = await this.cdp.send("Target.createTarget", { url: "about:blank", ...VIEWPORT, ...(this.contextId ? { browserContextId: this.contextId } : {}) });
+    // The page size is set below (device metrics); newer Chrome refuses a size here
+    // ("Target position can only be set for new windows")
+    const { targetId } = await this.cdp.send("Target.createTarget", { url: "about:blank", ...(this.contextId ? { browserContextId: this.contextId } : {}) });
     this.targetId = targetId;
     const { sessionId } = await this.cdp.send("Target.attachToTarget", { targetId, flatten: true });
     this.sessionId = sessionId;
@@ -281,16 +323,21 @@ export class BrowserSession {
     await this.cdp.send("Page.startScreencast", { format: "jpeg", quality: 55, maxWidth: VIEWPORT.width, maxHeight: VIEWPORT.height }, s);
   }
 
-  /** In read-only runs, whether a page on this URL may be opened. */
+  private get siteList(): string[] {
+    return this.readOnly?.allowedSites ?? this.sites;
+  }
+
+  /** Whether a page on this URL may be opened (read-only runs and routines are kept to their sites). */
   siteAllowed(url: string): boolean {
-    if (!this.readOnly) return true;
+    const list = this.siteList;
+    if (!list.length && !this.readOnly) return true;
     if (/^(about|data|blob):/i.test(url)) return true;
     const site = siteOf(url);
-    return Boolean(site) && this.readOnly.allowedSites.some((a) => site === a || site.endsWith(`.${a}`));
+    return Boolean(site) && list.some((a) => site === a || site.endsWith(`.${a}`));
   }
 
   private readOnlyReason(url: string, method: string, resourceType?: string): string | null {
-    if (!this.readOnly) return null;
+    if (!this.readOnly) return resourceType === "Document" && !this.siteAllowed(url) ? "outside the sites this routine may visit" : null;
     if (!["GET", "HEAD", "OPTIONS"].includes(method)) return `read-only run: ${method} requests (form submits, sending data) are blocked`;
     if (resourceType === "Document" && !this.siteAllowed(url)) return "read-only run: outside the sites this run may visit";
     return null;
@@ -334,7 +381,8 @@ export class BrowserSession {
 
   async navigate(url: string): Promise<string> {
     if (!/^[a-z]+:/i.test(url)) url = `https://${url}`;
-    const reason = (this.siteAllowed(url) ? null : `read-only run: only ${this.readOnly!.allowedSites.join(", ")} may be opened`) ?? (await blockedReason(url, this.allowPrivate));
+    const reason =
+      (this.siteAllowed(url) ? null : `${this.readOnly ? "read-only run" : "this routine"}: only ${this.siteList.join(", ")} may be opened`) ?? (await blockedReason(url, this.allowPrivate));
     if (reason) throw new Error(`Blocked ${url}: ${reason}`);
     const load = this.waitForLoad();
     const r = await this.cdp.send("Page.navigate", { url }, this.sessionId);
@@ -368,6 +416,16 @@ export class BrowserSession {
         return `Followed "${found}" → ${this.current.url}`;
       }
     }
+    if (!this.readOnly) {
+      // A plain web link is opened like typing its address: no approval needed.
+      // Buttons, form submits and script links change things, so they ask first.
+      const info = await this.evaluate<{ href: string; scripted: boolean; submits: boolean; search: boolean }>(TARGET_INFO);
+      if (info.href && /^https?:/i.test(info.href) && !info.scripted && !info.submits) {
+        await this.navigate(searchResultTarget(info.href) ?? info.href);
+        return `Followed "${found}" → ${this.current.url}`;
+      }
+      await this.ask({ kind: info.submits ? (info.search ? "search" : "submit") : "click", target: found });
+    }
     const before = this.current.url;
     const load = this.waitForLoad(5000);
     await this.evaluate("window.__mcTarget.click(), true");
@@ -380,6 +438,11 @@ export class BrowserSession {
     if (this.readOnly) throw new Error("Typing is disabled in read-only runs");
     const found = await this.evaluate<string | null>(`(${FIND_ELEMENT})("field", ${JSON.stringify(field)})`);
     if (!found) throw new Error(`No text field matches "${field}"`);
+    const info = await this.evaluate<{ type: string; autocomplete: string; name: string; label: string; search: boolean; method: string }>(FIELD_INFO);
+    if (isSensitiveField(info))
+      throw new Error(`"${found}" looks like a password, payment, ID or one-time-code field. Mission Control never types into those: the user must enter it themselves.`);
+    const shown = info.label.replace(/\s+/g, " ").trim().slice(0, 80) || found;
+    await this.ask({ kind: info.search && info.method !== "post" ? "search" : submit ? "submit" : "type", target: shown, text });
     await this.evaluate("window.__mcTarget.focus(), window.__mcTarget.select?.(), true");
     await this.cdp.send("Input.insertText", { text }, this.sessionId);
     if (submit) {
@@ -391,6 +454,27 @@ export class BrowserSession {
     }
     await this.settle(false);
     return `Typed into "${found}"${submit ? " and pressed Enter" : ""}`;
+  }
+
+  /** Asks the gate about an action on the current target; throws when it may not go ahead. */
+  private async ask(req: Omit<ActionRequest, "url" | "site" | "screenshot">) {
+    if (!this.gate) return;
+    const url = this.current.url;
+    const why = await this.gate({ ...req, url, site: siteOf(url) ?? url, screenshot: await this.snapshot() });
+    if (why) throw new Error(`Not done: ${why}. Try another way, or answer with what you have.`);
+  }
+
+  /** A screenshot with the current target outlined, for an approval request. */
+  async snapshot(): Promise<string | undefined> {
+    try {
+      await this.evaluate("(() => { const el = window.__mcTarget; if (el) { el.__mcOutline = el.style.outline; el.style.outline = '4px solid #f59e0b'; el.style.outlineOffset = '2px'; } return true; })()");
+      const { data } = await this.cdp.send("Page.captureScreenshot", { format: "jpeg", quality: 60 }, this.sessionId);
+      return data as string;
+    } catch {
+      return undefined;
+    } finally {
+      await this.evaluate("(() => { const el = window.__mcTarget; if (el) { el.style.outline = el.__mcOutline || ''; el.style.outlineOffset = ''; } return true; })()").catch(() => {});
+    }
   }
 
   async scroll(direction: "down" | "up" = "down"): Promise<string> {
