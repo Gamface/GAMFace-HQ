@@ -113,7 +113,19 @@ const models = new ModelRegistry(store, {
   numCtx: OLLAMA_NUM_CTX,
   think: OLLAMA_THINK,
   monthlyBudgetUsd: DEFAULT_MONTHLY_BUDGET_USD,
+  // "switch Jarvis to colibri" / "colibri-big", when a colibri server is configured
+  colibriModel: process.env.COLIBRI_BASE_URL ? process.env.COLIBRI_MODEL || undefined : undefined,
+  colibriBigModel: process.env.COLIBRI_BASE_URL ? process.env.COLIBRI_BIG_MODEL || undefined : undefined,
 });
+
+/**
+ * How long a task may run: TASK_TIMEOUT_MS, or longer when its agent has its own
+ * time limit. Jarvis may hand work to any teammate, so it gets the longest one.
+ */
+function taskTimeoutMs(agent: string | undefined, delegates: boolean): number {
+  const roles = delegates ? AGENT_KEYS : AGENT_KEYS.filter((k) => k === agent);
+  return Math.max(TASK_TIMEOUT_MS, ...roles.map((r) => models.timeoutMs(r) ?? 0));
+}
 const uploads = new Uploads(DATA_DIR);
 const files = new Files(path.join(DATA_DIR, "files"));
 const docCache = new DocCache(path.join(DATA_DIR, "uploads"));
@@ -484,10 +496,20 @@ async function runTask(task: Task) {
   task.attempts = (task.attempts ?? 0) + 1;
   // Routine runs are read-only whatever the stored card says
   if (isRoutine(task)) task.readOnly = true;
-  const timeout = setTimeout(() => {
+  const onTimeout = () => {
     task.abortReason = "timeout";
     controller.abort();
-  }, TASK_TIMEOUT_MS);
+  };
+  let limitMs = taskTimeoutMs(task.targetAgent, task.targetAgent === "planner");
+  let timeout = setTimeout(onTimeout, limitMs);
+  // Once the lead agent is known (after auto-routing), a slower agent can extend the limit
+  const extendLimit = (agent: string, delegates: boolean) => {
+    const want = taskTimeoutMs(agent, delegates);
+    if (want <= limitMs) return;
+    clearTimeout(timeout);
+    timeout = setTimeout(onTimeout, Math.max(0, want - (Date.now() - task.startedAt!)));
+    limitMs = want;
+  };
 
   // Batch tokens so the UI gets ~10 frames per second instead of one per token
   let pending = "";
@@ -656,6 +678,7 @@ async function runTask(task: Task) {
     task.model = models.resolve(lead, override).ref;
     store.save(task);
     const delegate = canDelegate && lead === "planner";
+    extendLimit(lead, delegate);
     let usedPrivate = heardPrivate;
 
     // Only the vision agent can see pictures. When another agent leads, Vision reads
@@ -810,7 +833,7 @@ async function runTask(task: Task) {
     flush();
     if (controller.signal.aborted) {
       if (task.abortReason === "timeout") {
-        task.error = `Timed out after ${Math.round(TASK_TIMEOUT_MS / 1000)}s`;
+        task.error = `Timed out after ${Math.round(limitMs / 1000)}s`;
         emit(task, "error", `\n\n[${task.error}]`);
       } else {
         emit(task, "canceled", "\n\n[Generation stopped]");

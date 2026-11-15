@@ -216,7 +216,9 @@ export class ModelGateway {
       p.notes.forEach(onNote);
       await this.checkVision(p);
       try {
-        const out = await chatOnce(p.r.provider, p.r.model, p.messages, { json: true, think: false, temperature: 0.1, numCtx: p.r.settings.numCtx, keepAlive: this.keepAlive });
+        // A slow model (e.g. a large colibri model) gets its agent's own time limit
+        const limit = p.r.settings.timeoutMinutes ? p.r.settings.timeoutMinutes * 60_000 : undefined;
+        const out = await chatOnce(p.r.provider, p.r.model, p.messages, { json: true, think: false, temperature: 0.1, numCtx: p.r.settings.numCtx, keepAlive: this.keepAlive }, limit);
         this.record(role, p.r, p.messages, out.text, out);
         return { text: out.text, json: out.json ?? {}, ref: p.r.ref, sawPrivate: p.sawPrivate };
       } catch (error) {

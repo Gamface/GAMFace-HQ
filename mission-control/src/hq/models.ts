@@ -25,6 +25,11 @@ export interface RoleSettings {
   allowPrivateToCloud?: boolean;
   /** Monthly spend cap in US dollars for this agent's cloud requests */
   monthlyBudgetUsd?: number;
+  /**
+   * How long one of this agent's tasks may run, in minutes, when that is longer
+   * than TASK_TIMEOUT_MS. For slow models such as a large colibri model streamed from disk.
+   */
+  timeoutMinutes?: number;
 }
 
 /** US dollars per million tokens */
@@ -74,6 +79,9 @@ export interface ModelDefaults {
   audioModel?: string;
   /** Overall monthly cap that applies until one is saved on the Team page (clearing it there means no cap) */
   monthlyBudgetUsd?: number;
+  /** colibri models offered as the "colibri" and "colibri-big" aliases (only when colibri is configured) */
+  colibriModel?: string;
+  colibriBigModel?: string;
 }
 
 const ID_RE = /^[a-z][a-z0-9_-]{1,30}$/;
@@ -106,7 +114,10 @@ export class ModelRegistry {
         localOnly: LOCAL_ONLY_BY_DEFAULT.includes(r),
       };
     }
-    return { roles, aliases: { local: main }, customProviders: [], prices: {} };
+    const aliases: Record<string, string> = { local: main };
+    if (this.defaults.colibriModel) aliases.colibri = `colibri/${this.defaults.colibriModel}`;
+    if (this.defaults.colibriBigModel) aliases["colibri-big"] = `colibri/${this.defaults.colibriBigModel}`;
+    return { roles, aliases, customProviders: [], prices: {} };
   }
 
   settings(): ModelSettings {
@@ -148,7 +159,7 @@ export class ModelRegistry {
     if (next.monthlyBudgetUsd !== undefined && (!(next.monthlyBudgetUsd >= 0) || next.monthlyBudgetUsd > 100000)) return "Monthly budget must be between $0 and $100,000";
     for (const c of next.customProviders) {
       if (!ID_RE.test(c.id)) return `Provider id "${c.id}" must be lowercase letters, digits, - or _`;
-      if (["ollama", "lmstudio", "openai", "openrouter", "anthropic", "gemini"].includes(c.id)) return `"${c.id}" is a built-in provider`;
+      if (["ollama", "lmstudio", "colibri", "openai", "openrouter", "anthropic", "gemini"].includes(c.id)) return `"${c.id}" is a built-in provider`;
       if (!/^https?:\/\//.test(c.baseUrl)) return `Provider "${c.id}" needs an http(s) base URL`;
       if (c.apiKeyEnv && !/^[A-Z][A-Z0-9_]{1,60}$/.test(c.apiKeyEnv)) return `API key variable "${c.apiKeyEnv}" should look like MY_PROVIDER_API_KEY`;
     }
@@ -170,6 +181,7 @@ export class ModelRegistry {
       if (merged.numCtx !== undefined && (merged.numCtx < 512 || merged.numCtx > 262144)) return "Context size must be between 512 and 262144";
       if (merged.temperature !== undefined && (merged.temperature < 0 || merged.temperature > 2)) return "Temperature must be between 0 and 2";
       if (merged.monthlyBudgetUsd !== undefined && (!(merged.monthlyBudgetUsd >= 0) || merged.monthlyBudgetUsd > 100000)) return "Monthly budget must be between $0 and $100,000";
+      if (merged.timeoutMinutes !== undefined && (!Number.isInteger(merged.timeoutMinutes) || merged.timeoutMinutes < 1 || merged.timeoutMinutes > 1440)) return "Time limit must be a whole number of minutes between 1 and 1440";
       next.roles[role] = merged;
     }
     // A local-only agent can't be given a cloud model, as its main model or its fallback
@@ -226,6 +238,12 @@ export class ModelRegistry {
       role === "vision" ? (this.defaults.visionModel ?? "qwen3.5:latest") : role === "audio" ? (this.defaults.audioModel ?? "gemma4:12b") : this.defaults.model;
     const pick = fb?.provider.local ? fb : main?.provider.local ? main : parseModelRef(`ollama/${defaultLocal}`, providers)!;
     return { role, ref: `${pick.provider.id}/${pick.model}`, provider: pick.provider, model: pick.model, settings: s };
+  }
+
+  /** This agent's own time limit in milliseconds, when one is set. */
+  timeoutMs(role: ModelRole): number | undefined {
+    const m = this.settings().roles[role]?.timeoutMinutes;
+    return m ? m * 60_000 : undefined;
   }
 
   resolveFallback(role: ModelRole): Resolved | null {

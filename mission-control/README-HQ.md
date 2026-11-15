@@ -47,6 +47,21 @@ Your one GPU can only hold so much, so the queue prefers a card that uses the mo
 loaded (for at most `MODEL_GROUP_MAX_WAIT_MS`, default 60 s). Setting
 `OLLAMA_MAX_LOADED_MODELS=2` for Ollama on Windows keeps the main and helper models loaded together.
 
+**Local models with colibri.** [colibri](https://github.com/JustVugg/colibri) runs large
+mixture-of-experts models on your own PC, keeping rarely used experts on disk. Set
+`COLIBRI_BASE_URL` in `.env` (from the container: `http://host.docker.internal:<port>/v1`) and
+`colibri/…` models appear on the Team page as a **local** provider, so the local-only lock and
+the private-context rule treat them like Ollama. `COLIBRI_MODEL` and `COLIBRI_BIG_MODEL` add the
+nicknames `colibri` and `colibri-big` (`switch Jarvis to colibri`).
+- Link the models you already have in Ollama with colibri's model linker instead of
+  downloading them again.
+- A mid-size model held in RAM/VRAM answers at interactive speed. A very large one streamed
+  from disk manages about 1–1.5 words a second on a fast internal NVMe drive (far less on SATA
+  or USB), so give that agent a **Time limit** on the Team page (minutes; it overrides
+  `TASK_TIMEOUT_MS` for that agent's cards, and Jarvis gets the longest limit of his team).
+- Router and Memory stay on the small Ollama model, so background calls never push the big
+  model's cached prompt out.
+
 **Kanban board (Phase 2).** The **Board** view has Backlog → Ready → Running → Review → Done / Failed.
 - **+ New card**: task, agent (or auto-route), priority, cards it waits for, and whether you
   want to review the result. Park it in Backlog or queue it in Ready.

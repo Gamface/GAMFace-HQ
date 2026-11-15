@@ -14,6 +14,7 @@ interface RoleSettings {
   localOnly?: boolean;
   allowPrivateToCloud?: boolean;
   monthlyBudgetUsd?: number;
+  timeoutMinutes?: number;
 }
 interface Price {
   input: number;
@@ -217,6 +218,7 @@ export default function TeamPage() {
             // null clears a setting on the server (JSON would drop undefined and keep the old value)
             fallback: v.fallback || null,
             dailyTokenLimit: v.dailyTokenLimit || null,
+            timeoutMinutes: v.timeoutMinutes || null,
             monthlyBudgetUsd: v.monthlyBudgetUsd === undefined || Number.isNaN(v.monthlyBudgetUsd) ? null : v.monthlyBudgetUsd,
           },
         ]),
@@ -264,6 +266,7 @@ export default function TeamPage() {
               <th className="font-medium w-20">Context</th>
               <th className="font-medium w-16">Temp</th>
               <th className="font-medium w-14">Think</th>
+              <th className="font-medium w-20" title="Minutes one task may run. Leave empty for the default (TASK_TIMEOUT_MS). Raise it for slow models such as a large colibri model.">Time limit</th>
               <th className="font-medium w-16" title="Never send this agent's requests to a cloud model">Local only</th>
               <th className="font-medium w-20" title="Let vault notes, memories and the hive log go to its cloud model">Private → cloud</th>
               <th className="font-medium w-24">Monthly $ cap</th>
@@ -298,6 +301,19 @@ export default function TeamPage() {
                   </td>
                   <td className="py-2 pr-2">
                     <input type="checkbox" checked={Boolean(r.think)} onChange={(e) => setRole(key, { think: e.target.checked })} title="Let reasoning models think first (slower)" />
+                  </td>
+                  <td className="py-2 pr-2">
+                    <input
+                      type="number"
+                      className={`${input} w-16`}
+                      value={r.timeoutMinutes ?? ""}
+                      step={5}
+                      min={1}
+                      max={1440}
+                      placeholder="def"
+                      title="Minutes"
+                      onChange={(e) => setRole(key, { timeoutMinutes: e.target.value ? Math.round(Number(e.target.value)) : undefined })}
+                    />
                   </td>
                   <td className="py-2 pr-2 text-center">
                     <input

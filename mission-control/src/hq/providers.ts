@@ -40,6 +40,9 @@ export function builtinProviders(env: NodeJS.ProcessEnv = process.env): Provider
     { id: "ollama", name: "Ollama (local GPU)", kind: "ollama", baseUrl: (env.OLLAMA_BASE_URL || "http://127.0.0.1:11435").replace(/\/+$/, ""), local: true },
   ];
   if (env.LMSTUDIO_BASE_URL) list.push({ id: "lmstudio", name: "LM Studio (local)", kind: "openai", baseUrl: env.LMSTUDIO_BASE_URL.replace(/\/+$/, ""), local: true });
+  // colibri runs large mixture-of-experts models on your own hardware, streaming
+  // rarely used experts from disk. OpenAI-compatible, and local, so private context is allowed.
+  if (env.COLIBRI_BASE_URL) list.push({ id: "colibri", name: "colibri (local)", kind: "openai", baseUrl: env.COLIBRI_BASE_URL.replace(/\/+$/, ""), local: true });
   const cloud: [string, string, string, string][] = [
     ["openai", "OpenAI", "https://api.openai.com/v1", "OPENAI_API_KEY"],
     ["openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"],
