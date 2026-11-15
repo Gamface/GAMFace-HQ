@@ -13,6 +13,7 @@ import ReplyBox from "./ReplyBox";
 import FilesBar from "./FilesBar";
 import PreviewPane from "./PreviewPane";
 import TeamPage from "./TeamPage";
+import RoutinesPage from "./RoutinesPage";
 
 interface SystemInfo {
   ollama: "up" | "down";
@@ -46,7 +47,8 @@ interface MemoryItem {
 
 type RightTab = "commands" | "hive" | "memory";
 type CenterTab = "output" | "preview" | "browser";
-type View = "console" | "board" | "team";
+type View = "console" | "board" | "routines" | "team";
+const VIEWS: View[] = ["board", "routines", "team"];
 
 const STATUS_STYLES: Record<AgentStatus, string> = {
   idle: "bg-slate-700 text-slate-200",
@@ -80,7 +82,7 @@ export default function MissionControl() {
   const [targetAgent, setTargetAgent] = useState<RequestedAgent>("auto");
   const [rightTab, setRightTab] = useState<RightTab>("commands");
   const [centerTab, setCenterTab] = useState<CenterTab>("output");
-  const [view, setView] = useState<View>(() => (["board", "team"].includes(location.hash.slice(1)) ? (location.hash.slice(1) as View) : "console"));
+  const [view, setView] = useState<View>(() => (VIEWS.includes(location.hash.slice(1) as View) ? (location.hash.slice(1) as View) : "console"));
   useEffect(() => {
     if (location.hash.slice(1) !== (view === "console" ? "" : view)) history.pushState(null, "", view === "console" ? location.pathname : `#${view}`);
   }, [view]);
@@ -88,7 +90,7 @@ export default function MissionControl() {
   useEffect(() => {
     const onHash = () => {
       const h = location.hash.slice(1);
-      setView(h === "board" || h === "team" ? h : "console");
+      setView(VIEWS.includes(h as View) ? (h as View) : "console");
     };
     window.addEventListener("hashchange", onHash);
     window.addEventListener("popstate", onHash);
@@ -207,6 +209,7 @@ export default function MissionControl() {
               [
                 ["console", "Console"],
                 ["board", "Board"],
+                ["routines", "Routines"],
                 ["team", "Team"],
               ] as [View, string][]
             ).map(([key, label]) => (
@@ -248,6 +251,7 @@ export default function MissionControl() {
 
       {view === "board" && <Board />}
       {view === "team" && <TeamPage />}
+      {view === "routines" && <RoutinesPage />}
       {view === "console" && (<>
       {/* LEFT: TASK HISTORY */}
       <aside className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-4 min-h-0">

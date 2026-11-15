@@ -111,6 +111,35 @@ runs. Each has one destination (`deliverTo`: `dashboard`, `telegram` or `obsidia
 in `HQ/routines`); its prompt can't switch models, and its findings stay on its card rather
 than in the hive log. Rules: `src/hq/routine.ts`.
 
+## Routines (scheduled runs)
+
+The **Routines** page runs requests on a schedule. Each run is a card on the board (⏱),
+always read-only, and its result goes to one place: the dashboard, Telegram, or a note in
+the vault's `HQ/routines` folder.
+- Schedules in plain words or cron: `weekdays at 7:30am`, `every 2 hours`, `hourly`,
+  `every hour at :30`, `daily at 6pm`, `mondays at 9am`, `mon, wed and fri at 6pm`,
+  `weekends at noon`, `monthly on the 1st at 9:00`, or five cron fields
+  (`30 7 * * 1-5`). The form shows the next three times as you type.
+- Times are in your browser's time zone (saved with the routine), and daylight saving is
+  handled: a time that doesn't exist that day is skipped, and a repeated hour runs once.
+  The server's default is `ROUTINE_TZ` (or the system's time zone).
+- Guards: a routine never overlaps itself (if its last card is still queued or running,
+  the run is skipped and the page says why); runs are at least `ROUTINE_MIN_MINUTES`
+  apart (default 5); at most 50 routines. Runs missed while Mission Control was off or the
+  PC was asleep are skipped, with a dashboard notice, unless the routine has
+  **Catch up on a missed run**, which runs it once (not once per missed time).
+- Read-only means the browser can open pages, scroll, go back and follow links, only on
+  the routine's sites (or sites named in its request), and never types, submits or saves
+  notes or memories. Its findings stay on its card; the shared activity log only notes
+  that it ran.
+- **Run now** starts a run at once; **Show runs** lists recent runs with their results and
+  any PDFs. Turning a routine off keeps it and its history.
+
+API: `GET /api/routines`, `POST /api/routines` (`{ name, prompt, schedule, timezone?,
+targetAgent?, deliverTo?, allowedSites?, enabled?, catchUp? }`), `PATCH /api/routines/:id`,
+`DELETE /api/routines/:id`, `POST /api/routines/:id/run`, `GET /api/routines/:id/runs`,
+`POST /api/routines/preview` (`{ schedule, timezone }` → label and next three times).
+
 ## Pictures
 
 Attach pictures (PNG, JPEG, GIF, WebP, up to 10 MB, 6 per card) to a new card or the

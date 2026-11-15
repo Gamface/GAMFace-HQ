@@ -48,6 +48,8 @@ import { closeRound, historyMessages } from "./hq/thread";
 import { FILE_ID, Files, buildReport, pdfInstructions, printPdf, wantsPdf } from "./hq/pdf";
 import { DOC_ID, DocCache, cleanName, extractPdf, partsOf, withPageMarks } from "./hq/docs";
 import type { PdfText } from "./hq/docs";
+import { Scheduler } from "./hq/scheduler";
+import { upcoming, parseSchedule, validTimeZone } from "./hq/schedule";
 
 // --- Config (env vars, see .env.example) ------------------------------------
 const PORT = Number(process.env.PORT) || 3008;
@@ -890,7 +892,7 @@ function handleSwitch(text: string): string | null {
   return `${cmd.role === "all" ? "Every agent" : ROLE_LABEL[cmd.role]} now uses ${ref}.`;
 }
 
-function createTask(input: unknown, extra: { chatId?: string } = {}): { task?: Task; status: number; error?: unknown } {
+function createTask(input: unknown, extra: { chatId?: string; routineId?: string } = {}): { task?: Task; status: number; error?: unknown } {
   const parsed = AgentTaskSchema.safeParse(input);
   if (!parsed.success) return { status: 400, error: parsed.error.flatten() };
   const d = parsed.data;
@@ -934,6 +936,7 @@ function createTask(input: unknown, extra: { chatId?: string } = {}): { task?: T
     queuedAt: queueIt ? now : undefined,
     events: [],
     chatId: extra.chatId ?? routine.chatId,
+    routineId: d.source === "routine" ? extra.routineId : undefined,
   };
 
   // Model switches answer at once and show up as a finished card
@@ -1141,7 +1144,10 @@ function deliverRoutine(task: Task) {
 }
 
 function notifyDone(task: Task) {
-  if (isRoutine(task)) return deliverRoutine(task);
+  if (isRoutine(task)) {
+    scheduler.finished(task);
+    return deliverRoutine(task);
+  }
   if (!telegram || task.source !== "telegram" || !task.chatId) return;
   const text =
     task.status === "complete"
@@ -1434,6 +1440,87 @@ app.get("/stream", handleStream);
 app.post("/command", requireToken, (req, res) => enqueue(req.body, res));
 app.post("/cancel", requireToken, (req, res) => cancel(req.body?.taskId, res));
 
+// --- Routines (scheduled read-only cards) ------------------------------------
+const ROUTINE_TZ = process.env.ROUTINE_TZ || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+const ROUTINE_MIN_MINUTES = Math.max(1, Number(process.env.ROUTINE_MIN_MINUTES) || 5);
+const routineEnv = () => ({ telegramChat: telegram ? [...TELEGRAM_ALLOWED][0] : undefined, vault: OBSIDIAN_VAULT || undefined });
+const scheduler = new Scheduler(
+  store,
+  {
+    start: (r) => {
+      const out = createTask(
+        { prompt: r.prompt, title: r.name, targetAgent: r.targetAgent, source: "routine", deliverTo: r.deliverTo, allowedSites: r.allowedSites, column: "ready" },
+        { routineId: r.id },
+      );
+      if (!out.task) return { error: typeof out.error === "string" ? out.error : "the card couldn't be created" };
+      hive.log("routine", "started", `${r.name} (${r.label})`, out.task.id);
+      return { taskId: out.task.id };
+    },
+    busy: (id) => {
+      const t = tasks.get(id);
+      return Boolean(t && !TERMINAL_STATUSES.includes(t.status));
+    },
+    checkDelivery: (r) => {
+      const f = routineFields({ source: "routine", deliverTo: r.deliverTo }, routineEnv());
+      return "error" in f ? f.error : null;
+    },
+    note: (r, message) => {
+      notices.add("routine", `routine:${r.id}`, message);
+      hive.log("routine", "skipped", message);
+    },
+  },
+  { defaultTimezone: ROUTINE_TZ, minMinutes: ROUTINE_MIN_MINUTES },
+);
+
+const routineView = (r: ReturnType<Scheduler["list"]>[number]) => ({
+  ...r,
+  upcoming: r.enabled ? upcoming(r.cron, Date.now(), r.timezone, 3) : [],
+  lastTask: r.lastTaskId && tasks.has(r.lastTaskId) ? { id: r.lastTaskId, status: tasks.get(r.lastTaskId)!.status } : undefined,
+});
+
+app.get("/api/routines", (_req, res) => {
+  res.json({ routines: scheduler.list().map(routineView), timezone: ROUTINE_TZ, minMinutes: ROUTINE_MIN_MINUTES, deliveries: { telegram: Boolean(routineEnv().telegramChat), obsidian: Boolean(routineEnv().vault) } });
+});
+// Checks a schedule as it's typed: its label and next three times
+app.post("/api/routines/preview", (req, res) => {
+  const tz = typeof req.body?.timezone === "string" && validTimeZone(req.body.timezone) ? req.body.timezone : ROUTINE_TZ;
+  try {
+    const p = parseSchedule(String(req.body?.schedule ?? ""));
+    res.json({ ...p, timezone: tz, upcoming: upcoming(p.cron, Date.now(), tz, 3) });
+  } catch (e) {
+    res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+app.post("/api/routines", requireToken, (req, res) => {
+  const out = scheduler.create(req.body);
+  if ("error" in out) return res.status(400).json(out);
+  hive.log("routine", "created", `${out.name}: ${out.label}`);
+  res.status(201).json(routineView(out));
+});
+app.patch("/api/routines/:id", requireToken, (req, res) => {
+  const out = scheduler.update(String(req.params.id), req.body);
+  if ("error" in out) return res.status(out.error === "Routine not found" ? 404 : 400).json(out);
+  res.json(routineView(out));
+});
+app.delete("/api/routines/:id", requireToken, (req, res) => {
+  if (!scheduler.remove(String(req.params.id))) return res.status(404).json({ error: "Routine not found" });
+  res.json({ ok: true });
+});
+app.post("/api/routines/:id/run", requireToken, (req, res) => {
+  const out = scheduler.runNow(String(req.params.id));
+  if ("error" in out) return res.status(out.error === "Routine not found" ? 404 : 409).json({ error: `Didn't run: ${out.error}` });
+  res.status(201).json(out);
+});
+app.get("/api/routines/:id/runs", (req, res) => {
+  const id = String(req.params.id);
+  const runs = [...tasks.values()]
+    .filter((t) => t.routineId === id && !t.parentId)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, 20)
+    .map((t) => ({ id: t.id, status: t.status, createdAt: t.createdAt, finishedAt: t.finishedAt, preview: (t.answer ?? t.error ?? "").slice(0, 200), files: t.files }));
+  res.json(runs);
+});
+
 app.listen(PORT, HOST, () => {
   console.log(`ts-harness listening on http://${HOST}:${PORT}`);
   console.log(`Ollama: ${OLLAMA_BASE_URL}  Jarvis: ${models.resolve("planner").ref}  router: ${models.resolve("router").ref}`);
@@ -1441,4 +1528,7 @@ app.listen(PORT, HOST, () => {
   if (recovered) console.log(`Recovered ${recovered} task(s) interrupted by the last shutdown; they wait for Retry.`);
   // Cards that were queued before the restart pick up where they left off
   void pump();
+  scheduler.start();
+  const active = scheduler.list().filter((r) => r.enabled).length;
+  console.log(`Routines: ${active} active (time zone ${ROUTINE_TZ})`);
 });

@@ -7,7 +7,7 @@
     "start": "tsx src/ui.ts",
     "typecheck": "tsc --noEmit",
     "eval": "tsx evals/run.ts",
-    "test": "tsx --test tests/hq.test.ts tests/board.test.ts tests/policy.test.ts tests/routine.test.ts tests/vision.test.ts tests/audio.test.ts tests/reply.test.ts tests/pdf.test.ts tests/docs.test.ts",
+    "test": "tsx --test tests/hq.test.ts tests/board.test.ts tests/policy.test.ts tests/routine.test.ts tests/vision.test.ts tests/audio.test.ts tests/reply.test.ts tests/pdf.test.ts tests/docs.test.ts tests/scheduler.test.ts",
     "preflight": "tsx scripts/preflight.ts"
   },
   "dependencies": {

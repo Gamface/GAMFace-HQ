@@ -1,7 +1,7 @@
 import { mkdirSync } from "fs";
 import path from "path";
 import { DatabaseSync } from "node:sqlite";
-import type { AgentStatus, AgentStreamPayload, AgentTarget, Priority, TaskSummary } from "../schemas/agent";
+import type { AgentStatus, AgentStreamPayload, AgentTarget, Priority, Routine, TaskSummary } from "../schemas/agent";
 import { TERMINAL_STATUSES } from "../schemas/agent";
 
 // Durable storage for tasks (board cards) and their event streams, using
@@ -59,6 +59,7 @@ export class TaskStore {
       );
       CREATE INDEX IF NOT EXISTS events_task ON events(task_id, event_id);
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS routines (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS usage (
         day TEXT NOT NULL, agent TEXT NOT NULL, model TEXT NOT NULL,
         prompt_tokens INTEGER NOT NULL DEFAULT 0, completion_tokens INTEGER NOT NULL DEFAULT 0,
@@ -219,6 +220,18 @@ export class TaskStore {
     const day = new Date().toISOString().slice(0, 10);
     const row = this.db.prepare("SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS n FROM usage WHERE day = ? AND agent = ?").get(day, agent) as { n: number };
     return row.n;
+  }
+
+  routines(): Routine[] {
+    return (this.db.prepare("SELECT data FROM routines").all() as { data: string }[]).map((r) => JSON.parse(r.data) as Routine);
+  }
+
+  saveRoutine(r: Routine) {
+    this.db.prepare("INSERT INTO routines (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(r.id, JSON.stringify(r));
+  }
+
+  deleteRoutine(id: string) {
+    this.db.prepare("DELETE FROM routines WHERE id = ?").run(id);
   }
 
   close() {

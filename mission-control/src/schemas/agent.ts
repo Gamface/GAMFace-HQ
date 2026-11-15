@@ -74,6 +74,39 @@ export const AgentTaskSchema = z.object({
   documents: z.array(DocIdSchema).max(4).default([]),
 });
 
+/** A routine: a request that a schedule turns into a read-only card. */
+export const RoutineInputSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  prompt: z.string().trim().min(1).max(4000),
+  // Plain words ("weekdays at 7:30am", "every 2 hours") or five cron fields
+  schedule: z.string().trim().min(1).max(100),
+  // IANA time zone the schedule is in, e.g. America/New_York (the dashboard sends the browser's)
+  timezone: z.string().trim().min(1).max(64).optional(),
+  targetAgent: RequestedAgentSchema.default("auto"),
+  deliverTo: DeliverySchema.default("dashboard"),
+  allowedSites: z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{1,253}$/)).max(10).default([]),
+  enabled: z.boolean().default(true),
+  // When the PC was off at run time: run once on start-up (true) or wait for the next time (false)
+  catchUp: z.boolean().default(false),
+});
+export const RoutinePatchSchema = RoutineInputSchema.partial();
+
+export const RoutineSchema = RoutineInputSchema.extend({
+  id: z.string(),
+  timezone: z.string(),
+  cron: z.string(),
+  label: z.string(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  nextRunAt: z.number().optional(),
+  lastRunAt: z.number().optional(),
+  lastTaskId: z.string().optional(),
+  lastStatus: z.string().optional(),
+  // Why the last scheduled run didn't start (still running, queue full…)
+  lastSkip: z.string().optional(),
+  runs: z.number().default(0),
+});
+
 /** A reply to a finished card: the same agent continues the conversation. */
 export const TaskReplySchema = z.object({
   message: z.string().trim().min(1).max(20000),
@@ -169,6 +202,8 @@ export const TaskSummarySchema = z.object({
   reply: z.string().optional(),
   // How many times the card has been replied to (lists send this instead of the thread)
   replies: z.number().optional(),
+  // The routine that created this card
+  routineId: z.string().optional(),
   // PDF reports made from the card's answer
   files: z.array(z.object({ name: z.string(), bytes: z.number(), pictures: z.number().optional(), at: z.number() })).optional(),
 });
@@ -182,6 +217,8 @@ export type BoardColumn = z.infer<typeof BoardColumnSchema>;
 export type AgentTask = z.infer<typeof AgentTaskSchema>;
 export type TaskPatch = z.infer<typeof TaskPatchSchema>;
 export type TaskReply = z.infer<typeof TaskReplySchema>;
+export type RoutineInput = z.infer<typeof RoutineInputSchema>;
+export type Routine = z.infer<typeof RoutineSchema>;
 export type ThreadTurn = z.infer<typeof ThreadTurnSchema>;
 export type AgentStreamPayload = z.infer<typeof AgentStreamPayloadSchema>;
 export type TaskSummary = z.infer<typeof TaskSummarySchema>;
