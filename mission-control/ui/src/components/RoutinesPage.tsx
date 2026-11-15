@@ -19,6 +19,7 @@ interface Routine {
   enabled: boolean;
   catchUp: boolean;
   mayAct: boolean;
+  profile?: string;
   nextRunAt?: number;
   lastRunAt?: number;
   lastStatus?: string;
@@ -40,7 +41,7 @@ interface Run {
   preview: string;
   files?: CardFile[];
 }
-type Draft = Pick<Routine, "name" | "prompt" | "schedule" | "targetAgent" | "deliverTo" | "enabled" | "catchUp" | "mayAct"> & { sites: string; timezone: string };
+type Draft = Pick<Routine, "name" | "prompt" | "schedule" | "targetAgent" | "deliverTo" | "enabled" | "catchUp" | "mayAct"> & { sites: string; timezone: string; profile: string };
 
 const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const AGENTS = ["auto", "planner", "browser", "coder", "file", "security_audit"];
@@ -61,6 +62,34 @@ function relative(t: number) {
   const abs = Math.abs(m);
   const text = abs < 1 ? "now" : abs < 60 ? `${abs} min` : abs < 48 * 60 ? `${Math.round(abs / 60)} h` : `${Math.round(abs / 1440)} days`;
   return text === "now" ? text : m > 0 ? `in ${text}` : `${text} ago`;
+}
+
+function ProfilePicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [names, setNames] = useState<string[]>([]);
+  const [def, setDef] = useState("");
+  useEffect(() => {
+    getJson<{ profiles: { name: string }[]; default: string }>("/api/profiles")
+      .then((d) => {
+        setNames(d.profiles.map((p) => p.name));
+        setDef(d.default);
+      })
+      .catch(() => {});
+  }, []);
+  return (
+    <label className="flex items-center gap-2">
+      Signed in as
+      <select value={value} onChange={(e) => onChange(e.target.value)} className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200">
+        <option value="">{def || "default"} (default)</option>
+        {names
+          .filter((n) => n !== def)
+          .map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+      </select>
+    </label>
+  );
 }
 
 function SchedulePreview({ schedule, timezone }: { schedule: string; timezone: string }) {
@@ -174,6 +203,7 @@ function RoutineForm({ initial, info, onSave, onCancel }: { initial: Draft; info
         <label className="flex items-center gap-2" title="Let runs type, submit and click buttons. Each action waits for your approval on the dashboard or in Telegram.">
           <input type="checkbox" checked={d.mayAct} onChange={(e) => set("mayAct", e.target.checked)} /> May act (asks you first)
         </label>
+        {d.mayAct && <ProfilePicker value={d.profile} onChange={(v) => set("profile", v)} />}
         <span className="text-[11px] text-slate-500">
           {d.mayAct
             ? "Runs may type, submit and click on its sites, but every action waits for your approval; no answer in time means no. Passwords and payment details are never typed."
@@ -238,7 +268,7 @@ export default function RoutinesPage() {
   }, []);
 
   const blank: Draft = useMemo(
-    () => ({ name: "", prompt: "", schedule: "", targetAgent: "auto", deliverTo: "dashboard", enabled: true, catchUp: false, mayAct: false, sites: "", timezone: BROWSER_TZ }),
+    () => ({ name: "", prompt: "", schedule: "", targetAgent: "auto", deliverTo: "dashboard", enabled: true, catchUp: false, mayAct: false, sites: "", timezone: BROWSER_TZ, profile: "" }),
     [],
   );
   const toBody = (d: Draft) => ({
@@ -251,6 +281,7 @@ export default function RoutinesPage() {
     enabled: d.enabled,
     catchUp: d.catchUp,
     mayAct: d.mayAct,
+    profile: d.profile || null,
     allowedSites: d.sites
       .split(/[\s,]+/)
       .map((s) => s.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
@@ -311,7 +342,7 @@ export default function RoutinesPage() {
         editing === r.id ? (
           <RoutineForm
             key={r.id}
-            initial={{ ...r, sites: r.allowedSites.join(", ") }}
+            initial={{ ...r, sites: r.allowedSites.join(", "), profile: r.profile ?? "" }}
             info={data}
             onCancel={() => setEditing(null)}
             onSave={async (d) => {
@@ -332,7 +363,7 @@ export default function RoutinesPage() {
                   {r.timezone !== BROWSER_TZ && <span> ({r.timezone})</span>} · {r.targetAgent === "auto" ? "Auto-route" : AGENT_LABELS[r.targetAgent] ?? r.targetAgent} ·{" "}
                   {r.deliverTo === "dashboard" ? "dashboard" : r.deliverTo === "telegram" ? "→ Telegram" : "→ Obsidian"}
                   {r.allowedSites.length > 0 && <span> · {r.allowedSites.join(", ")}</span>}
-                  {r.mayAct ? <span className="text-amber-300"> · may act (asks first)</span> : <span> · read-only</span>}
+                  {r.mayAct ? <span className="text-amber-300"> · may act (asks first){r.profile ? `, signed in as ${r.profile}` : ""}</span> : <span> · read-only</span>}
                 </p>
               </div>
               <div className="ml-auto flex items-center gap-2 text-xs">

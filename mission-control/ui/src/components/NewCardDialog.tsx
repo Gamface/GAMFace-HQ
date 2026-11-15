@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { AGENT_LABELS, send } from "../api";
+import { AGENT_LABELS, getJson, send } from "../api";
 import type { BoardCard } from "../api";
 import ImageAttach, { imageFiles, useImageUploads } from "./ImageAttach";
 import AudioAttach, { useAudioUploads } from "./AudioAttach";
@@ -21,6 +21,19 @@ export interface CardFields {
   images: string[];
   audio: string[];
   documents: string[];
+  // Browser profile ("" = the default); read-only runs never use one
+  profile?: string;
+}
+
+/** The browser profiles, for a picker. */
+function useProfileNames(): { names: string[]; def: string } {
+  const [state, setState] = useState<{ names: string[]; def: string }>({ names: [], def: "" });
+  useEffect(() => {
+    getJson<{ profiles: { name: string }[]; default: string }>("/api/profiles")
+      .then((d) => setState({ names: d.profiles.map((p) => p.name), def: d.default }))
+      .catch(() => {});
+  }, []);
+  return state;
 }
 
 export function CardForm({
@@ -44,6 +57,7 @@ export function CardForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof CardFields>(k: K, v: CardFields[K]) => setF((prev) => ({ ...prev, [k]: v }));
+  const profileNames = useProfileNames();
   const uploader = useImageUploads(f.images, (ids) => set("images", ids));
   const audioUp = useAudioUploads(f.audio, (ids) => set("audio", ids));
   const docUp = useDocUploads(f.documents, (ids) => set("documents", ids));
@@ -54,7 +68,8 @@ export function CardForm({
     if (uploader.busy || audioUp.busy || docUp.busy) return setError("Wait for the attachments to finish uploading.");
     setBusy(true);
     try {
-      await onSubmit(f.prompt.trim() ? f : { ...f, prompt: defaultPrompt(f.audio.length, f.documents.length) });
+      const ready = f.prompt.trim() ? f : { ...f, prompt: defaultPrompt(f.audio.length, f.documents.length) };
+      await onSubmit({ ...ready, profile: ready.profile || undefined });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
@@ -158,6 +173,22 @@ export function CardForm({
               Fresh browser profile (never logged in), links only on these sites, no typing, buttons or form submits, no notes or memories saved.
             </p>
           </div>
+        )}
+        {!f.readOnly && profileNames.names.length > 0 && (
+          <label className="ml-6 mt-1.5 flex items-center gap-2 text-xs text-slate-400">
+            Browse signed in as
+            <select className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200" value={f.profile ?? ""} onChange={(e) => set("profile", e.target.value)}>
+              <option value="">{profileNames.def} (default)</option>
+              {profileNames.names
+                .filter((n) => n !== profileNames.def)
+                .map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+            </select>
+            <span className="text-[10px] text-slate-500">browser profile; typing, submits and buttons still ask you first</span>
+          </label>
         )}
       </div>
       {extra}

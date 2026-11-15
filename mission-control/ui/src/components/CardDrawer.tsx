@@ -31,6 +31,7 @@ interface Detail {
   images?: string[];
   audio?: string[];
   documents?: string[];
+  profile?: string;
   thread?: { role: "user" | "agent"; text: string }[];
   reply?: string;
   acceptedAt?: number;
@@ -227,13 +228,14 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
                 images: d.images ?? [],
                 audio: d.audio ?? [],
                 documents: d.documents ?? [],
+                profile: d.profile ?? "",
               }}
               cards={cards}
               selfId={id}
               submitLabel="Save changes"
               onCancel={() => setEditing(false)}
               onSubmit={async (f) => {
-                await send("PATCH", `/api/tasks/${id}`, f);
+                await send("PATCH", `/api/tasks/${id}`, { ...f, profile: f.profile ?? null });
                 setEditing(false);
                 onChanged();
               }}

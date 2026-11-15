@@ -51,6 +51,8 @@ import type { PdfText } from "./hq/docs";
 import { Scheduler } from "./hq/scheduler";
 import { ApprovalCenter, ApprovalPolicySchema } from "./hq/approvals";
 import type { ActionRequest, Approval } from "./hq/approvals";
+import { PROFILE_NAME, Profiles } from "./hq/profiles";
+import { BrowserControl } from "./hq/takeover";
 import { upcoming, parseSchedule, validTimeZone } from "./hq/schedule";
 
 // --- Config (env vars, see .env.example) ------------------------------------
@@ -214,6 +216,108 @@ async function askApproval(task: Task, agent: string, req: ActionRequest, signal
   }
 }
 
+// --- Browser profiles and taking over (Phase 5) --------------------------------
+const profiles = new Profiles(path.join(DATA_DIR, "profiles"));
+const defaultProfile = () => {
+  const name = store.getSetting<string>("defaultProfile", "main");
+  if (!profiles.exists(name)) profiles.create(name);
+  return name;
+};
+defaultProfile();
+// How long you can keep a browser before it goes back to the agent (or a profile window closes)
+const TAKEOVER_TIMEOUT_MS = (Number(process.env.TAKEOVER_TIMEOUT_MIN) || 30) * 60_000;
+
+interface LiveBrowser {
+  id: string; // the card's id, or manual-<profile>
+  taskId?: string;
+  title: string;
+  profile?: string;
+  readOnly: boolean;
+  manual: boolean;
+  session: BrowserSession;
+  control: BrowserControl;
+  lastInputAt: number;
+}
+const liveBrowsers = new Map<string, LiveBrowser>();
+
+function controlEvent(lb: Pick<LiveBrowser, "id" | "profile" | "manual" | "readOnly">, c: BrowserControl) {
+  broadcastBrowser({ type: "control", taskId: lb.id, state: c.state, by: c.requestedBy, reason: c.reason, profile: lb.profile, manual: lb.manual, readOnly: lb.readOnly });
+}
+
+/** A profile's sign-ins for a session, or null (with why) when they can't be used. */
+function profileFor(name: string): { cookies: import("./hq/profiles").StoredCookie[]; save: (c: import("./hq/profiles").StoredCookie[]) => void } | { error: string } {
+  if (!profiles.exists(name)) return { error: `there's no browser profile called “${name}”` };
+  try {
+    return { cookies: profiles.cookies(name), save: (c) => profiles.save(name, c) };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Waits while the user has the browser, with the card's time limit paused. Returns a note for the agent. */
+async function waitForUser(task: Task, control: BrowserControl, lb: LiveBrowser, signal: AbortSignal, push: (t: string) => void): Promise<string> {
+  const timers = taskTimers.get(task.id);
+  timers?.pause();
+  push(`\n⏸ You have the browser${control.reason ? ` (${control.reason})` : ""}. The agent waits until you hand it back (at most ${TAKEOVER_TIMEOUT_MS / 60000} minutes).\n`);
+  try {
+    const how = await control.waitForAgent(signal, TAKEOVER_TIMEOUT_MS);
+    if (how === "aborted") throw new Error("aborted");
+    await lb.session.saveProfile().catch(() => {});
+    push(how === "timeout" ? "▶ The browser went back to the agent (time's up)\n" : "▶ Back to the agent\n");
+    return how === "timeout"
+      ? `The user didn't hand the browser back within ${TAKEOVER_TIMEOUT_MS / 60000} minutes, so it came back automatically. Look at the page again before acting.`
+      : "The user took over the browser and handed it back. Look at the page again before acting.";
+  } finally {
+    timers?.resume();
+  }
+}
+
+/** Tells the user an agent needs them in its browser. */
+function notifyHandoff(task: Task, reason: string) {
+  hive.log("browser", "handoff", reason, task.id);
+  if (!telegram) return;
+  const chat = task.chatId ?? [...TELEGRAM_ALLOWED][0];
+  if (chat) telegram.send(chat, `🙋 Jarvis Browser needs you: ${reason}\nCard: ${task.title || task.prompt.slice(0, 80)}\nOpen the dashboard's Browser tab and press Take over.`).catch(() => {});
+}
+
+/** Opens a profile in a browser you drive yourself, e.g. to sign in to sites ahead of time. */
+async function openProfileWindow(name: string, url?: string): Promise<LiveBrowser | { error: string }> {
+  if (!BROWSER_CDP_URL) return { error: "No browser is set up (BROWSER_CDP_URL)" };
+  const id = `manual-${name}`;
+  const open = liveBrowsers.get(id);
+  if (open) return open;
+  const profile = profileFor(name);
+  if ("error" in profile) return profile;
+  if ([...liveBrowsers.values()].some((b) => b.profile === name)) return { error: `“${name}” is in use by a running card; wait for it to finish` };
+  const session = new BrowserSession({
+    allowPrivate: BROWSER_ALLOW_PRIVATE,
+    profile,
+    onFrame: (f: Frame) => broadcastBrowser({ type: "frame", taskId: id, ...f }),
+    onBlocked: (u, reason) => broadcastBrowser({ type: "blocked", taskId: id, url: u, reason }),
+  });
+  await session.start(BROWSER_CDP_URL);
+  const lb: LiveBrowser = { id, title: `Profile “${name}”`, profile: name, readOnly: false, manual: true, session, control: new BrowserControl(), lastInputAt: Date.now() };
+  lb.control = new BrowserControl((c) => controlEvent(lb, c));
+  liveBrowsers.set(id, lb);
+  broadcastBrowser({ type: "start", taskId: id, task: `Profile “${name}”: you're at the controls. Sign in where you need to, then Close & save.` });
+  lb.control.takeOver("user", "your profile window");
+  if (url) await session.navigate(url).catch((e) => broadcastBrowser({ type: "action", taskId: id, kind: "error", line: String(e instanceof Error ? e.message : e) }));
+  hive.log("browser", "profile", `opened “${name}” for signing in`);
+  return lb;
+}
+
+async function closeProfileWindow(lb: LiveBrowser) {
+  liveBrowsers.delete(lb.id);
+  await lb.session.close();
+  broadcastBrowser({ type: "end", taskId: lb.id });
+  hive.log("browser", "profile", `closed and saved “${lb.profile}”`);
+}
+
+// Profile windows close (and save) after a while without input
+setInterval(() => {
+  for (const lb of liveBrowsers.values()) if (lb.manual && Date.now() - lb.lastInputAt > TAKEOVER_TIMEOUT_MS) void closeProfileWindow(lb);
+}, 60_000).unref();
+
 /** Sends a waiting request to Telegram, with buttons. */
 function notifyApproval(a: Approval) {
   if (!telegram) return;
@@ -350,17 +454,27 @@ type BrowserEvent =
   | { type: "frame"; taskId: string; data: string; url: string; title: string }
   | { type: "start" | "end"; taskId: string; task?: string }
   | { type: "action"; taskId: string; kind: string; line: string }
-  | { type: "blocked"; taskId: string; url: string; reason: string };
+  | { type: "blocked"; taskId: string; url: string; reason: string }
+  | { type: "control"; taskId: string; state: "agent" | "user"; by?: "user" | "agent"; reason?: string; profile?: string; manual?: boolean; readOnly?: boolean };
 const browserClients = new Set<Response>();
 let lastFrame: BrowserEvent | null = null;
 let lastFrameSentAt = 0;
 const browserLog: BrowserEvent[] = [];
 
+let trailingFrame: NodeJS.Timeout | null = null;
+
 function broadcastBrowser(event: BrowserEvent) {
   if (event.type === "frame") {
     lastFrame = event;
     const now = Date.now();
-    if (now - lastFrameSentAt < 200) return;
+    if (now - lastFrameSentAt < 200) {
+      // Too soon: send the newest frame when the gap is up, so the view never stays stale
+      trailingFrame ??= setTimeout(() => {
+        trailingFrame = null;
+        if (lastFrame) broadcastBrowser(lastFrame);
+      }, 200 - (now - lastFrameSentAt));
+      return;
+    }
     lastFrameSentAt = now;
   } else {
     browserLog.push(event);
@@ -468,7 +582,22 @@ function readOnlySites(task: Task): string[] {
 /** Drives the real browser for one request and returns the agent's answer. */
 async function browse(task: Task, request: string, signal: AbortSignal, push: (text: string) => void, privateTask = false) {
   const sites = task.readOnly ? readOnlySites(task) : [];
+  // Runs that may act sign in with a browser profile; read-only runs never do
+  let profileName = task.readOnly ? undefined : task.profile ?? defaultProfile();
+  let profile = profileName ? profileFor(profileName) : undefined;
+  if (profile && "error" in profile) {
+    push(`[Browsing without sign-ins: ${profile.error}]\n`);
+    profileName = undefined;
+    profile = undefined;
+  }
+  if (profileName && [...liveBrowsers.values()].some((b) => b.manual && b.profile === profileName)) {
+    const open = liveBrowsers.get(`manual-${profileName}`);
+    if (open) await closeProfileWindow(open);
+    push(`[Closed your “${profileName}” profile window so this card can use its sign-ins]\n`);
+    profile = profileFor(profileName!) as typeof profile;
+  }
   const session = new BrowserSession({
+    profile: profile && !("error" in profile) ? profile : undefined,
     allowPrivate: BROWSER_ALLOW_PRIVATE,
     readOnly: task.readOnly ? { allowedSites: sites } : undefined,
     // Runs that may act ask before typing, submitting or clicking a button
@@ -482,6 +611,20 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
     },
   });
   await session.start(BROWSER_CDP_URL);
+  const lb: LiveBrowser = {
+    id: task.id,
+    taskId: task.id,
+    title: task.title || task.prompt.slice(0, 80),
+    profile: profileName,
+    readOnly: Boolean(task.readOnly),
+    manual: false,
+    session,
+    control: new BrowserControl(),
+    lastInputAt: Date.now(),
+  };
+  lb.control = new BrowserControl((c) => controlEvent(lb, c));
+  liveBrowsers.set(task.id, lb);
+  if (profileName) push(`[Browser profile: ${profileName}]\n`);
   if (task.readOnly && sites.length === 1) {
     // Only web search is allowed: the run can read result snippets but open no result
     const msg = "This read-only run names no sites, so the browser can only read search results. Add allowed sites to the card to let it open pages.";
@@ -512,10 +655,21 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
         push(kind === "action" ? `🌐 ${line}\n` : `   ${kind === "error" ? "✗" : "✓"} ${line}\n`);
         broadcastBrowser({ type: "action", taskId: task.id, kind, line });
       },
+      // You can take over between steps; the agent waits and then looks again
+      beforeStep: async () => (lb.control.state === "user" ? waitForUser(task, lb.control, lb, signal, push) : null),
+      handoff: task.readOnly
+        ? undefined
+        : async (reason) => {
+            lb.control.takeOver("agent", reason);
+            notifyHandoff(task, reason);
+            return waitForUser(task, lb.control, lb, signal, push);
+          },
     });
     push(`\n${redact(answer).text}`);
     return { text: answer, sawPrivate: privateTask };
   } finally {
+    liveBrowsers.delete(task.id);
+    lb.control.handBack();
     await session.close();
     broadcastBrowser({ type: "end", taskId: task.id });
   }
@@ -1035,6 +1189,7 @@ function createTask(input: unknown, extra: { chatId?: string; routineId?: string
   if (d.images.some((id) => !uploads.exists(id))) return { status: 400, error: "Unknown picture: upload it with POST /api/uploads first" };
   if (d.audio.some((id) => !uploads.exists(id))) return { status: 400, error: "Unknown audio: upload it with POST /api/uploads first" };
   if (d.documents.some((id) => !uploads.exists(id))) return { status: 400, error: "Unknown PDF: upload it with POST /api/uploads first" };
+  if (d.profile && !profiles.exists(d.profile)) return { status: 400, error: `There's no browser profile called “${d.profile}”` };
   // Routine runs are forced read-only and get exactly one destination
   const routine = routineFields(d, { telegramChat: telegram ? [...TELEGRAM_ALLOWED][0] : undefined, vault: OBSIDIAN_VAULT || undefined }, d.source === "routine" && extra.mayAct);
   if ("error" in routine) return { status: 400, error: routine.error };
@@ -1058,6 +1213,7 @@ function createTask(input: unknown, extra: { chatId?: string; routineId?: string
     readOnly: routine.readOnly || undefined,
     deliverTo: routine.deliverTo,
     allowedSites: d.allowedSites.length ? d.allowedSites : undefined,
+    profile: d.profile,
     images: d.images.length ? d.images : undefined,
     audio: d.audio.length ? d.audio : undefined,
     documents: d.documents.length ? d.documents : undefined,
@@ -1225,6 +1381,10 @@ function patchTask(task: Task, input: unknown): { error?: string } {
     task.readOnly = p.readOnly || undefined;
   }
   if (p.allowedSites !== undefined) task.allowedSites = p.allowedSites.length ? p.allowedSites : undefined;
+  if (p.profile !== undefined) {
+    if (p.profile && !profiles.exists(p.profile)) return { error: `There's no browser profile called “${p.profile}”` };
+    task.profile = p.profile ?? undefined;
+  }
   if (p.documents !== undefined) {
     if (!editable) return { error: "Only cards in Backlog or Ready can change their PDFs" };
     if (p.documents.some((id) => !uploads.exists(id))) return { error: "Unknown PDF: upload it first" };
@@ -1577,7 +1737,11 @@ app.post("/cancel", requireToken, (req, res) => cancel(req.body?.taskId, res));
 app.get("/api/approvals", (_req, res) => {
   const pending = approvals.pending().map((a) => ({ ...a, summary: describeAction(a) }));
   const history = store.approvalLog<Approval>(40).map((a) => ({ ...a, summary: describeAction(a) }));
-  res.json({ pending, history, policy: approvals.policy });
+  // Agents waiting for you to take over their browser
+  const handoffs = [...liveBrowsers.values()]
+    .filter((b) => b.control.state === "user" && b.control.requestedBy === "agent")
+    .map((b) => ({ id: b.id, taskTitle: b.title, reason: b.control.reason, since: b.control.since, expiresAt: (b.control.since ?? Date.now()) + TAKEOVER_TIMEOUT_MS }));
+  res.json({ pending, history, policy: approvals.policy, handoffs });
 });
 app.get("/api/approvals/:id/screenshot", (req, res) => {
   const shot = approvals.screenshot(String(req.params.id));
@@ -1603,6 +1767,113 @@ app.put("/api/approvals/policy", requireToken, (req, res) => {
   res.json(parsed.data);
 });
 
+// --- Browser profiles and take over API -----------------------------------------
+app.get("/api/profiles", (_req, res) => {
+  res.json({ profiles: profiles.list().map((p) => ({ ...p, open: liveBrowsers.has(`manual-${p.name}`) })), default: defaultProfile(), encrypted: Boolean(process.env.PROFILE_SECRET) });
+});
+app.post("/api/profiles", requireToken, (req, res) => {
+  const name = String(req.body?.name ?? "").trim().toLowerCase();
+  const err = profiles.create(name);
+  if (err) return res.status(400).json({ error: err });
+  hive.log("browser", "profile", `created “${name}”`);
+  res.status(201).json(profiles.info(name));
+});
+app.put("/api/profiles/default", requireToken, (req, res) => {
+  const name = String(req.body?.name ?? "");
+  if (!profiles.exists(name)) return res.status(404).json({ error: "Profile not found" });
+  store.setSetting("defaultProfile", name);
+  res.json({ default: name });
+});
+app.delete("/api/profiles/:name", requireToken, async (req, res) => {
+  const name = String(req.params.name);
+  if (name === defaultProfile()) return res.status(400).json({ error: "That's the default profile: pick another default first" });
+  if ([...liveBrowsers.values()].some((b) => b.profile === name && !b.manual)) return res.status(409).json({ error: "A running card is using it" });
+  const open = liveBrowsers.get(`manual-${name}`);
+  if (open) {
+    liveBrowsers.delete(open.id);
+    await open.session.close();
+    broadcastBrowser({ type: "end", taskId: open.id });
+  }
+  if (!profiles.remove(name)) return res.status(404).json({ error: "Profile not found" });
+  hive.log("browser", "profile", `deleted “${name}” and its sign-ins`);
+  res.json({ ok: true });
+});
+app.post("/api/profiles/:name/open", requireToken, async (req, res) => {
+  const url = typeof req.body?.url === "string" && req.body.url.trim() ? req.body.url.trim() : undefined;
+  try {
+    const out = await openProfileWindow(String(req.params.name), url);
+    if ("error" in out) return res.status(400).json(out);
+    res.status(201).json({ id: out.id });
+  } catch (e) {
+    res.status(502).json({ error: `The browser couldn't open: ${e instanceof Error ? e.message : String(e)}` });
+  }
+});
+
+app.get("/api/browser/sessions", (_req, res) => {
+  res.json(
+    [...liveBrowsers.values()].map((b) => ({
+      id: b.id,
+      taskId: b.taskId,
+      title: b.title,
+      profile: b.profile,
+      readOnly: b.readOnly,
+      manual: b.manual,
+      control: b.control.state,
+      by: b.control.requestedBy,
+      reason: b.control.reason,
+      url: b.session.url,
+    })),
+  );
+});
+const liveOr404 = (req: Request, res: Response): LiveBrowser | null => {
+  const lb = liveBrowsers.get(String(req.params.id));
+  if (!lb) res.status(404).json({ error: "That browser isn't open any more" });
+  return lb ?? null;
+};
+app.post("/api/browser/:id/takeover", requireToken, (req, res) => {
+  const lb = liveOr404(req, res);
+  if (!lb) return;
+  if (lb.readOnly) return res.status(400).json({ error: "Read-only runs can't be taken over: they never sign in or type" });
+  lb.control.takeOver("user");
+  lb.lastInputAt = Date.now();
+  if (lb.taskId) hive.log("browser", "takeover", "you took over the browser", lb.taskId);
+  res.json({ control: lb.control.state });
+});
+app.post("/api/browser/:id/handback", requireToken, async (req, res) => {
+  const lb = liveOr404(req, res);
+  if (!lb) return;
+  if (lb.manual) return res.status(400).json({ error: "This is your own profile window: use Close & save" });
+  lb.control.handBack();
+  res.json({ control: lb.control.state });
+});
+app.post("/api/browser/:id/close", requireToken, async (req, res) => {
+  const lb = liveOr404(req, res);
+  if (!lb) return;
+  if (!lb.manual) return res.status(400).json({ error: "A card's browser closes when the card ends: hand it back instead" });
+  await closeProfileWindow(lb);
+  res.json({ ok: true });
+});
+// Your clicks, typing and scrolling, only while you have control
+app.post("/api/browser/:id/input", requireToken, async (req, res) => {
+  const lb = liveOr404(req, res);
+  if (!lb) return;
+  if (lb.control.state !== "user") return res.status(409).json({ error: "Take over first" });
+  lb.lastInputAt = Date.now();
+  const b = req.body ?? {};
+  try {
+    if (b.type === "click" && Number.isFinite(b.x) && Number.isFinite(b.y)) await lb.session.userClick(b.x, b.y);
+    else if (b.type === "type" && typeof b.text === "string") await lb.session.userType(b.text);
+    else if (b.type === "key" && typeof b.key === "string") await lb.session.userKey(b.key);
+    else if (b.type === "scroll" && Number.isFinite(b.dy)) await lb.session.userScroll(b.dy);
+    else if (b.type === "navigate" && typeof b.url === "string") await lb.session.navigate(b.url);
+    else if (b.type === "back") await lb.session.back();
+    else return res.status(400).json({ error: "Unknown input" });
+    res.json({ ok: true, url: lb.session.url });
+  } catch (e) {
+    res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
 // --- Routines (scheduled read-only cards) ------------------------------------
 const ROUTINE_TZ = process.env.ROUTINE_TZ || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 const ROUTINE_MIN_MINUTES = Math.max(1, Number(process.env.ROUTINE_MIN_MINUTES) || 5);
@@ -1612,7 +1883,16 @@ const scheduler = new Scheduler(
   {
     start: (r) => {
       const out = createTask(
-        { prompt: r.prompt, title: r.name, targetAgent: r.targetAgent, source: "routine", deliverTo: r.deliverTo, allowedSites: r.allowedSites, column: "ready" },
+        {
+          prompt: r.prompt,
+          title: r.name,
+          targetAgent: r.targetAgent,
+          source: "routine",
+          deliverTo: r.deliverTo,
+          allowedSites: r.allowedSites,
+          column: "ready",
+          ...(r.profile ? { profile: r.profile } : {}),
+        },
         { routineId: r.id, mayAct: r.mayAct },
       );
       if (!out.task) return { error: typeof out.error === "string" ? out.error : "the card couldn't be created" };
@@ -1624,6 +1904,7 @@ const scheduler = new Scheduler(
       return Boolean(t && !TERMINAL_STATUSES.includes(t.status));
     },
     checkDelivery: (r) => {
+      if (r.profile && !profiles.exists(r.profile)) return `There's no browser profile called “${r.profile}”`;
       const f = routineFields({ source: "routine", deliverTo: r.deliverTo }, routineEnv());
       return "error" in f ? f.error : null;
     },

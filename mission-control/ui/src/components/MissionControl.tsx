@@ -91,6 +91,14 @@ export default function MissionControl() {
   useEffect(() => {
     const onHash = () => {
       const h = location.hash.slice(1);
+      // #browser opens the Console's Browser tab (an agent asked for you there)
+      if (h === "browser") {
+        setView("console");
+        setCenterTab("browser");
+        // Clear it so the same button works next time
+        history.replaceState(null, "", location.pathname);
+        return;
+      }
       setView(VIEWS.includes(h as View) ? (h as View) : "console");
     };
     window.addEventListener("hashchange", onHash);

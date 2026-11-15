@@ -126,6 +126,37 @@ runs. Each has one destination (`deliverTo`: `dashboard`, `telegram` or `obsidia
 in `HQ/routines`); its prompt can't switch models, and its findings stay on its card rather
 than in the hive log. Rules: `src/hq/routine.ts`.
 
+## Browser profiles and taking over (Phase 5)
+
+Each **browser profile** is a separate set of sign-ins ("main", "shopping", "work"…). Its
+cookies are loaded into a fresh, isolated browser context when a run starts and saved
+back when it ends, so a login survives restarts of Chrome and Mission Control.
+- **Browser tab → Profiles:** add a profile, make one the default, delete one, or
+  **Open** it to sign in to sites yourself (type a page address first). You're at the
+  controls: click the screen, type, scroll, use the address bar, then **Close & save**.
+- **Cards** browse with the default profile, or pick one ("Browse signed in as") in the
+  new-card form. **Routines** that may act can pick one too. Read-only runs never use a
+  profile: they always get a throwaway one.
+- **Take over:** while an agent is browsing, **Take over** pauses it after its current
+  step. You can click, type, scroll and go to addresses; nothing you do asks for
+  approval. **Hand back** and the agent looks at the page again and carries on. The
+  card's time limit is paused meanwhile, and the browser comes back to the agent by
+  itself after `TAKEOVER_TIMEOUT_MIN` (30) minutes.
+- **The agent can ask for you:** when a page needs a sign-in, a code or a check, the
+  agent hands off ("Please sign in to …"). The request shows in the bar at the top of
+  every page (and in Telegram) with **Go to the browser**.
+- Agents still never type passwords or payment details themselves (Phase 4): that's what
+  taking over is for.
+- Sign-ins are saved in `data/profiles/`, readable by you only. Set `PROFILE_SECRET` to
+  encrypt them (AES-256-GCM); keep it, because profiles saved with it can't be read
+  without it.
+
+API: `GET/POST /api/profiles`, `PUT /api/profiles/default`, `DELETE /api/profiles/:name`,
+`POST /api/profiles/:name/open` (`{ url? }`), `GET /api/browser/sessions`,
+`POST /api/browser/:id/takeover`, `/handback`, `/close` (profile windows) and `/input`
+(`{ type: "click", x, y }`, `{ type: "type", text }`, `{ type: "key", key }`,
+`{ type: "scroll", dy }`, `{ type: "navigate", url }`, `{ type: "back" }`).
+
 ## Approvals (Phase 4)
 
 Agents now ask before they change anything on a web page. When the browser agent wants to

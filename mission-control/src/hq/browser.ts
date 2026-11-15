@@ -1,6 +1,8 @@
 import { lookup } from "dns/promises";
 import { isSensitiveField } from "./approvals";
 import type { ActionRequest } from "./approvals";
+import { toCdpCookies } from "./profiles";
+import type { StoredCookie } from "./profiles";
 import { isIP } from "net";
 
 // A real Chrome the browser agent can drive, with a live screencast for the
@@ -164,6 +166,8 @@ export interface Frame {
 }
 
 const VIEWPORT = { width: 1280, height: 800 };
+export const BROWSER_VIEWPORT = VIEWPORT;
+const KEYS: Record<string, number> = { Enter: 13, Backspace: 8, Tab: 9, Escape: 27, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Delete: 46, Home: 36, End: 35, PageUp: 33, PageDown: 34 };
 
 // Runs in the page: finds the best element for a description like "Sign in" or "search box".
 const FIND_ELEMENT = `(kind, wanted) => {
@@ -261,6 +265,8 @@ export class BrowserSession {
   private gate: ActionGate | null;
   // Sites a run that may act is kept to (routines); empty means anywhere
   private sites: string[];
+  // A profile's sign-ins: loaded into this session's own context, saved back on close
+  private profile: { cookies: StoredCookie[]; save: (cookies: StoredCookie[]) => void } | null;
   private sessionId = "";
   private targetId = "";
   private contextId = "";
@@ -279,8 +285,10 @@ export class BrowserSession {
       onBlocked?: (url: string, reason: string) => void;
       gate?: ActionGate;
       sites?: string[];
+      profile?: { cookies: StoredCookie[]; save: (cookies: StoredCookie[]) => void };
     } = {},
   ) {
+    this.profile = opts.profile ?? null;
     this.allowPrivate = Boolean(opts.allowPrivate);
     this.gate = opts.gate ?? null;
     this.sites = (opts.sites ?? []).map((x) => x.toLowerCase().replace(/^www\./, ""));
@@ -291,10 +299,14 @@ export class BrowserSession {
 
   async start(cdpBase: string) {
     this.cdp = await Cdp.connect(await resolveCdpUrl(cdpBase));
-    // Read-only runs get a throwaway profile: no cookies, so never logged in anywhere
-    if (this.readOnly) {
+    // Read-only runs get a throwaway profile: no cookies, so never logged in anywhere.
+    // A profile run gets its own context too, with only that profile's sign-ins in it.
+    if (this.readOnly || this.profile) {
       const { browserContextId } = await this.cdp.send("Target.createBrowserContext", { disposeOnDetach: true });
       this.contextId = browserContextId;
+      if (this.profile && !this.readOnly && this.profile.cookies.length) {
+        await this.cdp.send("Storage.setCookies", { cookies: toCdpCookies(this.profile.cookies), browserContextId });
+      }
     }
     // The page size is set below (device metrics); newer Chrome refuses a size here
     // ("Target position can only be set for new windows")
@@ -494,7 +506,50 @@ export class BrowserSession {
     return `Went back to ${this.current.url}`;
   }
 
+  // --- You at the controls (take over) ---------------------------------------
+  // These act for the user, so they skip the approval gate. The server only
+  // calls them while the user has control.
+
+  /** A click at a point on the page (page pixels, 1280×800). */
+  async userClick(x: number, y: number) {
+    const px = Math.max(0, Math.min(VIEWPORT.width - 1, Math.round(x)));
+    const py = Math.max(0, Math.min(VIEWPORT.height - 1, Math.round(y)));
+    for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) {
+      await this.cdp.send("Input.dispatchMouseEvent", { type, x: px, y: py, button: type === "mouseMoved" ? "none" : "left", clickCount: 1 }, this.sessionId);
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+
+  async userType(text: string) {
+    await this.cdp.send("Input.insertText", { text: text.slice(0, 2000) }, this.sessionId);
+  }
+
+  async userKey(key: string) {
+    const code = KEYS[key];
+    if (!code) throw new Error(`Key "${key}" isn't supported`);
+    for (const type of ["rawKeyDown", "keyUp"]) {
+      await this.cdp.send("Input.dispatchKeyEvent", { type, key, code: key, windowsVirtualKeyCode: code, ...(key === "Enter" && type === "rawKeyDown" ? { text: "\r" } : {}) }, this.sessionId);
+    }
+    if (key === "Enter") await new Promise((r) => setTimeout(r, 500));
+  }
+
+  async userScroll(dy: number) {
+    await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: VIEWPORT.width / 2, y: VIEWPORT.height / 2, deltaX: 0, deltaY: Math.max(-3000, Math.min(3000, dy)) }, this.sessionId);
+  }
+
+  get url() {
+    return this.current.url;
+  }
+
+  /** Saves the profile's sign-ins now (also done on close). */
+  async saveProfile() {
+    if (!this.profile || this.readOnly || !this.contextId) return;
+    const { cookies } = await this.cdp.send("Storage.getCookies", { browserContextId: this.contextId });
+    this.profile.save(cookies as StoredCookie[]);
+  }
+
   async close() {
+    await this.saveProfile().catch(() => {});
     try {
       await this.cdp.send("Page.stopScreencast", {}, this.sessionId);
       await this.cdp.send("Target.closeTarget", { targetId: this.targetId });

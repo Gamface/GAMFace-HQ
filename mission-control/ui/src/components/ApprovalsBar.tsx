@@ -105,12 +105,23 @@ function Request({ a, onDone }: { a: PendingApproval; onDone: () => void }) {
   );
 }
 
+interface Handoff {
+  id: string;
+  taskTitle: string;
+  reason?: string;
+  expiresAt: number;
+}
+
 export default function ApprovalsBar({ taskId }: { taskId?: string }) {
   const [list, setList] = useState<PendingApproval[]>([]);
+  const [handoffs, setHandoffs] = useState<Handoff[]>([]);
   const baseTitle = useRef(document.title);
   const load = () =>
-    getJson<{ pending: PendingApproval[] }>("/api/approvals")
-      .then((d) => setList(d.pending))
+    getJson<{ pending: PendingApproval[]; handoffs?: Handoff[] }>("/api/approvals")
+      .then((d) => {
+        setList(d.pending);
+        setHandoffs(d.handoffs ?? []);
+      })
       .catch(() => {});
   useEffect(() => {
     void load();
@@ -120,12 +131,30 @@ export default function ApprovalsBar({ taskId }: { taskId?: string }) {
   // The tab title shows waiting requests, so they're noticed from other tabs
   useEffect(() => {
     if (taskId) return;
-    document.title = list.length ? `⏸ (${list.length}) Approval needed · ${baseTitle.current}` : baseTitle.current;
-  }, [list.length, taskId]);
+    const n = list.length + handoffs.length;
+    document.title = n ? `⏸ (${n}) Needs you · ${baseTitle.current}` : baseTitle.current;
+  }, [list.length, handoffs.length, taskId]);
   const shown = taskId ? list.filter((a) => a.taskId === taskId) : list;
-  if (!shown.length) return null;
+  const asks = taskId ? handoffs.filter((h) => h.id === taskId) : handoffs;
+  if (!shown.length && !asks.length) return null;
   return (
     <div className="space-y-2">
+      {asks.map((h) => (
+        <div key={h.id} className="flex items-center gap-3 rounded-lg border border-amber-500/60 bg-amber-950/40 p-3 text-sm">
+          <span>🙋</span>
+          <div className="min-w-0 flex-1">
+            <p className="text-slate-100">
+              <b>Browser</b> needs you: {h.reason ?? "please take over"}
+            </p>
+            <p className="text-[11px] text-slate-400 truncate">
+              Card: {h.taskTitle} · <Countdown until={h.expiresAt} />
+            </p>
+          </div>
+          <button onClick={() => (location.hash = "#browser")} className="px-3 py-1.5 rounded-md bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium">
+            Go to the browser
+          </button>
+        </div>
+      ))}
       {shown.map((a) => (
         <Request key={a.id} a={a} onDone={() => void load()} />
       ))}

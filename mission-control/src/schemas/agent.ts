@@ -5,6 +5,7 @@ import { z } from "zod";
 
 export const AgentTargetSchema = z.enum(["planner", "browser", "coder", "file", "security_audit", "vision"]);
 // An attached audio clip (WAV), by its upload id
+export const ProfileNameSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/, "Profile names are lowercase letters, numbers and dashes");
 export const DocIdSchema = z.string().regex(/^[a-f0-9]{64}\.pdf$/);
 export const AudioIdSchema = z.string().regex(/^[a-f0-9]{64}\.wav$/);
 // What a client may ask for: a specific agent, or "auto" to let the router pick
@@ -66,6 +67,8 @@ export const AgentTaskSchema = z.object({
   allowedSites: z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{1,253}$/)).max(10).default([]),
   // Routine runs only: where the result is sent (default: the dashboard)
   deliverTo: DeliverySchema.optional(),
+  // Browser profile to browse with (its sign-ins); the default profile when unset
+  profile: ProfileNameSchema.optional(),
   // Pictures for the vision agent to look at
   images: z.array(ImageIdSchema).max(6).default([]),
   // Audio clips, transcribed before the agent starts
@@ -90,6 +93,8 @@ export const RoutineInputSchema = z.object({
   catchUp: z.boolean().default(false),
   // Runs may type, submit and click, each only after the user approves it; otherwise read-only
   mayAct: z.boolean().default(false),
+  // Browser profile its runs sign in with (when it may act); the default when unset
+  profile: ProfileNameSchema.nullable().optional(),
 });
 export const RoutinePatchSchema = RoutineInputSchema.partial();
 
@@ -146,6 +151,7 @@ export const TaskPatchSchema = z.object({
   column: z.enum(["backlog", "ready"]).optional(),
   position: z.number().optional(),
   readOnly: z.boolean().optional(),
+  profile: ProfileNameSchema.nullable().optional(),
   allowedSites: z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{1,253}$/)).max(10).optional(),
   images: z.array(ImageIdSchema).max(6).optional(),
   audio: z.array(AudioIdSchema).max(4).optional(),
@@ -193,6 +199,8 @@ export const TaskSummarySchema = z.object({
   readOnly: z.boolean().optional(),
   allowedSites: z.array(z.string()).optional(),
   deliverTo: DeliverySchema.optional(),
+  // Browser profile (sign-ins) the card's browsing uses
+  profile: z.string().optional(),
   images: z.array(z.string()).optional(),
   audio: z.array(z.string()).optional(),
   documents: z.array(z.string()).optional(),
