@@ -25,7 +25,7 @@ RUN python -c "import os; from faster_whisper import WhisperModel; WhisperModel(
 
 COPY timing.py server.py test_timing.py ./
 # "voice" is a Debian system group, so the user has another name
-RUN useradd -m mcvoice && chown -R mcvoice /app
+RUN useradd -m mcvoice && chown -R mcvoice /app /models
 USER mcvoice
 # No internet at runtime: never try to download
 ENV HF_HUB_OFFLINE=1 PORT=3030 PYTHONUNBUFFERED=1
