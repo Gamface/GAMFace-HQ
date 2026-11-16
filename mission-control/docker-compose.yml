@@ -29,6 +29,8 @@ services:
       BROWSER_MAX_STEPS: ${BROWSER_MAX_STEPS:-10}
       # Videos: the Remotion service below
       VIDEO_RENDER_URL: http://video:3020
+      # Voiceovers and word-timed captions: the voice service below
+      VOICE_URL: http://voice:3030
     volumes:
       - .:/app
       # - /mnt/c/Users/aldra/Documents/ObsidianVault:/vault
@@ -66,6 +68,20 @@ services:
     networks: [render]
     restart: unless-stopped
 
+  # Voiceovers (Kokoro) and word timings for captions (faster-whisper), on the CPU.
+  # Built once with internet (downloads the models, about 1 GB); at runtime it's on
+  # the same private network as the video service: no internet, none of your files.
+  voice:
+    build:
+      context: ./voice
+      args:
+        # base.en is quick on a CPU; small.en times words more accurately
+        WHISPER_MODEL: ${VOICE_WHISPER_MODEL:-base.en}
+    environment:
+      VOICE_DEFAULT: ${VOICE_DEFAULT:-af_heart}
+    networks: [render]
+    restart: unless-stopped
+
   ui:
     image: node:22-bookworm-slim
     working_dir: /app/ui
@@ -86,6 +102,6 @@ services:
 
 networks:
   default: {}
-  # Private: the harness and the video service only, no internet
+  # Private: the harness, the video service and the voice service only, no internet
   render:
     internal: true

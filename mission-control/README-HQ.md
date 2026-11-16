@@ -155,6 +155,50 @@ into an MP4 that appears on the card (🎬): play it there or download it.
 API: `POST /api/tasks/:id/video` renders the scene in a finished card's answer. The video
 service itself: `POST /render`, `GET /jobs/:id`, `GET /jobs/:id/video`, `GET /health`.
 
+## Voiceovers, captions, assets and templates
+
+Videos can now talk, show captions in sync, use your real logos, pictures, clips and
+music, and follow your brand.
+
+- **Voiceovers.** Ask for one ("…with a voiceover", "a narrated explainer") and the Coder
+  writes the narration as well as the scene. The **voice service** speaks it with
+  [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) (Apache-2.0, runs on the CPU), and
+  the video becomes at least as long as the narration. Pick the default voice and speed
+  on the **Assets** page (▶ plays a sample); a scene can choose another with `voice=` in
+  its first line. Replies and fixes keep the same narration unless it's rewritten.
+- **Captions.** Ask for captions or subtitles and they appear word by word, in sync,
+  because [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (MIT) listens to the
+  voiceover and times every word. Captions show the narration's own spelling. Styles:
+  karaoke (default), pop or block, set on the Assets page.
+- **Your own recording.** Attach a recording and say "use my recording" (or "caption my
+  recording"): it becomes the soundtrack, the video lasts as long as it does, and its
+  words are timed for captions.
+- **Asset dictionary** (**Assets** tab). Upload logos, pictures, B-roll clips, music,
+  sound effects and fonts, and describe each one. When you ask for a video, the assets
+  whose name, description or tags share words with your request go to the Coder, which
+  uses them by id instead of inventing visuals. Music is only added when you ask for
+  music; it plays under the whole video (quieter under a voiceover), and its beats are
+  found automatically so visuals can hit them. Files are checked by their bytes; limits:
+  pictures 10 MB, audio 30 MB, clips 80 MB, fonts 5 MB, 300 assets.
+- **Brand.** Name, tagline, five colours, font (a system font or one you uploaded), logo,
+  voice and caption style. The templates and pieces use them automatically.
+- **Templates.** Every scene can import Mission Control's kit (`video/mc.tsx`): ready-made
+  templates the Coder only fills in, which makes videos far more reliable from local
+  models: `Promo` (title, points, call to action), `Explainer` (numbered steps), `Social`
+  (vertical shorts with big captions) and `Quote`. Plus pieces for custom scenes:
+  `TitleCard`, `KineticText`, `BulletList`, `LowerThird`, `Media`, `Logo`, `EndCard`,
+  `Background`, `Captions`, `Section`, and `useBeat()`, `cueFrame()` to time visuals to
+  the beat or to a spoken word. Ask for "vertical", "reel" or "TikTok" for 1080×1920.
+- The voice service (`voice/`, the `voice` container) is built once with internet: it
+  downloads Kokoro (about 330 MB) and the Whisper model (`VOICE_WHISPER_MODEL`, default
+  `base.en`; `small.en` times words more accurately but is slower). At runtime it's on the
+  same private network as the video service: no internet, none of your files. Speaking
+  takes about a second per sentence on the CPU.
+
+API: `GET/POST /api/assets`, `PATCH/DELETE /api/assets/:id`, `GET /api/assets/:id/file`,
+`POST /api/assets/:id/beats`, `PUT /api/brand`, `POST /api/voice/preview`. The voice
+service: `POST /speak`, `POST /words`, `POST /beats`, `GET /health`.
+
 ## Skills and history search (Phase 6)
 
 **Skills** are reusable procedures the agents follow when a request fits (an idea from
@@ -417,8 +461,9 @@ arrive on their own:
 ```bash
 cd ~/sandcastle/ts-harness
 docker compose pull browser               # newer headless Chrome
-docker compose up -d --build --force-recreate   # --build: the video service (first time ~1 GB)
-docker compose exec harness npm test      # optional: about 100 tests
+docker compose up -d --build --force-recreate   # --build: the video and voice services (first time ~2 GB)
+docker compose exec harness npm test      # optional: about 115 tests
+docker compose exec voice python -m unittest test_timing   # optional: the voice service's timing
 ```
 
 Without Docker: `npm install`, then `npm start` (and `npm install && npx vite` in `ui/`).

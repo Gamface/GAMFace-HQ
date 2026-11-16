@@ -24,26 +24,70 @@ export function wantsVideo(text: string): boolean {
   return true;
 }
 
+export interface VideoOptions {
+  pictures?: number;
+  /** Write a ```narration block: Kokoro speaks it and the video gets its length */
+  voice?: boolean;
+  /** Show word-by-word captions */
+  captions?: boolean;
+  /** The user's recording is the soundtrack: its length and transcript */
+  recording?: { seconds: number; text: string } | null;
+  /** The asset dictionary's block (assetBlock) */
+  assets?: string;
+  /** Prefer vertical 1080×1920 */
+  vertical?: boolean;
+}
+
+/** Whether a request wants a vertical (phone) video. */
+export const wantsVertical = (text: string) => /\b(vertical|portrait|9:16|tiktok|reels?|shorts|instagram stor(y|ies)|phone[- ]sized)\b/i.test(text);
+
 /** What the Coder is told when its answer will be rendered. */
-export function videoInstructions(pictures = 0): string {
-  return (
-    "\n\nVIDEO: Mission Control renders your answer with Remotion (4.x) into an MP4. Write the whole scene as ONE ```tsx code block:\n" +
-    "- First line: // video: width=1920 height=1080 fps=30 seconds=10   (your choice; at most 1920×1080, 60 fps, " +
-    `${VIDEO_MAX_SECONDS} seconds; width and height even)\n` +
-    "- Export the scene as a named component: export const Video: React.FC<{ images: string[] }> = ({ images }) => { … }\n" +
-    "- Animate with useCurrentFrame(), useVideoConfig(), interpolate() (with extrapolateRight: 'clamp'), spring(), <Sequence>, <AbsoluteFill>, <Img>. " +
-    "Every frame must render from the frame number alone: no useEffect timers, no Math.random() (use random('seed') from remotion), no CSS transitions or animations.\n" +
-    "- Packages you may import: react, remotion, @remotion/transitions, @remotion/shapes, @remotion/paths, @remotion/noise, @remotion/three, three, @react-three/fiber. Nothing else.\n" +
-    "- There is NO internet while rendering: no web fonts, remote images, videos, audio or data. Use system fonts (sans-serif, serif, monospace) and draw with CSS, SVG or three.\n" +
-    (pictures ? `- The user's ${pictures} attached picture(s) are in props.images (data URLs): use them with <Img src={images[0]} />.\n` : "") +
-    "- After the code block, say in one or two sentences what the video shows."
-  );
+export function videoInstructions(opts: number | VideoOptions = 0): string {
+  const o: VideoOptions = typeof opts === "number" ? { pictures: opts } : opts;
+  const pictures = o.pictures ?? 0;
+  const size = o.vertical ? "width=1080 height=1920" : "width=1920 height=1080";
+  const lines = [
+    "\n\nVIDEO: Mission Control renders your answer with Remotion (4.x) into an MP4. Write the whole scene as ONE ```tsx code block:",
+    `- First line: // video: ${size} fps=30 seconds=10${o.voice ? " voice=af_heart" : ""}   (your choice; at most 1920×1080 pixels (portrait is fine), 60 fps, ${VIDEO_MAX_SECONDS} seconds; width and height even)`,
+    "- Export the scene as a named component: export const Video: React.FC<{ images: string[] }> = ({ images }) => { … }",
+    "- EASIEST AND MOST RELIABLE: fill in a ready-made template from Mission Control's kit, which handles timing, layout, brand colours and animation and fits any length:",
+    '    import { Promo } from "./mc";',
+    '    export const Video = () => <Promo title="…" subtitle="…" points={["…", "…", "…"]} cta="…" media={["asset-id or images[0]"]} />;',
+    "  Templates: Promo (title, subtitle?, points?, cta?, media?) · Explainer (title, steps: {title, text?}[], media?) · Social (hook, lines?, media?, cta?; for vertical shorts, best with a voiceover) · Quote (quote, author?, media?).",
+    "- Or build your own from the kit's pieces (all from \"./mc\"): <Background variant=\"gradient|grid|dots\" />, <TitleCard title subtitle? />, <KineticText text />, <BulletList items title? />, <LowerThird name role? />, " +
+      "<Media id|src dim? /> (picture or clip filling the frame), <Logo size? />, <EndCard text? cta? />, <Section from durationInFrames> (a Sequence that fades), <Captions style? position? />; " +
+      "hooks useMC() (words, brand, assets), useBeat() → { pulse }, useSpokenWord(), useEnter(delay) → { opacity, y, scale }; cueFrame(word, fps) → the frame a word is spoken. Put TitleCard, KineticText, BulletList, LowerThird and EndCard inside a <Sequence>/<Section>.",
+    "- With plain Remotion: useCurrentFrame(), useVideoConfig(), interpolate() (with extrapolateRight: 'clamp'), spring(), <Sequence>, <AbsoluteFill>, <Img>. " +
+      "Every frame must render from the frame number alone: no useEffect timers, no Math.random() (use random('seed') from remotion), no CSS transitions or animations.",
+    "- Packages you may import: react, remotion, ./mc, @remotion/transitions, @remotion/shapes, @remotion/paths, @remotion/noise, @remotion/three, three, @react-three/fiber. Nothing else.",
+    "- There is NO internet while rendering: no web fonts, remote images, videos, audio or data. Use system fonts (sans-serif, serif, monospace), the kit, CSS, SVG or three.",
+  ];
+  if (pictures) lines.push(`- The user's ${pictures} attached picture(s) are in props.images (data URLs): use them with <Img src={images[0]} /> or media={[images[0]]}.`);
+  if (o.assets) lines.push(o.assets);
+  if (o.recording) {
+    lines.push(
+      `- SOUNDTRACK: the user's recording (${Math.round(o.recording.seconds)} s) plays automatically and the video lasts as long as it does; don't add audio. ` +
+        `Its words are timed in useMC().words, so visuals can follow what's said (cueFrame("word", fps)). ` +
+        (o.recording.text ? `What it says: "${o.recording.text.slice(0, 1500)}"` : "What it says is in the transcript above."),
+    );
+  } else if (o.voice) {
+    lines.push(
+      "- VOICEOVER: after the code block, write what the narrator says in a ```narration block (plain spoken sentences; no stage directions, no speaker names). " +
+        "Mission Control speaks it with Kokoro, plays it automatically and makes the video at least as long as the narration (about 2.5 words a second), so set seconds to match. " +
+        "Don't add audio yourself. Narration words are timed in useMC().words; cueFrame(\"word\", fps) gives the frame a word is spoken, so visuals can land on it. " +
+        "Pick the voice in the first line with voice=: af_heart, af_bella, af_sarah, am_adam, am_michael (US); bf_emma, bm_george (UK).",
+    );
+  }
+  if (o.captions && (o.voice || o.recording)) lines.push("- CAPTIONS: word-by-word captions are added automatically at the bottom (the Social template draws its own). Keep the bottom fifth of the frame clear, or place <Captions position=\"top\" /> yourself.");
+  else if (o.captions) lines.push("- CAPTIONS: there's no voiceover, so show the text on screen yourself (KineticText or BulletList).");
+  lines.push("- After the code block" + (o.voice && !o.recording ? " (and the narration)" : "") + ", say in one or two sentences what the video shows.");
+  return lines.join("\n");
 }
 
 /** The last Remotion scene in an answer, with its size and length, or null. */
 export function extractScene(answer: string): SceneSpec | null {
   const blocks = [...answer.matchAll(/```(?:tsx|jsx|ts|typescript|js|javascript)?[^\n]*\n([\s\S]*?)```/g)].map((m) => m[1]);
-  const code = blocks.reverse().find((b) => /from\s+["']remotion["']/.test(b) && /\bVideo\b/.test(b));
+  const code = blocks.reverse().find((b) => /from\s+["'](remotion|\.\/mc)["']/.test(b) && /\bVideo\b/.test(b));
   if (!code) return null;
   const head = /\/\/\s*video:([^\n]*)/i.exec(code)?.[1] ?? "";
   const num = (k: string) => Number(new RegExp(`${k}\\s*=\\s*([\\d.]+)`, "i").exec(head)?.[1]);
@@ -83,14 +127,21 @@ export class VideoClient {
   }
 
   /** Renders a scene. Resolves with the MP4, or the error to show the Coder. */
-  async render(spec: SceneSpec, props: Record<string, unknown>, onProgress: (p: RenderProgress) => void, signal?: AbortSignal): Promise<{ mp4: Buffer } | { error: string; fixable: boolean }> {
+  async render(
+    spec: SceneSpec,
+    props: Record<string, unknown>,
+    onProgress: (p: RenderProgress) => void,
+    signal?: AbortSignal,
+    /** For the renderer's public folder: the voiceover, music and assets */
+    files: { name: string; base64: string }[] = [],
+  ): Promise<{ mp4: Buffer } | { error: string; fixable: boolean }> {
     let id: string;
     try {
       const r = await fetch(`${this.base}/render`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...spec, props }),
-        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
+        body: JSON.stringify({ ...spec, props, files }),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
       });
       const body = (await r.json()) as { id?: string; error?: string };
       if (!r.ok || !body.id) return { error: body.error ?? `The video service said ${r.status}`, fixable: r.status === 400 };

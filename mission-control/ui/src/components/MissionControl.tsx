@@ -15,6 +15,7 @@ import PreviewPane from "./PreviewPane";
 import TeamPage from "./TeamPage";
 import RoutinesPage from "./RoutinesPage";
 import SkillsPage from "./SkillsPage";
+import AssetsPage from "./AssetsPage";
 import ApprovalsBar from "./ApprovalsBar";
 
 interface SystemInfo {
@@ -49,8 +50,8 @@ interface MemoryItem {
 
 type RightTab = "commands" | "hive" | "memory";
 type CenterTab = "output" | "preview" | "browser";
-type View = "console" | "board" | "routines" | "skills" | "team";
-const VIEWS: View[] = ["board", "routines", "skills", "team"];
+type View = "console" | "board" | "routines" | "skills" | "assets" | "team";
+const VIEWS: View[] = ["board", "routines", "skills", "assets", "team"];
 
 const STATUS_STYLES: Record<AgentStatus, string> = {
   idle: "bg-slate-700 text-slate-200",
@@ -223,6 +224,7 @@ export default function MissionControl() {
                 ["board", "Board"],
                 ["routines", "Routines"],
                 ["skills", "Skills"],
+                ["assets", "Assets"],
                 ["team", "Team"],
               ] as [View, string][]
             ).map(([key, label]) => (
@@ -271,6 +273,7 @@ export default function MissionControl() {
       {view === "team" && <TeamPage />}
       {view === "routines" && <RoutinesPage />}
       {view === "skills" && <SkillsPage />}
+      {view === "assets" && <AssetsPage />}
       {view === "console" && (<>
       {/* LEFT: TASK HISTORY */}
       <aside className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-4 min-h-0">

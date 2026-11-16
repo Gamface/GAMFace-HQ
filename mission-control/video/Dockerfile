@@ -16,7 +16,7 @@ COPY package.json ./
 RUN npm install --no-audit --no-fund
 # Download Remotion's Chrome now, while the build has internet
 RUN node -e "import('@remotion/renderer').then(r => r.ensureBrowser()).then(() => console.log('Chrome Headless Shell ready'))"
-COPY server.mjs ./
+COPY server.mjs mc.tsx ./
 
 # Run as an ordinary user, not root
 RUN useradd -m render && mkdir -p /app/jobs && chown -R render /app

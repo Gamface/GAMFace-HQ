@@ -1,12 +1,15 @@
 // Mission Control video service: renders Remotion scenes to MP4.
 //
-//   POST /render  { code, width, height, fps, durationInFrames, props? }  → { id }
+//   POST /render  { code, width, height, fps, durationInFrames, props?, files? }  → { id }
 //   GET  /jobs/:id                → { status, progress, stage, error? }
 //   GET  /jobs/:id/video          → the MP4 (once done)
 //   GET  /health                  → { ok, remotion }
 //
 // Each job gets its own small Remotion project (index.ts → Root.tsx → Video.tsx,
-// where Video.tsx is the scene the agent wrote), bundled with @remotion/bundler and
+// where Video.tsx is the scene the agent wrote and mc.tsx is Mission Control's kit of
+// captions, brand pieces and templates). files ([{ name, base64 }]: the voiceover,
+// music, logos and clips from the asset dictionary) go in its public/ folder, where
+// scenes reach them with staticFile(). The project is bundled with @remotion/bundler and
 // rendered with @remotion/renderer. Node never runs the scene code; only headless
 // Chrome does. The container has no internet and no access to your files or keys.
 // One render at a time; finished videos are kept for an hour.
@@ -27,6 +30,9 @@ const CONCURRENCY = process.env.VIDEO_CONCURRENCY ? Number(process.env.VIDEO_CON
 const GL = process.env.VIDEO_GL || "swangle";
 const JOBS_DIR = path.resolve(process.env.JOBS_DIR || "/app/jobs");
 const KEEP_MS = 60 * 60_000;
+const MAX_BODY = 160 * 1024 * 1024;
+const FILE_NAME = /^[a-z0-9][a-z0-9._-]{0,90}\.(png|jpe?g|webp|gif|svg|mp4|webm|mov|wav|mp3|m4a|ogg|aac|ttf|otf|woff2?)$/i;
+const KIT = readFileSync(new URL("./mc.tsx", import.meta.url), "utf8");
 
 mkdirSync(JOBS_DIR, { recursive: true });
 const REMOTION_VERSION = JSON.parse(readFileSync(new URL("./node_modules/remotion/package.json", import.meta.url), "utf8")).version;
@@ -48,35 +54,50 @@ function check(spec) {
   if (width < 16 || height < 16 || width % 2 || height % 2 || width * height > MAX_PIXELS) return { error: `Size must be even and at most 1920×1080 (got ${width}×${height})` };
   if (fps < 1 || fps > 60) return { error: "fps must be 1–60" };
   if (durationInFrames < 1 || durationInFrames / fps > MAX_SECONDS) return { error: `Videos can be at most ${MAX_SECONDS} seconds` };
-  const props = spec.props && typeof spec.props === "object" ? spec.props : {};
-  return { code: spec.code, width, height, fps, durationInFrames, props };
+  const props = spec.props && typeof spec.props === "object" ? { ...spec.props } : {};
+  const files = [];
+  for (const f of Array.isArray(spec.files) ? spec.files : []) {
+    if (!f || typeof f.name !== "string" || !FILE_NAME.test(f.name) || typeof f.base64 !== "string") return { error: `Bad file: ${String(f?.name).slice(0, 80)}` };
+    files.push({ name: f.name, data: Buffer.from(f.base64, "base64") });
+  }
+  if (files.length > 24) return { error: "Too many files" };
+  // Automatic captions, unless the scene draws its own
+  if (props.captions && typeof props.captions === "object" && props.captions.auto && /\b(Captions|Social)\b/.test(spec.code)) props.captions = { ...props.captions, auto: false };
+  return { code: spec.code, width, height, fps, durationInFrames, props, files };
 }
 
 function project(dir, spec) {
   const src = path.join(dir, "src");
   mkdirSync(src, { recursive: true });
+  const pub = path.join(dir, "public");
+  mkdirSync(pub, { recursive: true });
+  for (const f of spec.files) writeFileSync(path.join(pub, f.name), f.data);
   writeFileSync(path.join(src, "Video.tsx"), spec.code);
+  writeFileSync(path.join(src, "mc.tsx"), KIT);
   writeFileSync(
     path.join(src, "Root.tsx"),
     `import React from "react";
 import { Composition } from "remotion";
 import { Video } from "./Video";
+import { DEFAULT_PROPS, withMC } from "./mc";
+
+const Main = withMC(Video as React.ComponentType<any>);
 
 export const RemotionRoot: React.FC = () => (
   <Composition
     id="Main"
-    component={Video as React.FC<any>}
+    component={Main as React.FC<any>}
     durationInFrames={${spec.durationInFrames}}
     fps={${spec.fps}}
     width={${spec.width}}
     height={${spec.height}}
-    defaultProps={{ images: [] }}
+    defaultProps={DEFAULT_PROPS as any}
   />
 );
 `,
   );
   writeFileSync(path.join(src, "index.ts"), `import { registerRoot } from "remotion";\nimport { RemotionRoot } from "./Root";\nregisterRoot(RemotionRoot);\n`);
-  return path.join(src, "index.ts");
+  return { entryPoint: path.join(src, "index.ts"), publicDir: pub };
 }
 
 /** Remotion's errors can be long; keep the part that helps fix the scene. */
@@ -96,8 +117,9 @@ async function run(job) {
   const timer = setTimeout(() => job.cancel?.(), RENDER_TIMEOUT_MS);
   try {
     job.status = "bundling";
-    const entryPoint = project(dir, job.spec);
-    const serveUrl = await bundle({ entryPoint, outDir: path.join(dir, "bundle"), onProgress: (p) => (job.progress = Math.round(p * 0.2)) });
+    const { entryPoint, publicDir } = project(dir, job.spec);
+    job.spec.files = [];
+    const serveUrl = await bundle({ entryPoint, publicDir, outDir: path.join(dir, "bundle"), onProgress: (p) => (job.progress = Math.round(p * 0.2)) });
     job.status = "rendering";
     const inputProps = job.spec.props;
     const composition = await selectComposition({ serveUrl, id: "Main", inputProps, chromiumOptions: { gl: GL } });
@@ -119,6 +141,7 @@ async function run(job) {
     job.progress = 100;
     job.status = "done";
     rmSync(path.join(dir, "bundle"), { recursive: true, force: true });
+    rmSync(path.join(dir, "public"), { recursive: true, force: true });
   } catch (e) {
     job.status = "error";
     job.error = /cancel/i.test(String(e?.message)) ? `The render took longer than ${RENDER_TIMEOUT_MS / 60000} minutes and was stopped` : shortError(e);
@@ -158,16 +181,16 @@ const send = (res, status, body) => {
 
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://x");
-  if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true, remotion: REMOTION_VERSION, busy, queued: queue.length });
+  if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true, remotion: REMOTION_VERSION, kit: true, busy, queued: queue.length });
   if (req.method === "POST" && url.pathname === "/render") {
     const chunks = [];
     let size = 0;
     req.on("data", (c) => {
       size += c.length;
-      if (size <= 30 * 1024 * 1024) chunks.push(c);
+      if (size <= MAX_BODY) chunks.push(c);
     });
     req.on("end", () => {
-      if (size > 30 * 1024 * 1024) return send(res, 413, { error: "Request too large" });
+      if (size > MAX_BODY) return send(res, 413, { error: "Request too large" });
       let spec;
       try {
         spec = check(JSON.parse(Buffer.concat(chunks).toString("utf8")));

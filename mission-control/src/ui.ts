@@ -43,7 +43,7 @@ import {
 import { TelegramBot } from "./hq/telegram";
 import { privateBlock } from "./hq/privacy";
 import { Uploads } from "./hq/uploads";
-import { splitWav } from "./hq/wav";
+import { parseWav, splitWav } from "./hq/wav";
 import { closeRound, historyMessages } from "./hq/thread";
 import { FILE_ID, Files, buildReport, pdfInstructions, printPdf, wantsPdf } from "./hq/pdf";
 import { DOC_ID, DocCache, cleanName, extractPdf, partsOf, withPageMarks } from "./hq/docs";
@@ -55,8 +55,12 @@ import { PROFILE_NAME, Profiles } from "./hq/profiles";
 import { BrowserControl } from "./hq/takeover";
 import { HistoryIndex, SKILL_DRAFT_SYSTEM, Skills, skillDraftPrompt } from "./hq/skills";
 import type { Skill } from "./hq/skills";
-import { VideoClient, extractScene, videoInstructions, wantsVideo } from "./hq/video";
+import { VIDEO_MAX_SECONDS, VideoClient, extractScene, videoInstructions, wantsVertical, wantsVideo } from "./hq/video";
 import type { SceneSpec } from "./hq/video";
+import { KNOWN_VOICES, VoiceClient, extractNarration, sceneVoice, wantsCaptions, wantsOwnAudio, wantsVoice } from "./hq/voice";
+import type { Word } from "./hq/voice";
+import { AssetPatchSchema, AssetUploadSchema, Assets, SYSTEM_FONTS, assetBlock, publicName } from "./hq/assets";
+import type { Asset, Brand } from "./hq/assets";
 import { upcoming, parseSchedule, validTimeZone } from "./hq/schedule";
 
 // --- Config (env vars, see .env.example) ------------------------------------
@@ -141,6 +145,11 @@ const VIDEO_RENDER_URL = process.env.VIDEO_RENDER_URL || "";
 const video = VIDEO_RENDER_URL ? new VideoClient(VIDEO_RENDER_URL.replace(/\/+$/, "")) : null;
 // How many times the Coder may fix a scene that fails to render
 const VIDEO_FIX_ROUNDS = Number(process.env.VIDEO_FIX_ROUNDS ?? 2);
+// Voiceovers and word timings: the voice service (voice/, docker-compose.yml)
+const VOICE_URL = process.env.VOICE_URL || "";
+const voice = VOICE_URL ? new VoiceClient(VOICE_URL.replace(/\/+$/, "")) : null;
+// Logos, pictures, clips, music and fonts the Coder may use, and the brand
+const assets = new Assets(DATA_DIR);
 const docCache = new DocCache(path.join(DATA_DIR, "uploads"));
 // A long PDF is read in at most this many parts (about 14,000 characters each)
 const MAX_DOC_PARTS = Number(process.env.MAX_DOC_PARTS) || 10;
@@ -407,8 +416,12 @@ let nextEventId = Math.max(Date.now(), store.maxEventId() + 1);
 
 const app = express();
 app.use(cors({ origin: CORS_ORIGINS }));
-// Room for a 25 MB PDF or audio clip (or a 10 MB picture) sent as base64
-app.use(express.json({ limit: "40mb" }));
+// Room for a 25 MB PDF or audio clip (or a 10 MB picture) sent as base64; asset
+// uploads (clips up to 80 MB) get more
+type Middleware = (req: Request, res: Response, next: NextFunction) => void;
+const jsonBody = express.json({ limit: "40mb" }) as Middleware;
+const assetBody = express.json({ limit: "120mb" }) as Middleware;
+app.use((req: Request, res: Response, next: NextFunction) => (req.method === "POST" && (req.url ?? "").split("?")[0] === "/api/assets" ? assetBody : jsonBody)(req, res, next));
 
 function requireToken(req: Request, res: Response, next: NextFunction) {
   if (!HARNESS_TOKEN || req.headers.authorization === `Bearer ${HARNESS_TOKEN}`) return next();
@@ -1046,7 +1059,20 @@ async function runTask(task: Task) {
       emit(task, "thinking");
     }
     request += pdfNote;
-    if (makeVideo) request += videoInstructions(Math.min(images.length, 4));
+    if (makeVideo) {
+      const plan = planVideo(task);
+      if (plan.voice && !voice) push("[A voiceover was asked for, but no voice service is set up (VOICE_URL), so the video will be silent.]\n");
+      request += videoInstructions({
+        pictures: Math.min(images.length, 4),
+        voice: plan.voice && Boolean(voice),
+        captions: plan.captions,
+        // The transcript itself is in the private block above
+        recording: plan.recording && voice ? { seconds: audioSeconds(plan.recording), text: "" } : null,
+        assets: assetBlock(plan.picked, plan.brand),
+        vertical: plan.vertical,
+      });
+      if (plan.picked.length) push(`[Assets for this video: ${plan.picked.map((a) => a.name).join(", ")}]\n`);
+    }
     // Approved skills that fit this request
     const leadSkills = useTeam ? skills.match(ask, lead) : [];
     if (leadSkills.length) {
@@ -1182,7 +1208,9 @@ async function runTask(task: Task) {
           push,
         );
         usedPrivate ||= fix.sawPrivate;
-        current = fix.text;
+        // The fix is the scene alone: keep the narration from before
+        const said = extractNarration(current);
+        current = !extractNarration(fix.text) && said ? `${fix.text}\n\n\`\`\`narration\n${said}\n\`\`\`` : fix.text;
         task.answer = redact(current).text.trim();
       }
       flush();
@@ -1443,20 +1471,24 @@ async function renderVideo(
     push("\n[The scene is ready, but no video service is set up (VIDEO_RENDER_URL). Start it with docker compose, then press 🎬 Render video on the card.]\n");
     return "unfixable";
   }
-  const header = `\n\n── Rendering the video with Remotion (${scene.width}×${scene.height}, ${scene.fps} fps, ${Math.round(scene.durationInFrames / scene.fps)} s) ──\n`;
-  // Through the same buffer as the agent's text, so it lands after it
-  push(header);
-  if (live) emit(task, "executing_tool");
   // Rendering can take minutes; it doesn't count against the card's time limit
   const timers = taskTimers.get(task.id);
   timers?.pause();
+  if (live) emit(task, "executing_tool");
   let shown = -1;
   try {
+    const media = await videoMedia(task, answer, scene, signal, push);
+    const notes = [media.voiceNote, media.captions ? "captions" : "", media.assetCount ? `${media.assetCount} asset${media.assetCount > 1 ? "s" : ""}` : ""].filter(Boolean);
+    // Through the same buffer as the agent's text, so it lands after it
+    push(
+      `\n\n── Rendering the video with Remotion (${scene.width}×${scene.height}, ${scene.fps} fps, ${Math.round(scene.durationInFrames / scene.fps)} s${notes.length ? `; ${notes.join(", ")}` : ""}) ──\n`,
+    );
     const props = {
       images: (task.images ?? [])
         .slice(0, 4)
         .map((id, i) => (images[i] ? `data:image/${id.endsWith(".jpg") ? "jpeg" : id.split(".").pop()};base64,${images[i]}` : null))
         .filter(Boolean),
+      ...media.props,
     };
     const out = await video.render(
       scene,
@@ -1469,12 +1501,14 @@ async function renderVideo(
         }
       },
       signal,
+      media.files,
     );
     if ("error" in out) {
       push(`\n✗ Remotion couldn't render it:\n${out.error}\n`);
       hive.log("coder", "video", `render failed: ${out.error.split("\n")[0]}`, task.id);
       return out.fixable ? { error: out.error } : "unfixable";
     }
+    assets.recordUse(media.assetIds);
     const title = /\/\/\s*title:\s*([^\n]+)/i.exec(scene.code)?.[1] ?? task.title ?? task.prompt.slice(0, 60);
     const saved = files.save(title, out.mp4, "mp4");
     task.files = [...(task.files ?? []).filter((f) => f.name !== saved.name), { ...saved, at: Date.now() }];
@@ -1485,6 +1519,150 @@ async function renderVideo(
   } finally {
     timers?.resume();
   }
+}
+
+interface VideoPlan {
+  voice: boolean;
+  captions: boolean;
+  /** The attached recording to use as the soundtrack */
+  recording: string | null;
+  picked: Asset[];
+  brand: Brand | null;
+  vertical: boolean;
+}
+
+/** What a video request asks for, from everything the user said on the card. */
+function planVideo(task: Task): VideoPlan {
+  const said = [task.prompt, ...(task.thread ?? []).filter((t) => t.role === "user").map((t) => t.text), task.reply ?? ""].join("\n");
+  const clips = [...(task.audio ?? []), ...(task.thread ?? []).flatMap((t) => t.audio ?? [])];
+  return {
+    voice: wantsVoice(said),
+    captions: wantsCaptions(said),
+    recording: wantsOwnAudio(said) && clips.length ? clips[clips.length - 1] : null,
+    picked: assets.pick(said),
+    brand: assets.branded() ? assets.brand() : null,
+    vertical: wantsVertical(said),
+  };
+}
+
+const audioSeconds = (id: string) => {
+  const buf = uploads.bytes(id);
+  return (buf && parseWav(buf)?.seconds) || 0;
+};
+
+// Word timings of attached recordings, by upload id
+const recordingWords = new Map<string, { words: Word[]; seconds: number }>();
+
+/**
+ * The voiceover (spoken from the answer's narration, or the user's own recording),
+ * its word timings, music with its beats, the assets and the brand, as files and
+ * props for the renderer. Lengthens the scene to fit the voiceover.
+ */
+async function videoMedia(
+  task: Task,
+  answer: string,
+  scene: SceneSpec,
+  signal: AbortSignal,
+  push: (t: string) => void,
+): Promise<{ props: Record<string, unknown>; files: { name: string; base64: string }[]; assetIds: string[]; assetCount: number; voiceNote: string; captions: boolean }> {
+  const plan = planVideo(task);
+  const brand = assets.brand();
+  const files: { name: string; base64: string }[] = [];
+  let words: Word[] = [];
+  let audio: string | null = null;
+  let seconds = 0;
+  let voiceNote = "";
+
+  // A reply ("make the title bigger") or a fix may leave the narration out: keep the last one
+  const lastNarration = () =>
+    [...(task.thread ?? [])]
+      .reverse()
+      .filter((t) => t.role === "agent")
+      .map((t) => extractNarration(t.text))
+      .find(Boolean) ?? null;
+  const narration = plan.recording ? null : (extractNarration(answer) ?? (plan.voice ? lastNarration() : null));
+  if (plan.recording && voice) {
+    const clip = uploads.bytes(plan.recording);
+    if (clip) {
+      let timed = recordingWords.get(plan.recording);
+      if (!timed) {
+        push("  timing the words of your recording…\n");
+        const out = await voice.words(clip, undefined, signal);
+        if ("error" in out) push(`  [Couldn't time the recording's words: ${out.error}]\n`);
+        else recordingWords.set(plan.recording, (timed = { words: out.words, seconds: out.seconds }));
+      }
+      files.push({ name: "voice.wav", base64: clip.toString("base64") });
+      audio = "voice.wav";
+      words = timed?.words ?? [];
+      seconds = audioSeconds(plan.recording) || timed?.seconds || 0;
+      voiceNote = "your recording";
+    }
+  } else if (narration && voice) {
+    const { voice: who, speed } = sceneVoice(scene.code, brand.voice);
+    push(`  speaking the narration (${KNOWN_VOICES[who]?.split(" (")[0] ?? who})…\n`);
+    const out = await voice.speak(narration, who, speed, signal);
+    if ("error" in out) push(`  [No voiceover: ${out.error}]\n`);
+    else {
+      files.push({ name: "voice.wav", base64: out.wav.toString("base64") });
+      audio = "voice.wav";
+      words = out.words;
+      seconds = out.seconds;
+      voiceNote = `voiceover ${Math.round(out.seconds)} s`;
+    }
+  } else if (narration && !voice) push("  [The answer has narration, but no voice service is set up (VOICE_URL), so the video is silent.]\n");
+
+  if (seconds > 0) {
+    // At least as long as the voiceover, plus a breath at the end
+    const need = Math.ceil((seconds + 0.6) * scene.fps);
+    const max = Math.floor(VIDEO_MAX_SECONDS * scene.fps);
+    if (need > max) push(`  [The voiceover is ${Math.round(seconds)} s, longer than the ${VIDEO_MAX_SECONDS} s limit (VIDEO_MAX_SECONDS); the end is cut off.]\n`);
+    scene.durationInFrames = Math.min(max, Math.max(scene.durationInFrames, need));
+  }
+
+  // Assets: the ones that match, plus the brand logo and font
+  const chosen = [...plan.picked, ...assets.brandAssets().filter((b) => !plan.picked.some((p) => p.id === b.id))];
+  const assetProps: Record<string, { file: string; kind: string; name: string; seconds?: number }> = {};
+  let music: { file: string; beats: number[]; tempo: number | null } | null = null;
+  for (const a of chosen) {
+    const buf = assets.bytes(a.id);
+    if (!buf) continue;
+    files.push({ name: publicName(a), base64: buf.toString("base64") });
+    assetProps[a.id] = { file: publicName(a), kind: a.kind, name: a.name, seconds: a.seconds };
+    if (a.role === "music" && !music) {
+      let current = a;
+      if (!a.beats && voice) {
+        const found = await voice.beats(buf);
+        if (!("error" in found)) current = assets.update(a.id, { tempo: found.tempo, beats: found.beats, seconds: a.seconds ?? found.seconds }) ?? a;
+      }
+      music = { file: publicName(a), beats: current.beats ?? [], tempo: current.tempo ?? null };
+    }
+  }
+  const captions = plan.captions && words.length > 0;
+  return {
+    props: {
+      words,
+      audio,
+      music,
+      assets: assetProps,
+      brand: {
+        name: brand.name,
+        tagline: brand.tagline,
+        primary: brand.primary,
+        secondary: brand.secondary,
+        accent: brand.accent,
+        background: brand.background,
+        text: brand.text,
+        font: brand.font === "brand" && brand.fontAsset ? "brand" : brand.font === "brand" ? "sans-serif" : brand.font,
+        logo: brand.logo,
+      },
+      captions: { auto: captions, style: brand.captionStyle, position: "bottom" },
+    },
+    files,
+    assetIds: chosen.map((a) => a.id),
+    assetCount: plan.picked.length,
+    voiceNote,
+    captions,
+  };
 }
 
 /** Turns a card's answer into a PDF report and adds it to the card's files. */
@@ -1685,6 +1863,7 @@ app.get("/api/system", async (_req: Request, res: Response) => {
     obsidian: Boolean(OBSIDIAN_VAULT),
     browser: Boolean(BROWSER_CDP_URL),
     video: Boolean(video),
+    voice: Boolean(voice),
     memories: memory.list().length,
     lastModel: lastModelRef,
     notices: notices.list().length,
@@ -1794,6 +1973,122 @@ app.post("/api/tasks/:id/video", requireToken, async (req, res) => {
     return res.status(422).json({ error: why || "The video couldn't be rendered" });
   }
   res.json({ files: task.files });
+});
+
+// --- Asset dictionary, brand and voices (for videos) --------------------------
+
+/** Sends bytes, answering byte-range requests so audio and video can seek. */
+function sendBytes(req: Request, res: Response, buf: Buffer, type: string) {
+  res.setHeader("Content-Type", type);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Accept-Ranges", "bytes");
+  const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ""));
+  if (range && (range[1] || range[2])) {
+    const start = range[1] ? Number(range[1]) : Math.max(0, buf.length - Number(range[2]));
+    const end = Math.min(range[1] && range[2] ? Number(range[2]) : buf.length - 1, buf.length - 1);
+    if (start > end || start >= buf.length) {
+      res.setHeader("Content-Range", `bytes */${buf.length}`);
+      return res.status(416).end();
+    }
+    res.status(206);
+    res.setHeader("Content-Range", `bytes ${start}-${end}/${buf.length}`);
+    res.setHeader("Content-Length", String(end - start + 1));
+    return res.end(buf.subarray(start, end + 1));
+  }
+  res.setHeader("Content-Length", String(buf.length));
+  res.end(buf);
+}
+
+const beatJobs = new Set<string>();
+/** Finds a music asset's beats with the voice service (in the background). */
+async function findBeats(id: string): Promise<string | null> {
+  const buf = assets.bytes(id);
+  if (!voice || !buf) return "No voice service is set up (VOICE_URL)";
+  if (beatJobs.has(id)) return null;
+  beatJobs.add(id);
+  try {
+    const out = await voice.beats(buf);
+    if ("error" in out) return out.error;
+    const a = assets.get(id);
+    assets.update(id, { tempo: out.tempo, beats: out.beats, seconds: a?.seconds ?? out.seconds });
+    return null;
+  } finally {
+    beatJobs.delete(id);
+  }
+}
+
+app.get("/api/assets", async (_req, res) => {
+  const h = voice ? await voice.health() : null;
+  const ids = h?.voices?.length ? h.voices : Object.keys(KNOWN_VOICES);
+  res.json({
+    assets: assets.list(),
+    brand: assets.brand(),
+    fonts: SYSTEM_FONTS,
+    voices: ids.map((id) => ({ id, label: KNOWN_VOICES[id] ?? id })),
+    voice: !voice ? "off" : !h ? "down" : h.ready ? (h.error ? "partial" : "ready") : "loading",
+    voiceError: h?.error ?? null,
+    whisper: h?.whisper ?? null,
+  });
+});
+
+app.post("/api/assets", requireToken, (req, res) => {
+  const parsed = AssetUploadSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  const out = assets.add(parsed.data);
+  if ("error" in out) return res.status(400).json(out);
+  if (out.role === "music" && voice) void findBeats(out.id).catch(() => {});
+  res.json(out);
+});
+
+app.patch("/api/assets/:id", requireToken, (req, res) => {
+  const parsed = AssetPatchSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  const out = assets.update(String(req.params.id), parsed.data);
+  if (!out) return res.status(404).json({ error: "Asset not found" });
+  res.json(out);
+});
+
+app.delete("/api/assets/:id", requireToken, (req, res) => {
+  if (!assets.remove(String(req.params.id))) return res.status(404).json({ error: "Asset not found" });
+  res.json({ ok: true, brand: assets.brand() });
+});
+
+app.get("/api/assets/:id/file", (req, res) => {
+  const a = assets.get(String(req.params.id));
+  const buf = a ? assets.bytes(a.id) : null;
+  if (!a || !buf) return res.status(404).json({ error: "Asset not found" });
+  // An SVG opened on its own can't run scripts here
+  res.setHeader("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; media-src 'self'; sandbox");
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  sendBytes(req, res, buf, a.mime);
+});
+
+app.post("/api/assets/:id/beats", requireToken, async (req, res) => {
+  const a = assets.get(String(req.params.id));
+  if (!a) return res.status(404).json({ error: "Asset not found" });
+  if (a.kind !== "audio") return res.status(400).json({ error: "Only music has beats" });
+  const err = await findBeats(a.id);
+  if (err) return res.status(400).json({ error: err });
+  res.json(assets.get(a.id));
+});
+
+app.put("/api/brand", requireToken, (req, res) => {
+  const out = assets.setBrand(req.body);
+  if ("error" in out) return res.status(400).json(out);
+  res.json(out);
+});
+
+// Try a voice: speaks a short line and returns the WAV
+app.post("/api/voice/preview", requireToken, async (req, res) => {
+  if (!voice) return res.status(400).json({ error: "No voice service is set up (VOICE_URL)" });
+  const body = (req.body ?? {}) as { text?: unknown; voice?: unknown; speed?: unknown };
+  const text = (typeof body.text === "string" && body.text.trim() ? body.text.trim() : "Hi! This is how I'll sound in your videos.").slice(0, 300);
+  const who = typeof body.voice === "string" && /^[a-z]{2}_[a-z0-9]+$/.test(body.voice) ? body.voice : assets.brand().voice;
+  const speed = Math.min(1.6, Math.max(0.6, Number(body.speed) || 1));
+  const out = await voice.speak(text, who, speed, AbortSignal.timeout(120_000));
+  if ("error" in out) return res.status(502).json(out);
+  res.setHeader("X-Voice", out.voice);
+  sendBytes(req, res, out.wav, "audio/wav");
 });
 
 app.post("/api/tasks/:id/pdf", requireToken, async (req, res) => {
@@ -2277,6 +2572,11 @@ app.listen(PORT, HOST, () => {
   scheduler.start();
   const active = scheduler.list().filter((r) => r.enabled).length;
   console.log(`Routines: ${active} active (time zone ${ROUTINE_TZ})`);
+  if (voice)
+    void voice.health().then((h) =>
+      console.log(h?.ok ? `Voice: ${h.voices.length} voices, Whisper ${h.whisper ?? "off"}${h.error ? ` (${h.error})` : ""} at ${VOICE_URL}` : `Voice: the voice service at ${VOICE_URL} isn't answering yet (it may still be building)`),
+    );
+  console.log(`Assets: ${assets.list().length} in the dictionary${assets.branded() ? `, brand "${assets.brand().name || "set"}"` : ""}`);
   if (video)
     void video.health().then((h) =>
       console.log(h?.ok ? `Videos: Remotion ${h.remotion} ready at ${VIDEO_RENDER_URL}` : `Videos: the video service at ${VIDEO_RENDER_URL} isn't answering yet (it may still be building)`),
