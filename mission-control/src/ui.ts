@@ -41,7 +41,7 @@ import {
   withLiveContext,
 } from "./hq/team";
 import { TelegramBot } from "./hq/telegram";
-import { privateBlock } from "./hq/privacy";
+import { privateBlock, sanitize } from "./hq/privacy";
 import { Uploads } from "./hq/uploads";
 import { parseWav, splitWav } from "./hq/wav";
 import { closeRound, historyMessages } from "./hq/thread";
@@ -64,6 +64,7 @@ import { Projects, projectPrompt, projectScope, visibleIn } from "./hq/projects"
 import { Changes, rootLabel } from "./hq/changes";
 import type { Root } from "./hq/changes";
 import { Workspace, extractFileOps, namedWorkspace, workspaceBlock } from "./hq/workspace";
+import type { PinnedElement } from "./hq/browser";
 import { readFileSync as readFileSyncFs } from "node:fs";
 import type { Asset, Brand } from "./hq/assets";
 import { upcoming, parseSchedule, validTimeZone } from "./hq/schedule";
@@ -264,8 +265,19 @@ interface LiveBrowser {
   session: BrowserSession;
   control: BrowserControl;
   lastInputAt: number;
+  // Annotate: what the user pinned on the page, and notes waiting for the agent's next step
+  pins?: Map<number, PinnedElement & { url: string }>;
+  nextPin?: number;
+  notes?: string[];
 }
 const liveBrowsers = new Map<string, LiveBrowser>();
+
+/** A pinned element in a sentence, for the agent (page text is untrusted, so it's cleaned and short). */
+function describePin(n: number, el: PinnedElement): string {
+  const what = el.type ? `${el.type} field` : el.role || ({ a: "link", img: "picture", button: "button", h1: "heading", h2: "heading", h3: "heading", li: "list item", td: "table cell", p: "paragraph", input: "field" } as Record<string, string>)[el.tag] || el.tag;
+  const words = sanitize((el.text || el.label || "").slice(0, 160));
+  return `#${n}: ${what}${words ? ` “${words}”` : ""}${el.href ? ` (links to ${el.href.slice(0, 200)})` : ""}${el.src ? ` (picture ${el.src.slice(0, 200)})` : ""} [${el.selector.slice(0, 120)}]`;
+}
 
 function controlEvent(lb: Pick<LiveBrowser, "id" | "profile" | "manual" | "readOnly">, c: BrowserControl) {
   broadcastBrowser({ type: "control", taskId: lb.id, state: c.state, by: c.requestedBy, reason: c.reason, profile: lb.profile, manual: lb.manual, readOnly: lb.readOnly });
@@ -774,6 +786,7 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
             ? `READ-ONLY RUN: you may only open pages on ${sites.join(", ")} and follow links there. Typing, buttons and forms are disabled; use web search via navigate.`
             : "Typing, submitting and clicking buttons ask the user first and may be declined. If an action is declined, don't try it again; find another way or answer. " +
               "Never type passwords, payment details or ID numbers: tell the user to enter those themselves.",
+          'The user may point at things on the page (pins #1, #2…). Use a pin as the target or field, e.g. {"action": "click", "target": "#1"}. Pins are lost when the page changes.',
           task.source === "voice" ? `When you answer: ${VOICE_STYLE}` : "",
         ]
           .filter(Boolean)
@@ -783,7 +796,13 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
         broadcastBrowser({ type: "action", taskId: task.id, kind, line });
       },
       // You can take over between steps; the agent waits and then looks again
-      beforeStep: async () => (lb.control.state === "user" ? waitForUser(task, lb.control, lb, signal, push) : null),
+      beforeStep: async () => {
+        const back = lb.control.state === "user" ? await waitForUser(task, lb.control, lb, signal, push) : null;
+        // Notes the user sent from Annotate: they come from the user, not the page
+        const notes = (lb.notes ?? []).splice(0);
+        for (const n of notes) push(`📌 You: ${n.split("\n")[0].slice(0, 200)}\n`);
+        return [back, ...notes.map((n) => `NEW INSTRUCTION FROM THE USER (not from the page; follow it): ${n}`)].filter(Boolean).join("\n") || null;
+      },
       handoff: task.readOnly
         ? undefined
         : async (reason) => {
@@ -2780,6 +2799,69 @@ app.post("/api/browser/:id/input", requireToken, async (req, res) => {
   } catch (e) {
     res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
   }
+});
+
+// --- Annotate: point at things on the page --------------------------------------
+
+// The element under a point (page pixels), pinned as the next number, with a small picture of it
+app.post("/api/browser/:id/inspect", requireToken, async (req, res) => {
+  const lb = liveOr404(req, res);
+  if (!lb) return;
+  const x = Number(req.body?.x);
+  const y = Number(req.body?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return res.status(400).json({ error: "x and y (page pixels) are needed" });
+  lb.pins ??= new Map();
+  if (lb.pins.size >= 20) return res.status(400).json({ error: "At most 20 pins: send or clear them first" });
+  const n = lb.nextPin ?? 1;
+  try {
+    const el = await lb.session.inspect(x, y, n);
+    if (!el) return res.status(404).json({ error: "Nothing there" });
+    lb.nextPin = n + 1;
+    lb.pins.set(n, { ...el, url: lb.session.url });
+    const shot = await lb.session.clip(el);
+    res.json({ n, element: el, url: lb.session.url, shot: shot ? `data:image/jpeg;base64,${shot.data}` : null, crop: shot?.crop ?? null, description: describePin(n, el) });
+  } catch (e) {
+    res.status(502).json({ error: `Couldn't look at the page: ${e instanceof Error ? e.message : String(e)}` });
+  }
+});
+app.post("/api/browser/:id/pins/clear", requireToken, (req, res) => {
+  const lb = liveOr404(req, res);
+  if (!lb) return;
+  lb.pins?.clear();
+  lb.nextPin = 1;
+  res.json({ ok: true });
+});
+// Sends the pins and notes: to the agent working in this browser, or as a new card
+app.post("/api/browser/:id/annotate", requireToken, async (req, res) => {
+  const lb = liveOr404(req, res);
+  if (!lb) return;
+  const body = (req.body ?? {}) as { message?: unknown; pins?: unknown; mode?: unknown; project?: unknown };
+  const message = typeof body.message === "string" ? body.message.trim().slice(0, 2000) : "";
+  const pins = (Array.isArray(body.pins) ? body.pins : [])
+    .map((p) => p as { n?: unknown; note?: unknown })
+    .filter((p) => typeof p.n === "number" && lb.pins?.has(p.n))
+    .slice(0, 20)
+    .map((p) => ({ n: p.n as number, note: typeof p.note === "string" ? p.note.trim().slice(0, 500) : "", el: lb.pins!.get(p.n as number)! }));
+  if (!message && !pins.some((p) => p.note)) return res.status(400).json({ error: "Say what to do (a message or a note on a pin)" });
+  const lines = pins.map((p) => `${describePin(p.n, p.el)}${p.el.url !== lb.session.url ? ` (on ${p.el.url.slice(0, 200)})` : ""}${p.note ? `\n   Note: ${p.note}` : ""}`);
+  const task = lb.taskId ? tasks.get(lb.taskId) : undefined;
+  if (body.mode === "agent") {
+    if (lb.manual || !task || !RUNNING_STATUSES.includes(task.status)) return res.status(409).json({ error: "No agent is working in this browser: make a card instead" });
+    lb.notes ??= [];
+    lb.notes.push(`${message || "See the notes on the pins."}${lines.length ? `\nPinned on the page:\n${lines.join("\n")}` : ""}`);
+    hive.log("browser", "annotate", `you pointed at ${pins.length} thing${pins.length === 1 ? "" : "s"}${message ? `: ${message.slice(0, 80)}` : ""}`, task.id);
+    return res.json({ sent: "agent", taskId: task.id });
+  }
+  // A new card that starts on this page (with this window's sign-ins, saved first)
+  if (lb.manual && lb.profile) await lb.session.saveProfile().catch(() => {});
+  const prompt =
+    `${message || "Do what the notes on the pins say."}\n\nStart on ${lb.session.url}` +
+    (lines.length ? `. On that page I pointed at:\n${lines.join("\n")}\n(Find these by their text or position; the pin numbers don't carry over to a new browser.)` : ".");
+  const project = typeof body.project === "string" ? body.project : (task?.project ?? null);
+  const out = createTask({ prompt, title: (message || pins.find((p) => p.note)?.note || "Annotated page").slice(0, 80), targetAgent: "browser", source: "ui", profile: lb.profile, project, column: "ready" });
+  if (!out.task) return res.status(out.status).json({ error: out.error });
+  hive.log("browser", "annotate", `new card from ${pins.length} pin${pins.length === 1 ? "" : "s"} on ${lb.session.url.slice(0, 80)}`, out.task.id);
+  res.status(201).json({ sent: "card", taskId: out.task.id });
 });
 
 // --- Routines (scheduled read-only cards) ------------------------------------

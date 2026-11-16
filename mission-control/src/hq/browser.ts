@@ -192,6 +192,64 @@ const FIND_ELEMENT = `(kind, wanted) => {
   return label(best).slice(0, 80) || best.tagName.toLowerCase();
 }`;
 
+// Runs in the page: the element under a point, kept as pin n (window.__mcPins) so the
+// agent can act on exactly what the user pointed at. Field values are never read.
+const INSPECT = `(x, y, n) => {
+  const hit = document.elementFromPoint(x, y);
+  if (!hit) return null;
+  const el = hit.closest('a[href], button, input, select, textarea, label, summary, [role=button], [role=link], [role=tab], [role=menuitem], [role=checkbox], [role=option], [contenteditable="true"], img, video, svg, h1, h2, h3, h4, h5, h6, li, td, th, p, figure, blockquote, pre') || hit;
+  (window.__mcPins = window.__mcPins || {})[n] = el;
+  const r = el.getBoundingClientRect();
+  const tag = el.tagName.toLowerCase();
+  const field = /^(input|textarea|select)$/.test(tag) || el.isContentEditable;
+  const clean = (s, max) => (s || "").replace(/\\s+/g, " ").trim().slice(0, max);
+  const path = [];
+  for (let e = el; e && e.nodeType === 1 && path.length < 4; e = e.parentElement) {
+    if (e.id && /^[A-Za-z][\\w-]*$/.test(e.id)) { path.unshift("#" + e.id); break; }
+    const same = e.parentElement ? [...e.parentElement.children].filter((c) => c.tagName === e.tagName) : [];
+    path.unshift(e.tagName.toLowerCase() + (same.length > 1 ? ":nth-of-type(" + (same.indexOf(e) + 1) + ")" : ""));
+  }
+  const labelFor = el.id ? document.querySelector('label[for="' + el.id + '"]') : null;
+  return {
+    tag,
+    role: el.getAttribute("role") || "",
+    type: field ? (el.getAttribute("type") || (tag === "input" ? "text" : tag)).toLowerCase() : "",
+    text: field ? "" : clean(el.innerText || el.textContent, 240),
+    label: clean(el.getAttribute("aria-label") || el.getAttribute("placeholder") || (labelFor && labelFor.innerText) || el.closest("label")?.innerText || el.getAttribute("title") || el.getAttribute("alt") || el.getAttribute("name") || "", 120),
+    href: (el.closest("a[href]") || {}).href || "",
+    src: tag === "img" ? (el.currentSrc || el.src || "") : "",
+    selector: path.join(" > "),
+    rect: { x: r.left, y: r.top, w: r.width, h: r.height },
+    scroll: { x: window.scrollX, y: window.scrollY },
+  };
+}`;
+
+// Makes pin n the current target, if it's still on the page and fits the action
+const PIN_TARGET = `(kind, n) => {
+  const el = (window.__mcPins || {})[n];
+  if (!el || !el.isConnected) return null;
+  const tag = el.tagName.toLowerCase();
+  if (kind === "field" && !(/^(input|textarea|select)$/.test(tag) || el.isContentEditable)) return null;
+  if (kind === "link" && !el.closest("a[href]")) return null;
+  window.__mcTarget = kind === "link" ? el.closest("a[href]") : el;
+  el.scrollIntoView({ block: "center" });
+  const isField = /^(input|textarea|select)$/.test(tag) || el.isContentEditable;
+  return ((isField ? "" : el.innerText) || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.getAttribute("name") || tag).replace(/\\s+/g, " ").trim().slice(0, 80) || tag;
+}`;
+
+export interface PinnedElement {
+  tag: string;
+  role: string;
+  type: string;
+  text: string;
+  label: string;
+  href: string;
+  src: string;
+  selector: string;
+  rect: { x: number; y: number; w: number; h: number };
+  scroll: { x: number; y: number };
+}
+
 // What kind of thing the current target is: a plain link, a form submit, a search
 const TARGET_INFO = `(() => {
   const el = window.__mcTarget;
@@ -412,9 +470,48 @@ export class BrowserSession {
     return state;
   }
 
+  /** Finds the element for a description, or a pin the user placed ("#2"). */
+  private async find(kind: "click" | "link" | "field", wanted: string): Promise<string | null> {
+    const pin = /^#(\d{1,3})$/.exec(wanted.trim());
+    if (pin) {
+      const found = await this.evaluate<string | null>(`(${PIN_TARGET})(${JSON.stringify(kind)}, ${Number(pin[1])})`);
+      return found ? `${found} (pin #${pin[1]})` : null;
+    }
+    return this.evaluate<string | null>(`(${FIND_ELEMENT})(${JSON.stringify(kind)}, ${JSON.stringify(wanted)})`);
+  }
+
+  /** The element under a point (page pixels), kept as pin n. Reads no field values. */
+  async inspect(x: number, y: number, n: number): Promise<PinnedElement | null> {
+    const px = Math.max(0, Math.min(VIEWPORT.width - 1, Math.round(x)));
+    const py = Math.max(0, Math.min(VIEWPORT.height - 1, Math.round(y)));
+    return this.evaluate<PinnedElement | null>(`(${INSPECT})(${px}, ${py}, ${Math.max(1, Math.min(999, Math.round(n)))})`);
+  }
+
+  /**
+   * A JPEG of the whole view (base64) and the area around an element in it (view
+   * pixels). Capturing the whole view, not a clip, keeps the live screencast intact:
+   * a clipped capture briefly resizes what Chrome draws.
+   */
+  async clip(el: PinnedElement, pad = 24): Promise<{ data: string; crop: { x: number; y: number; w: number; h: number } } | undefined> {
+    const x = Math.max(0, Math.round(el.rect.x - pad));
+    const y = Math.max(0, Math.round(el.rect.y - pad));
+    const crop = {
+      x: Math.min(x, VIEWPORT.width - 80),
+      y: Math.min(y, VIEWPORT.height - 40),
+      w: Math.round(Math.max(80, Math.min(VIEWPORT.width - x, el.rect.w + pad * 2))),
+      h: Math.round(Math.max(40, Math.min(VIEWPORT.height - y, el.rect.h + pad * 2))),
+    };
+    try {
+      const { data } = await this.cdp.send("Page.captureScreenshot", { format: "jpeg", quality: 60 }, this.sessionId);
+      return { data: data as string, crop };
+    } catch {
+      return undefined;
+    }
+  }
+
   async click(target: string): Promise<string> {
     // Read-only runs may only follow links to allowed sites: no buttons, no "confirm" or form controls
-    const found = await this.evaluate<string | null>(`(${FIND_ELEMENT})(${JSON.stringify(this.readOnly ? "link" : "click")}, ${JSON.stringify(target)})`);
+    const found = await this.find(this.readOnly ? "link" : "click", target);
     if (!found) throw new Error(this.readOnly ? `No link matches "${target}" (read-only runs can only follow links)` : `Nothing clickable matches "${target}"`);
     if (this.readOnly) {
       const raw = await this.evaluate<string>("window.__mcTarget.href || ''");
@@ -448,8 +545,8 @@ export class BrowserSession {
 
   async type(field: string, text: string, submit: boolean): Promise<string> {
     if (this.readOnly) throw new Error("Typing is disabled in read-only runs");
-    const found = await this.evaluate<string | null>(`(${FIND_ELEMENT})("field", ${JSON.stringify(field)})`);
-    if (!found) throw new Error(`No text field matches "${field}"`);
+    const found = await this.find("field", field);
+    if (!found) throw new Error(/^#\d+$/.test(field.trim()) ? `Pin ${field.trim()} isn't a text field on this page (pins are lost when the page changes)` : `No text field matches "${field}"`);
     const info = await this.evaluate<{ type: string; autocomplete: string; name: string; label: string; search: boolean; method: string }>(FIELD_INFO);
     if (isSensitiveField(info))
       throw new Error(`"${found}" looks like a password, payment, ID or one-time-code field. Mission Control never types into those: the user must enter it themselves.`);

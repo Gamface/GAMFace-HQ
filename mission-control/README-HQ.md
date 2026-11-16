@@ -155,6 +155,30 @@ into an MP4 that appears on the card (🎬): play it there or download it.
 API: `POST /api/tasks/:id/video` renders the scene in a finished card's answer. The video
 service itself: `POST /render`, `GET /jobs/:id`, `GET /jobs/:id/video`, `GET /health`.
 
+## Annotate (point at things in the browser)
+
+In the Console's **Browser** tab, press **📌 Annotate** and click things on the live page:
+each click pins the element under it (numbered, outlined, with a small picture). Add a
+note to any pin ("click this", "use this price", "what does this mean?") and a message,
+then:
+
+- **Send to the agent** (while a card's agent is browsing): it reads your message and pins
+  before its next step, and can act on exactly what you pointed at by using the pin as
+  its target (`"target": "#1"`). Clicks and typing still go through approvals, and
+  password, payment and ID fields are still refused.
+- **Make a card**: a new browser card that starts on the same page with your pins
+  described, and the same profile in a profile window (its sign-ins are saved first;
+  the card takes the profile over, so your window closes when it starts).
+
+Pins never read what's typed in fields. They're lost when the page changes (the agent is
+told so). Esc or 📌 leaves Annotate. Clicks in the Browser tab (Annotate and Take over)
+are now measured on the picture itself, so they land right however the panel is shaped.
+(An idea from Agent Zero.)
+
+API: `POST /api/browser/:id/inspect {x, y}` (page pixels, 1280×800),
+`POST /api/browser/:id/annotate {message, pins: [{n, note}], mode: "agent" | "card"}`,
+`POST /api/browser/:id/pins/clear`.
+
 ## Model presets
 
 Saved team setups: which model (and fallback) each agent uses, switched in one go.

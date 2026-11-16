@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getJson, send } from "../api";
 
 // Live view of the browser agent's Chrome: the screen (a JPEG screencast), the
@@ -37,6 +37,149 @@ interface Profile {
   sites: string[];
   savedAt?: number;
   open: boolean;
+}
+
+interface Pin {
+  n: number;
+  description: string;
+  shot: string | null;
+  // The element's area in the shot (view pixels)
+  crop: { x: number; y: number; w: number; h: number } | null;
+  url: string;
+  note: string;
+  // Where it was clicked and its box, as fractions of the view (for the markers)
+  at: { x: number; y: number };
+  box: { x: number; y: number; w: number; h: number };
+}
+
+const VIEW_W = 1280;
+const VIEW_H = 800;
+
+/** Where the picture is actually drawn inside an object-contain <img> (it's letterboxed when the box has another shape). */
+function drawnRect(img: HTMLImageElement): { left: number; top: number; width: number; height: number } {
+  const r = img.getBoundingClientRect();
+  const nw = img.naturalWidth || VIEW_W;
+  const nh = img.naturalHeight || VIEW_H;
+  const scale = Math.min(r.width / nw, r.height / nh);
+  const width = nw * scale;
+  const height = nh * scale;
+  return { left: r.left + (r.width - width) / 2, top: r.top + (r.height - height) / 2, width, height };
+}
+
+/** The pinned element, cut out of a picture of the whole view. */
+function PinThumb({ shot, crop, n }: { shot: string; crop: { x: number; y: number; w: number; h: number }; n: number }) {
+  const h = 40;
+  const scale = Math.min(h / crop.h, 112 / crop.w);
+  return (
+    <div className="relative overflow-hidden rounded border border-slate-700 bg-white shrink-0" style={{ width: crop.w * scale, height: crop.h * scale }}>
+      <img src={shot} alt={`Pin ${n}`} draggable={false} style={{ position: "absolute", maxWidth: "none", width: VIEW_W * scale, height: VIEW_H * scale, left: -crop.x * scale, top: -crop.y * scale }} />
+    </div>
+  );
+}
+
+/** Annotate: the pins with their notes, and where to send them. */
+function PinsPanel({
+  pins,
+  setPins,
+  canTellAgent,
+  sessionId,
+  onDone,
+}: {
+  pins: Pin[];
+  setPins: (f: (p: Pin[]) => Pin[]) => void;
+  canTellAgent: boolean;
+  sessionId: string;
+  onDone: (text: string) => void;
+}) {
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const sendTo = async (mode: "agent" | "card") => {
+    setBusy(true);
+    setError(null);
+    try {
+      const out = await send<{ sent: string; taskId: string }>("POST", `/api/browser/${sessionId}/annotate`, {
+        message,
+        mode,
+        pins: pins.map((p) => ({ n: p.n, note: p.note })),
+        project: (() => {
+          try {
+            const v = localStorage.getItem("mc.project");
+            return v && v !== "all" && v !== "general" ? v : undefined;
+          } catch {
+            return undefined;
+          }
+        })(),
+      });
+      await send("POST", `/api/browser/${sessionId}/pins/clear`, {});
+      setPins(() => []);
+      setMessage("");
+      onDone(out.sent === "agent" ? "Sent to the agent: it reads your notes before its next step." : "Made a card: it's in Ready on the board.");
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="border-t border-slate-800 bg-slate-950/80 p-2 space-y-2 text-xs max-h-72 overflow-y-auto">
+      {pins.length === 0 ? (
+        <p className="text-slate-500">Click things on the page to pin them, then say what to do with them.</p>
+      ) : (
+        <ul className="space-y-1.5">
+          {pins.map((p) => (
+            <li key={p.n} className="flex gap-2 items-start">
+              <span className="mt-1 h-5 w-5 shrink-0 rounded-full bg-amber-500 text-slate-950 font-bold flex items-center justify-center text-[11px]">{p.n}</span>
+              {p.shot && p.crop && <PinThumb shot={p.shot} crop={p.crop} n={p.n} />}
+              <div className="flex-1 min-w-0 space-y-1">
+                <div className="text-slate-400 truncate" title={p.description}>
+                  {p.description.replace(/^#\d+: /, "").replace(/ \[[^\]]*\]$/, "")}
+                </div>
+                <input
+                  value={p.note}
+                  onChange={(e) => setPins((all) => all.map((x) => (x.n === p.n ? { ...x, note: e.target.value } : x)))}
+                  placeholder="Note (optional): “click this”, “what does this mean?”, “use this price”…"
+                  maxLength={500}
+                  className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200"
+                />
+              </div>
+              <button onClick={() => setPins((all) => all.filter((x) => x.n !== p.n))} className="text-slate-500 hover:text-rose-300 px-1" aria-label={`Remove pin ${p.n}`}>
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <textarea
+        value={message}
+        onChange={(e) => setMessage(e.target.value)}
+        rows={2}
+        maxLength={2000}
+        placeholder={canTellAgent ? "What should the agent do? (it can use #1, #2… as targets)" : "What should be done here? A new card starts on this page."}
+        className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200"
+      />
+      {error && <p className="text-rose-300">{error}</p>}
+      <div className="flex gap-2 justify-end">
+        <button
+          onClick={() => void sendTo("card")}
+          disabled={busy || (!message.trim() && !pins.some((p) => p.note.trim()))}
+          className="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-100 disabled:opacity-40"
+          title="A new browser card that starts on this page"
+        >
+          Make a card
+        </button>
+        {canTellAgent && (
+          <button
+            onClick={() => void sendTo("agent")}
+            disabled={busy || (!message.trim() && !pins.some((p) => p.note.trim()))}
+            className="px-3 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white disabled:opacity-40"
+          >
+            Send to the agent
+          </button>
+        )}
+      </div>
+    </div>
+  );
 }
 
 const KEYS = new Set(["Enter", "Backspace", "Tab", "Escape", "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Delete", "Home", "End", "PageUp", "PageDown"]);
@@ -159,6 +302,11 @@ export default function BrowserPane({
   const [address, setAddress] = useState("");
   const [editingAddress, setEditingAddress] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [annotate, setAnnotate] = useState(false);
+  const [pins, setPins] = useState<Pin[]>([]);
+  const [notice, setNotice] = useState<string | null>(null);
+  // The drawn picture inside the <img>, relative to it, for the pin markers
+  const [layer, setLayer] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const keysRef = useRef<HTMLDivElement>(null);
@@ -218,6 +366,50 @@ export default function BrowserPane({
 
   const s = sessions.find((x) => x.id === current) ?? null;
   const mine = s?.control === "user";
+
+  // Pins belong to one browser: switching browsers starts afresh
+  useEffect(() => {
+    setPins([]);
+  }, [current]);
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 6000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  // Where the drawn picture sits, for the markers: after every layout change and resize
+  const measure = () => {
+    const img = imgRef.current;
+    if (!img) return;
+    const box = (img.parentElement ?? img).getBoundingClientRect();
+    const d = drawnRect(img);
+    const next = { left: d.left - box.left, top: d.top - box.top, width: d.width, height: d.height };
+    setLayer((prev) => (prev && Math.abs(prev.left - next.left) < 0.5 && Math.abs(prev.top - next.top) < 0.5 && Math.abs(prev.width - next.width) < 0.5 && Math.abs(prev.height - next.height) < 0.5 ? prev : next));
+  };
+  useLayoutEffect(measure);
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => measure());
+    ro.observe(img);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [Boolean(frame), showProfiles]);
+
+  const pinAt = async (fx: number, fy: number) => {
+    if (!s) return;
+    setError(null);
+    try {
+      const out = await send<{ n: number; description: string; shot: string | null; crop: Pin["crop"]; url: string; element: { rect: { x: number; y: number; w: number; h: number } } }>("POST", `/api/browser/${s.id}/inspect`, {
+        x: fx * VIEW_W,
+        y: fy * VIEW_H,
+      });
+      const r = out.element.rect;
+      setPins((all) => [...all, { n: out.n, description: out.description, shot: out.shot, crop: out.crop, url: out.url, note: "", at: { x: fx, y: fy }, box: { x: r.x / VIEW_W, y: r.y / VIEW_H, w: r.w / VIEW_W, h: r.h / VIEW_H } }]);
+    } catch (e) {
+      setError(errText(e));
+    }
+  };
 
   // Focus the page when you get control, so typing goes to it
   useEffect(() => {
@@ -307,6 +499,15 @@ export default function BrowserPane({
             Close & save
           </button>
         )}
+        {s && (
+          <button
+            onClick={() => setAnnotate((v) => !v)}
+            className={`px-2 py-1 rounded font-sans ${annotate ? "bg-amber-500 text-slate-950" : "bg-slate-800 text-slate-300 hover:bg-slate-700"}`}
+            title="Point at things on the page and say what to do with them"
+          >
+            📌 Annotate{pins.length ? ` (${pins.length})` : ""}
+          </button>
+        )}
         <button onClick={() => setShowProfiles((v) => !v)} className={`px-2 py-1 rounded font-sans ${showProfiles ? "bg-slate-600 text-white" : "bg-slate-800 text-slate-300 hover:bg-slate-700"}`}>
           Profiles
         </button>
@@ -332,6 +533,12 @@ export default function BrowserPane({
           click the page, type, scroll, or enter an address above. Nothing you do here asks for approval.
         </div>
       )}
+      {annotate && (
+        <div className="px-3 py-1.5 bg-amber-950/50 border-b border-amber-700/60 text-[11px] text-amber-100">
+          📌 Annotate: clicks pin things instead of clicking them. {s && !s.manual ? "Send your notes to the agent working here, or make a new card." : "Make a card that starts on this page."} Press Esc or 📌 to stop.
+        </div>
+      )}
+      {notice && <div className="px-3 py-1 text-[11px] text-emerald-300 border-b border-slate-800">{notice}</div>}
       {task && !showProfiles && <div className="px-3 py-1 text-[11px] text-slate-500 truncate border-b border-slate-800">Task: {task}</div>}
       {error && <div className="px-3 py-1 text-[11px] text-rose-300 border-b border-slate-800">{error}</div>}
       {showProfiles ? (
@@ -341,7 +548,11 @@ export default function BrowserPane({
           ref={keysRef}
           tabIndex={0}
           onKeyDown={(e) => {
-            if (!mine || editingAddress) return;
+            if (annotate && e.key === "Escape") {
+              setAnnotate(false);
+              return;
+            }
+            if (annotate || !mine || editingAddress) return;
             if (e.ctrlKey || e.metaKey || e.altKey) return;
             if (KEYS.has(e.key)) {
               e.preventDefault();
@@ -362,26 +573,57 @@ export default function BrowserPane({
           className={`flex-1 min-h-0 flex items-center justify-center bg-black outline-none ${mine ? "ring-2 ring-inset ring-cyan-500" : ""}`}
         >
           {frame ? (
-            <img
-              ref={imgRef}
-              src={frame}
-              alt={title || "Browser view"}
-              draggable={false}
-              onClick={(e) => {
-                if (!mine || !imgRef.current) return;
-                const r = imgRef.current.getBoundingClientRect();
-                const w = imgRef.current.naturalWidth || 1280;
-                const h = imgRef.current.naturalHeight || 800;
-                keysRef.current?.focus();
-                void input({ type: "click", x: ((e.clientX - r.left) * w) / r.width, y: ((e.clientY - r.top) * h) / r.height });
-              }}
-              onWheel={(e) => mine && void input({ type: "scroll", dy: e.deltaY })}
-              className={`max-w-full max-h-full object-contain ${mine ? "cursor-pointer" : ""}`}
-            />
+            <div className="relative max-w-full max-h-full flex">
+              <img
+                ref={imgRef}
+                src={frame}
+                alt={title || "Browser view"}
+                draggable={false}
+                onLoad={() => measure()}
+                onClick={(e) => {
+                  if (!imgRef.current) return;
+                  // Measured on the drawn picture, not the letterboxed box
+                  const r = drawnRect(imgRef.current);
+                  const fx = (e.clientX - r.left) / r.width;
+                  const fy = (e.clientY - r.top) / r.height;
+                  if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return;
+                  keysRef.current?.focus();
+                  if (annotate) return void pinAt(fx, fy);
+                  if (!mine) return;
+                  const w = imgRef.current.naturalWidth || 1280;
+                  const h = imgRef.current.naturalHeight || 800;
+                  void input({ type: "click", x: fx * w, y: fy * h });
+                }}
+                onWheel={(e) => mine && void input({ type: "scroll", dy: e.deltaY })}
+                className={`max-w-full max-h-full object-contain ${annotate ? "cursor-crosshair" : mine ? "cursor-pointer" : ""}`}
+              />
+              {/* Markers for pins on the page being shown, over the drawn picture */}
+              <div className="absolute pointer-events-none" style={layer ? { left: layer.left, top: layer.top, width: layer.width, height: layer.height } : { inset: 0 }}>
+              {pins
+                .filter((p) => p.url === url)
+                .map((p) => (
+                  <div key={p.n}>
+                    <div
+                      className="absolute border-2 border-amber-400 rounded-sm bg-amber-300/10"
+                      style={{ left: `${p.box.x * 100}%`, top: `${p.box.y * 100}%`, width: `${p.box.w * 100}%`, height: `${p.box.h * 100}%` }}
+                    />
+                    <div
+                      className="absolute -translate-x-1/2 -translate-y-1/2 h-5 w-5 rounded-full bg-amber-500 text-slate-950 font-bold text-[11px] flex items-center justify-center shadow-lg ring-2 ring-slate-950"
+                      style={{ left: `${p.box.x * 100}%`, top: `${p.box.y * 100}%` }}
+                    >
+                      {p.n}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           ) : (
             <p className="text-slate-600 italic text-sm font-mono">// Waiting for the browser agent. Ask it to look something up, or open a profile to sign in.</p>
           )}
         </div>
+      )}
+      {(annotate || pins.length > 0) && s && !showProfiles && (
+        <PinsPanel pins={pins} setPins={setPins} canTellAgent={!s.manual && live} sessionId={s.id} onDone={(t) => (setNotice(t), setAnnotate(false))} />
       )}
       <div ref={logRef} className="h-28 overflow-y-auto border-t border-slate-800 bg-slate-950 p-2 font-mono text-[11px] space-y-0.5">
         {actions.length === 0 && <div className="text-slate-600">No actions yet.</div>}
