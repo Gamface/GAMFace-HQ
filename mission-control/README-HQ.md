@@ -363,19 +363,41 @@ Behaviour kept on purpose:
 - **Voice** tasks get team context and memory but never delegate, so Jarvis still gives one short spoken answer.
 - API clients that send no `targetAgent` still default to `planner`. Only the dashboard defaults to `auto`.
 
-## Install
+## Install / update
 
-From the copy in `C:\Users\aldra\Documents\mission-control-src`, back into WSL:
+The code lives in GitHub (`Gamface/GAMFace-HQ`, folder `mission-control`). In WSL:
 
 ```bash
-rsync -a --exclude .env /mnt/c/Users/aldra/Documents/mission-control-src/ ~/sandcastle/ts-harness/
 cd ~/sandcastle/ts-harness
-ollama pull qwen3:4b        # on Windows: the routing/memory model (optional)
-docker compose up -d --force-recreate     # also starts the Chrome container
+git status                      # commit or stash any local edits first
+git remote -v                   # does it point at GAMFace-HQ?
 ```
 
-Add to `.env` as needed: `OLLAMA_FAST_MODEL=qwen3:4b`, `TELEGRAM_BOT_TOKEN`,
-`TELEGRAM_ALLOWED_CHAT_IDS`. For Obsidian, uncomment the two vault lines in `docker-compose.yml`.
+If it does, `git pull`. If not, update it from a clone (your `.env` and `data/` stay as
+they are):
+
+```bash
+git clone https://github.com/Gamface/GAMFace-HQ.git ~/GAMFace-HQ 2>/dev/null || git -C ~/GAMFace-HQ pull
+rsync -a --exclude .env --exclude data --exclude node_modules --exclude .git \
+  ~/GAMFace-HQ/mission-control/ ~/sandcastle/ts-harness/
+```
+
+Then restart. The containers run `npm install` themselves, so new packages (pdf.js)
+arrive on their own:
+
+```bash
+cd ~/sandcastle/ts-harness
+docker compose pull browser               # newer headless Chrome
+docker compose up -d --force-recreate
+docker compose exec harness npm test      # optional: about 100 tests
+```
+
+Without Docker: `npm install`, then `npm start` (and `npm install && npx vite` in `ui/`).
+
+`.env` settings worth adding (all optional; see `.env.example`): `PROFILE_SECRET` before
+you save any sign-ins, `ROUTINE_TZ=America/New_York`, `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_ALLOWED_CHAT_IDS` (approvals and hand-offs on your phone), `OBSIDIAN_VAULT` with
+the vault line in `docker-compose.yml`.
 
 ## New API
 
