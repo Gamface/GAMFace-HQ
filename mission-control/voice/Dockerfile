@@ -24,8 +24,9 @@ EOF
 RUN python -c "import os; from faster_whisper import WhisperModel; WhisperModel(os.environ['VOICE_WHISPER_MODEL'], device='cpu', compute_type='int8', download_root='/models/whisper'); print('Whisper ready')"
 
 COPY timing.py server.py test_timing.py ./
-RUN useradd -m voice && chown -R voice /app
-USER voice
+# "voice" is a Debian system group, so the user has another name
+RUN useradd -m mcvoice && chown -R mcvoice /app
+USER mcvoice
 # No internet at runtime: never try to download
 ENV HF_HUB_OFFLINE=1 PORT=3030 PYTHONUNBUFFERED=1
 EXPOSE 3030
