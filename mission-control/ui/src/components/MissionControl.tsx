@@ -22,6 +22,7 @@ import FilesPage from "./FilesPage";
 import ProjectSwitcher from "./ProjectSwitcher";
 import { useProjects } from "../project";
 import ApprovalsBar from "./ApprovalsBar";
+import OverviewPage from "./OverviewPage";
 
 interface SystemInfo {
   ollama: "up" | "down";
@@ -56,8 +57,9 @@ interface MemoryItem {
 
 type RightTab = "commands" | "hive" | "memory";
 type CenterTab = "output" | "preview" | "browser";
-type View = "console" | "board" | "routines" | "skills" | "assets" | "files" | "team" | "projects";
-const VIEWS: View[] = ["board", "routines", "skills", "assets", "files", "team", "projects"];
+// Overview is the home page (no #); every other view has its own #hash
+type View = "overview" | "console" | "board" | "routines" | "skills" | "assets" | "files" | "team" | "projects";
+const VIEWS: View[] = ["console", "board", "routines", "skills", "assets", "files", "team", "projects"];
 
 const STATUS_STYLES: Record<AgentStatus, string> = {
   idle: "bg-slate-700 text-slate-200",
@@ -66,7 +68,8 @@ const STATUS_STYLES: Record<AgentStatus, string> = {
   routing: "bg-sky-700/80 text-white",
   delegating: "bg-fuchsia-700/80 text-white",
   thinking: "bg-amber-600/80 text-white",
-  streaming: "bg-cyan-600/80 text-white",
+  // Outlined, so a working card never looks like a failed one (solid rose)
+  streaming: "bg-cyan-950 text-cyan-300 ring-1 ring-inset ring-cyan-800",
   executing_tool: "bg-violet-600/80 text-white",
   writing_diff: "bg-violet-600/80 text-white",
   complete: "bg-emerald-600/80 text-white",
@@ -92,9 +95,14 @@ export default function MissionControl() {
   const [targetAgent, setTargetAgent] = useState<RequestedAgent>("auto");
   const [rightTab, setRightTab] = useState<RightTab>("commands");
   const [centerTab, setCenterTab] = useState<CenterTab>("output");
-  const [view, setView] = useState<View>(() => (VIEWS.includes(location.hash.slice(1) as View) ? (location.hash.slice(1) as View) : "console"));
+  const [view, setView] = useState<View>(() => {
+    const h = location.hash.slice(1);
+    // #browser is a link into the Console's Browser tab (handled below)
+    return h === "browser" ? "console" : VIEWS.includes(h as View) ? (h as View) : "overview";
+  });
   useEffect(() => {
-    if (location.hash.slice(1) !== (view === "console" ? "" : view)) history.pushState(null, "", view === "console" ? location.pathname : `#${view}`);
+    if (location.hash.slice(1) === "browser") return;
+    if (location.hash.slice(1) !== (view === "overview" ? "" : view)) history.pushState(null, "", view === "overview" ? location.pathname : `#${view}`);
   }, [view]);
   // Follow the address bar (back/forward, or a pasted #board / #team link)
   useEffect(() => {
@@ -105,10 +113,10 @@ export default function MissionControl() {
         setView("console");
         setCenterTab("browser");
         // Clear it so the same button works next time
-        history.replaceState(null, "", location.pathname);
+        history.replaceState(null, "", `${location.pathname}#console`);
         return;
       }
-      setView(VIEWS.includes(h as View) ? (h as View) : "console");
+      setView(VIEWS.includes(h as View) ? (h as View) : "overview");
     };
     window.addEventListener("hashchange", onHash);
     window.addEventListener("popstate", onHash);
@@ -116,6 +124,13 @@ export default function MissionControl() {
       window.removeEventListener("hashchange", onHash);
       window.removeEventListener("popstate", onHash);
     };
+  }, []);
+  // Opened straight from a #browser link: show the Console's Browser tab
+  useEffect(() => {
+    if (location.hash.slice(1) === "browser") {
+      setCenterTab("browser");
+      history.replaceState(null, "", `${location.pathname}#console`);
+    }
   }, []);
   const [hive, setHive] = useState<HiveEntry[]>([]);
   const [memories, setMemories] = useState<MemoryItem[]>([]);
@@ -208,6 +223,29 @@ export default function MissionControl() {
     }
   };
 
+  /** Dispatch from the Overview: auto-routed, current project; opens the card in the Console. */
+  const quickDispatch = async (text: string): Promise<string | null> => {
+    try {
+      const res = await fetch(`${HARNESS_URL}/api/agent/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ id: crypto.randomUUID(), prompt: text, targetAgent: "auto", source: "ui", project: proj.target }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(typeof body.error === "string" ? body.error : JSON.stringify(body.error));
+      setSelectedId(body.taskId);
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  };
+
+  const openTask = (id: string) => {
+    setSelectedId(id);
+    setCenterTab("output");
+    setView("console");
+  };
+
   const handleCancel = async () => {
     if (!selected) return;
     await fetch(`${HARNESS_URL}/api/agent/${selected.id}/cancel`, { method: "POST", headers: authHeaders() });
@@ -222,14 +260,22 @@ export default function MissionControl() {
       {/* HEADER TILE */}
       <header className="col-span-3 bg-slate-900 border border-slate-800 rounded-xl px-6 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className={`h-3 w-3 rounded-full ${connectionDot}`} title={`Harness: ${connection}`} />
-          <h1 className="font-semibold text-lg tracking-wide whitespace-nowrap" title="Mission Control — Sandcastle & Jarvis">
-            Mission Control<span className="hidden 2xl:inline"> — Sandcastle & Jarvis</span>
+          <button
+            onClick={() => setView("overview")}
+            aria-label="Overview"
+            className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border-2 border-cyan-500 font-display text-sm font-bold tracking-wide text-cyan-400"
+          >
+            HQ
+            <span className={`absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full ring-2 ring-slate-900 ${connectionDot}`} title={`Harness: ${connection}`} />
+          </button>
+          <h1 className="font-display font-semibold text-lg tracking-wide whitespace-nowrap" title="GAMFace-HQ Mission Control">
+            Mission Control<span className="hidden 2xl:inline text-slate-500"> · GAMFace-HQ</span>
           </h1>
           <ProjectSwitcher onManage={() => setView("projects")} />
           <nav className="ml-2 flex gap-1 text-xs">
             {(
               [
+                ["overview", "Overview"],
                 ["console", "Console"],
                 ["board", "Board"],
                 ["routines", "Routines"],
@@ -242,7 +288,8 @@ export default function MissionControl() {
               <button
                 key={key}
                 onClick={() => setView(key)}
-                className={`px-3 py-1 rounded-md font-medium ${view === key ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200"}`}
+                aria-current={view === key ? "page" : undefined}
+                className={`px-3 py-1 rounded-md font-medium ${view === key ? "bg-cyan-950 text-cyan-300 ring-1 ring-cyan-900" : "text-slate-400 hover:text-slate-200"}`}
               >
                 {label}
               </button>
@@ -280,6 +327,17 @@ export default function MissionControl() {
         <ApprovalsBar />
       </div>
 
+      {view === "overview" && (
+        <OverviewPage
+          tasks={tasks}
+          system={system}
+          connection={connection}
+          projectQuery={proj.query}
+          onDispatch={quickDispatch}
+          onOpenTask={openTask}
+          onNavigate={setView}
+        />
+      )}
       {view === "board" && <Board />}
       {view === "team" && <TeamPage />}
       {view === "routines" && <RoutinesPage />}
@@ -355,7 +413,7 @@ export default function MissionControl() {
               <button
                 key={key}
                 onClick={() => setCenterTab(key)}
-                className={`px-3 py-1 rounded font-medium ${centerTab === key ? "bg-blue-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
+                className={`px-3 py-1 rounded font-medium ${centerTab === key ? "bg-cyan-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
               >
                 {label}
               </button>

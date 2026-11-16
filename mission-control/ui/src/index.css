@@ -1,1 +1,99 @@
 @import "tailwindcss";
+
+/*
+ * GAMFace-HQ theme: near-black panels with one red accent.
+ *
+ * The components are written with Tailwind's slate (surfaces and text) and
+ * cyan (the accent) palettes. Redefining those two scales here re-themes every
+ * page at once; change the accent by editing the --color-cyan-* values.
+ * Status colors keep their meaning: emerald = done, amber = waiting or warning,
+ * rose = error.
+ */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+
+  /* Surfaces and text (neutral, very slightly cool) */
+  --color-slate-50: #fafafa;
+  --color-slate-100: #f4f4f5;
+  --color-slate-200: #e4e4e7;
+  --color-slate-300: #d4d4d8;
+  --color-slate-400: #b4b4bc;
+  --color-slate-500: #8e8e98;
+  --color-slate-600: #6e6e78;
+  --color-slate-700: #34343b;
+  --color-slate-800: #26262c;
+  --color-slate-900: #131316;
+  --color-slate-950: #0a0a0c;
+
+  /* The accent: red (600 carries white text at 4.5:1 or better) */
+  --color-cyan-50: #fff1f2;
+  --color-cyan-100: #ffe0e3;
+  --color-cyan-200: #ffc2c8;
+  --color-cyan-300: #ff8a96;
+  --color-cyan-400: #ff5a6a;
+  --color-cyan-500: #f0283e;
+  --color-cyan-600: #d01c32;
+  --color-cyan-700: #a8152a;
+  --color-cyan-800: #7a1020;
+  --color-cyan-900: #4d0b15;
+  --color-cyan-950: #24060b;
+}
+
+html,
+body {
+  background: var(--color-slate-950);
+  color: var(--color-slate-100);
+  font-family: var(--font-sans);
+}
+
+::selection {
+  background: var(--color-cyan-700);
+  color: #fff;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-cyan-400);
+  outline-offset: 2px;
+}
+
+/* Thin red corner brackets on a panel (the HUD detail from the design) */
+.hud {
+  position: relative;
+}
+.hud::before,
+.hud::after {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  pointer-events: none;
+}
+.hud::before {
+  top: -1px;
+  left: -1px;
+  border-top: 2px solid var(--color-cyan-500);
+  border-left: 2px solid var(--color-cyan-500);
+  border-top-left-radius: 12px;
+}
+.hud::after {
+  bottom: -1px;
+  right: -1px;
+  border-bottom: 2px solid var(--color-cyan-500);
+  border-right: 2px solid var(--color-cyan-500);
+  border-bottom-right-radius: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse,
+  .animate-spin {
+    animation: none;
+  }
+}
+
+/* Thin, dark scrollbars to match the panels */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-slate-700) transparent;
+}

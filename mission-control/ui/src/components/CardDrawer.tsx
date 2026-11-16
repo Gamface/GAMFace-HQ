@@ -321,7 +321,7 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
               )}
               <div className="flex gap-1 px-5 pt-3 text-xs">
                 {(["output", "preview"] as const).map((t) => (
-                  <button key={t} onClick={() => setTab(t)} className={`px-3 py-1 rounded ${tab === t ? "bg-blue-600 text-white" : "text-slate-400 hover:text-slate-200"}`}>
+                  <button key={t} onClick={() => setTab(t)} className={`px-3 py-1 rounded ${tab === t ? "bg-cyan-600 text-white" : "text-slate-400 hover:text-slate-200"}`}>
                     {t === "output" ? "Output" : "Preview"}
                   </button>
                 ))}
