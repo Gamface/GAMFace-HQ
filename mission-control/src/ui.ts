@@ -22,7 +22,7 @@ import { Memory } from "./hq/memory";
 import { ModelGateway } from "./hq/gateway";
 import type { CallOptions } from "./hq/gateway";
 import { deliveryText, hiveSummary, isRoutine, routineFields, routinePatchError, saveRoutineNote } from "./hq/routine";
-import { MODEL_ROLES, ModelRegistry, ModelRole, parseSwitchCommand, resolveTarget } from "./hq/models";
+import { MODEL_ROLES, ModelRegistry, ModelRole, parsePresetCommand, parseSwitchCommand, resolveTarget } from "./hq/models";
 import { Notices } from "./hq/notices";
 import type { ChatMessage, JsonChat } from "./hq/ollama";
 import { checkProvider, listModels } from "./hq/providers";
@@ -499,7 +499,8 @@ const memory = new Memory(DATA_DIR, roleJson("memory"), "memory");
 function plannedModel(t: Task): string | null {
   if (t.modelOverride) return models.resolve(t.targetAgent, t.modelOverride).ref;
   if (t.requestedAgent === "auto") return null;
-  return models.resolve(t.targetAgent).ref;
+  // A project's preset decides its cards' models
+  return projectScope.run(projects.scope(t.project), () => models.resolve(t.targetAgent).ref);
 }
 
 // --- SSE --------------------------------------------------------------------
@@ -1406,6 +1407,12 @@ const ROLE_LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", 
 
 /** "switch coder to claude" and friends change models without running a task. */
 function handleSwitch(text: string): string | null {
+  const presetName = parsePresetCommand(text);
+  if (presetName) {
+    const p = models.presets().find((x) => x.name.toLowerCase() === presetName || x.id === presetName.replace(/\s+/g, "-"));
+    if (!p) return `There's no preset called "${presetName}". Presets: ${models.presets().map((x) => x.name).join(", ")}.`;
+    return applyPresetNow(p.id);
+  }
   const cmd = parseSwitchCommand(text);
   if (!cmd) return null;
   const settings = models.settings();
@@ -1419,6 +1426,18 @@ function handleSwitch(text: string): string | null {
   if (err) return err;
   hive.log("models", "switched", `${roles.join(", ")} → ${ref}`);
   return `${cmd.role === "all" ? "Every agent" : ROLE_LABEL[cmd.role]} now uses ${ref}.`;
+}
+
+/** Switches the team to a preset and says what happened. */
+function applyPresetNow(id: string): string {
+  const out = models.applyPreset(id);
+  if ("error" in out) return out.error;
+  const p = models.preset(id)!;
+  hive.log("models", "preset", `${p.name}${out.skipped.length ? ` (kept: ${out.skipped.map((s) => s.role).join(", ")})` : ""}`);
+  return (
+    `Switched to the “${p.name}” preset: ${out.applied.map((r) => `${ROLE_LABEL[r] ?? r} → ${models.settings().roles[r].model}`).join(", ")}.` +
+    (out.skipped.length ? ` Kept their models: ${out.skipped.map((s) => `${ROLE_LABEL[s.role] ?? s.role} (${s.reason})`).join(", ")}.` : "")
+  );
 }
 
 /** A project's cards may only sign in with its own profiles or shared ones. */
@@ -1976,6 +1995,7 @@ app.get("/api/system", async (_req: Request, res: Response) => {
     running: runningTaskId,
     queued: store.queuedCount(),
     fastModel: models.resolve("router").ref,
+    preset: models.activePreset()?.name ?? null,
     telegram: Boolean(telegram),
     obsidian: Boolean(OBSIDIAN_VAULT),
     browser: Boolean(BROWSER_CDP_URL),
@@ -2206,6 +2226,41 @@ app.delete("/api/brand", requireToken, (req, res) => {
   res.json(assets.brand(null));
 });
 
+// --- Model presets ---------------------------------------------------------------
+
+app.get("/api/presets", (_req, res) => {
+  res.json({ presets: models.presets(), active: models.activePreset()?.id ?? null });
+});
+// { name } saves the team's current setup; { name, models } saves those models
+app.post("/api/presets", requireToken, (req, res) => {
+  const out = models.savePreset(String(req.body?.name ?? ""), req.body?.models);
+  if ("error" in out) return res.status(400).json(out);
+  hive.log("models", "preset saved", out.name);
+  res.status(201).json(out);
+});
+app.patch("/api/presets/:id", requireToken, (req, res) => {
+  const cur = models.preset(String(req.params.id));
+  if (!cur) return res.status(404).json({ error: "Preset not found" });
+  const out = models.savePreset(String(req.body?.name ?? cur.name), req.body?.fromCurrent ? undefined : (req.body?.models ?? cur.models), cur.id);
+  if ("error" in out) return res.status(400).json(out);
+  res.json(out);
+});
+app.delete("/api/presets/:id", requireToken, (req, res) => {
+  const id = String(req.params.id);
+  const users = projects.list().filter((p) => p.preset === id);
+  if (users.length) return res.status(409).json({ error: `Used by the project${users.length > 1 ? "s" : ""} ${users.map((p) => `“${p.name}”`).join(", ")}` });
+  if (!models.removePreset(id)) return res.status(404).json({ error: models.preset(id)?.builtIn ? "Built-in presets can't be deleted" : "Preset not found" });
+  res.json({ ok: true });
+});
+app.post("/api/presets/:id/apply", requireToken, (req, res) => {
+  const id = String(req.params.id);
+  if (!models.preset(id)) return res.status(404).json({ error: "Preset not found" });
+  const out = models.applyPreset(id);
+  if ("error" in out) return res.status(400).json(out);
+  hive.log("models", "preset", models.preset(id)!.name);
+  res.json(out);
+});
+
 // --- Change history and workspaces ----------------------------------------------
 
 const changeView = (c: ReturnType<Changes["list"]>[number]) => ({
@@ -2279,6 +2334,7 @@ app.get("/api/projects", (_req, res) => {
 app.post("/api/projects", requireToken, (req, res) => {
   const bad = (req.body?.profiles ?? []).find?.((n: unknown) => typeof n === "string" && !profiles.exists(n));
   if (bad) return res.status(400).json({ error: `There's no browser profile called “${bad}”` });
+  if (typeof req.body?.preset === "string" && !models.preset(req.body.preset)) return res.status(400).json({ error: "Unknown model preset" });
   const out = projects.create(req.body);
   if ("error" in out) return res.status(400).json(out);
   hive.log("projects", "created", out.name);
@@ -2287,6 +2343,7 @@ app.post("/api/projects", requireToken, (req, res) => {
 app.patch("/api/projects/:id", requireToken, (req, res) => {
   const bad = (req.body?.profiles ?? []).find?.((n: unknown) => typeof n === "string" && !profiles.exists(n));
   if (bad) return res.status(400).json({ error: `There's no browser profile called “${bad}”` });
+  if (typeof req.body?.preset === "string" && !models.preset(req.body.preset)) return res.status(400).json({ error: "Unknown model preset" });
   const before = projects.get(String(req.params.id));
   const out = projects.update(String(req.params.id), req.body);
   if ("error" in out) return res.status(out.error === "Project not found" ? 404 : 400).json(out);

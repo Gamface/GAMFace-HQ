@@ -1,5 +1,6 @@
 import type { Provider } from "./providers";
 import { builtinProviders, normalizeRef, parseModelRef } from "./providers";
+import { projectScope } from "./projects";
 import type { TaskStore } from "./taskstore";
 
 // Which model each agent uses. Settings live in the database (edited on the
@@ -86,6 +87,16 @@ export interface ModelDefaults {
 
 const ID_RE = /^[a-z][a-z0-9_-]{1,30}$/;
 
+/** A saved team setup: which model (and fallback) each agent uses. */
+export interface Preset {
+  id: string;
+  name: string;
+  models: Partial<Record<ModelRole, { model: string; fallback?: string }>>;
+  builtIn?: boolean;
+}
+export const MAX_PRESETS = 20;
+export const PRESET_ID = /^[a-z0-9][a-z0-9-]{0,40}$/;
+
 export class ModelRegistry {
   private store: TaskStore;
   private defaults: ModelDefaults;
@@ -143,6 +154,124 @@ export class ModelRegistry {
       local: Boolean(c.local),
     }));
     return [...builtinProviders(), ...custom];
+  }
+
+  // --- Presets ------------------------------------------------------------------
+
+  /** The built-in presets (from .env defaults) and the saved ones. */
+  presets(): Preset[] {
+    const d = this.defaultSettings();
+    const local: Preset = { id: "local", name: "All local", builtIn: true, models: Object.fromEntries(MODEL_ROLES.map((r) => [r, { model: d.roles[r].model }])) };
+    const fast = `ollama/${this.defaults.fastModel}`;
+    const quick: Preset = {
+      id: "fast",
+      name: "Fast",
+      builtIn: true,
+      // Vision and audio keep their own models: a text model can't read pictures or hear audio
+      models: Object.fromEntries(MODEL_ROLES.map((r) => [r, { model: r === "vision" || r === "audio" ? d.roles[r].model : fast }])),
+    };
+    // "Fast" only means something when the fast model isn't the main one
+    return [local, ...(this.defaults.fastModel !== this.defaults.model ? [quick] : []), ...this.store.getSetting<Preset[]>("presets", [])];
+  }
+
+  preset(id: string): Preset | undefined {
+    return this.presets().find((p) => p.id === id);
+  }
+
+  /** Checks a preset's models and fills in the provider names. */
+  private cleanModels(models: unknown): Preset["models"] | string {
+    if (!models || typeof models !== "object") return "A preset needs at least one agent's model";
+    const providers = this.providers();
+    const out: Preset["models"] = {};
+    for (const [role, v] of Object.entries(models as Record<string, unknown>)) {
+      if (!MODEL_ROLES.includes(role as ModelRole)) return `Unknown agent "${role}"`;
+      const m = v as { model?: unknown; fallback?: unknown } | null;
+      if (!m || typeof m.model !== "string") return `${role}: missing model`;
+      const model = normalizeRef(m.model, providers);
+      if (!model) return `No provider for "${m.model}"`;
+      const fallback = typeof m.fallback === "string" && m.fallback ? normalizeRef(m.fallback, providers) : undefined;
+      if (m.fallback && !fallback) return `No provider for fallback "${String(m.fallback)}"`;
+      out[role as ModelRole] = fallback ? { model, fallback } : { model };
+    }
+    if (!Object.keys(out).length) return "A preset needs at least one agent's model";
+    return out;
+  }
+
+  /** Saves a preset; without models, the team's current setup. */
+  savePreset(name: string, models?: unknown, id?: string): Preset | { error: string } {
+    const n = name.trim().slice(0, 40);
+    if (!n) return { error: "Give the preset a name" };
+    const saved = this.store.getSetting<Preset[]>("presets", []);
+    const builtIns = this.presets().filter((p) => p.builtIn);
+    if (id && builtIns.some((p) => p.id === id)) return { error: "Built-in presets can't be changed; save a copy under another name" };
+    const existing = id ? saved.find((p) => p.id === id) : undefined;
+    if (id && !existing) return { error: "Preset not found" };
+    if (this.presets().some((p) => p.id !== id && p.name.toLowerCase() === n.toLowerCase())) return { error: `There's already a preset called “${n}”` };
+    if (!existing && saved.length >= MAX_PRESETS) return { error: `At most ${MAX_PRESETS} presets` };
+    const current = this.settings().roles;
+    const raw = models ?? Object.fromEntries(MODEL_ROLES.map((r) => [r, { model: current[r].model, fallback: current[r].fallback }]));
+    const clean = this.cleanModels(raw);
+    if (typeof clean === "string") return { error: clean };
+    let newId = existing?.id ?? (n.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30) || "preset");
+    if (!existing) while (this.presets().some((p) => p.id === newId)) newId = `${newId.replace(/-\d+$/, "")}-${Math.floor(Math.random() * 900 + 100)}`;
+    const preset: Preset = { id: newId, name: n, models: clean };
+    this.store.setSetting("presets", existing ? saved.map((p) => (p.id === newId ? preset : p)) : [...saved, preset]);
+    return preset;
+  }
+
+  removePreset(id: string): boolean {
+    const saved = this.store.getSetting<Preset[]>("presets", []);
+    if (!saved.some((p) => p.id === id)) return false;
+    this.store.setSetting(
+      "presets",
+      saved.filter((p) => p.id !== id),
+    );
+    return true;
+  }
+
+  /**
+   * Switches the team to a preset. Local-only agents keep their model when the preset
+   * would give them a cloud one; they're listed in `skipped`.
+   */
+  applyPreset(id: string): { applied: ModelRole[]; skipped: { role: ModelRole; reason: string }[] } | { error: string } {
+    const p = this.preset(id);
+    if (!p) return { error: "Preset not found" };
+    const settings = this.settings();
+    const providers = this.providers();
+    const roles: Partial<Record<ModelRole, Partial<RoleSettings>>> = {};
+    const skipped: { role: ModelRole; reason: string }[] = [];
+    for (const [role, m] of Object.entries(p.models) as [ModelRole, { model: string; fallback?: string }][]) {
+      const cloud = [m.model, m.fallback].some((ref) => ref && !parseModelRef(ref, providers)?.provider.local);
+      if (cloud && settings.roles[role].localOnly) {
+        skipped.push({ role, reason: "local only" });
+        continue;
+      }
+      if (!parseModelRef(m.model, providers)) {
+        skipped.push({ role, reason: `no provider for ${m.model}` });
+        continue;
+      }
+      // null clears a fallback the preset doesn't have
+      roles[role] = { model: m.model, fallback: (m.fallback ?? null) as never };
+    }
+    const err = this.update({ roles: roles as Record<ModelRole, RoleSettings> });
+    if (err) return { error: err };
+    return { applied: Object.keys(roles) as ModelRole[], skipped };
+  }
+
+  /** The preset the team matches right now, if any. */
+  activePreset(): Preset | undefined {
+    const roles = this.settings().roles;
+    return this.presets().find((p) =>
+      (Object.entries(p.models) as [ModelRole, { model: string; fallback?: string }][]).every(([r, m]) => roles[r].model === m.model && (roles[r].fallback ?? undefined) === (m.fallback ?? undefined)),
+    );
+  }
+
+  /** An agent's settings, with the project's preset (if the current card's project has one) on top. */
+  private effective(role: ModelRole): RoleSettings {
+    const s = this.settings().roles[role];
+    const id = projectScope.getStore()?.preset;
+    const over = id ? this.preset(id)?.models[role] : undefined;
+    return over ? { ...s, model: over.model, fallback: over.fallback } : s;
   }
 
   /** Validates and saves a change. Returns an error message, or null on success. */
@@ -210,7 +339,7 @@ export class ModelRegistry {
 
   /** The model an agent should use right now (falls back past its daily token limit). */
   resolve(role: ModelRole, override?: string): Resolved {
-    const s = this.settings().roles[role];
+    const s = this.effective(role);
     const providers = this.providers();
     let ref = override || s.model;
     let parsed = parseModelRef(ref, providers);
@@ -229,7 +358,7 @@ export class ModelRegistry {
 
   /** A local model for this role: its fallback if that is local, otherwise the default local model. */
   localFor(role: ModelRole): Resolved {
-    const s = this.settings().roles[role];
+    const s = this.effective(role);
     const providers = this.providers();
     const fb = s.fallback ? parseModelRef(s.fallback, providers) : null;
     const main = parseModelRef(s.model, providers);
@@ -247,7 +376,7 @@ export class ModelRegistry {
   }
 
   resolveFallback(role: ModelRole): Resolved | null {
-    const s = this.settings().roles[role];
+    const s = this.effective(role);
     if (!s.fallback) return null;
     const parsed = parseModelRef(s.fallback, this.providers());
     return parsed ? { role, ref: `${parsed.provider.id}/${parsed.model}`, provider: parsed.provider, model: parsed.model, settings: s } : null;
@@ -307,6 +436,14 @@ export function parseSwitchCommand(text: string): SwitchCommand | null {
     return { role: who, target: m[1] };
   }
   return null;
+}
+
+/** "use preset fast", "switch to the local preset", "preset best quality": the preset's name, or null. */
+export function parsePresetCommand(text: string): string | null {
+  const t = text.trim().toLowerCase().replace(/[.!?]+$/, "");
+  if (t.split(/\s+/).length > 8) return null;
+  const m = t.match(/^(?:(?:use|switch to|apply|load|go)\s+(?:the\s+)?)?(?:preset\s+["“]?(.+?)["”]?|["“]?(.+?)["”]?\s+preset)$/);
+  return m ? (m[1] ?? m[2]).trim() : null;
 }
 
 /** Turns an alias or reference into a model reference, or null if it means nothing. */

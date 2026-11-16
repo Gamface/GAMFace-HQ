@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { reloadPresets, usePresets } from "./Presets";
 import { getJson, send } from "../api";
 import { reloadProjects, setProject, useProjects } from "../project";
 import type { ProjectInfo } from "../project";
@@ -16,8 +17,9 @@ interface Form {
   localOnly: boolean;
   profiles: string[];
   workspace: string;
+  preset: string | null;
 }
-const blank = (): Form => ({ name: "", color: COLORS[Math.floor(Math.random() * COLORS.length)], instructions: "", localOnly: false, profiles: [], workspace: "" });
+const blank = (): Form => ({ name: "", color: COLORS[Math.floor(Math.random() * COLORS.length)], instructions: "", localOnly: false, profiles: [], workspace: "", preset: null });
 
 function ProjectForm({
   start,
@@ -35,6 +37,10 @@ function ProjectForm({
   saveLabel: string;
 }) {
   const [f, setF] = useState<Form>(start);
+  const { presets } = usePresets();
+  useEffect(() => {
+    void reloadPresets();
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   return (
@@ -55,6 +61,18 @@ function ProjectForm({
         placeholder={"Instructions every agent follows on this project's cards. For example:\nGamface is a mobile gaming app for casual players. Write in a playful, upbeat voice. Our site is gamface.com; the repo is Gamface/GAMFace-HQ."}
         className={input}
       />
+      <label className="flex items-center gap-2 text-xs text-slate-400">
+        Models
+        <select value={f.preset ?? ""} onChange={(e) => setF({ ...f, preset: e.target.value || null })} className="bg-slate-950 border border-slate-700 rounded-md px-2 py-1 text-sm text-slate-200">
+          <option value="">The team's setup</option>
+          {presets.map((p) => (
+            <option key={p.id} value={p.id}>
+              Preset: {p.name}
+            </option>
+          ))}
+        </select>
+        <span className="text-slate-500">this project's cards use these models, whatever the team is switched to{f.localOnly ? " (kept on this PC: cloud models are replaced by local ones)" : ""}</span>
+      </label>
       <label className="flex items-center gap-2 text-xs text-slate-400">
         Workspace folder
         <input
@@ -137,6 +155,7 @@ function Counts({ p }: { p: ProjectInfo }) {
 
 export default function ProjectsPage() {
   const { projects, view } = useProjects();
+  const { presets } = usePresets();
   const [profiles, setProfiles] = useState<{ name: string; project: string | null }[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -199,7 +218,7 @@ export default function ProjectsPage() {
             <div key={p.id} className={`border rounded-xl p-3 ${view === p.id ? "border-cyan-700 bg-slate-950/60" : "border-slate-800"} ${p.archived ? "opacity-60" : ""}`}>
               {editing === p.id ? (
                 <ProjectForm
-                  start={{ name: p.name, color: p.color, instructions: p.instructions, localOnly: p.localOnly, profiles: p.profiles, workspace: p.workspace ?? "" }}
+                  start={{ name: p.name, color: p.color, instructions: p.instructions, localOnly: p.localOnly, profiles: p.profiles, workspace: p.workspace ?? "", preset: p.preset ?? null }}
                   profiles={names}
                   owners={owners}
                   saveLabel="Save"
@@ -225,6 +244,7 @@ export default function ProjectsPage() {
                       <Counts p={p} />
                       {p.profiles.length ? ` · sign-ins: ${p.profiles.join(", ")}` : ""}
                       {` · workspace: ${p.workspace || p.id}`}
+                      {p.preset ? ` · models: ${presets.find((x) => x.id === p.preset)?.name ?? p.preset}` : ""}
                     </div>
                   </div>
                   <div className="flex gap-1 text-xs shrink-0">

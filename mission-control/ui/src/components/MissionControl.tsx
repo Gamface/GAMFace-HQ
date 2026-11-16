@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { PresetPicker } from "./Presets";
 import type { AgentStatus, RequestedAgent } from "../../../src/schemas/agent";
 import { HARNESS_URL, authHeaders } from "../config";
 import { TERMINAL, useAgentStream } from "../useAgentStream";
@@ -253,7 +254,7 @@ export default function MissionControl() {
           <span className="text-cyan-400 truncate max-w-[22rem]">
             State: {connection !== "open" ? `Harness ${connection}` : selected ? `${selected.agent} [${selected.status}]` : "Online / Ready"}
           </span>
-          <span className="bg-slate-800 px-3 py-1 rounded-md border border-slate-700">Model: {system?.model ?? "—"}</span>
+          <PresetPicker model={system?.model} />
           {system?.telegram && <span className="bg-slate-800 px-3 py-1 rounded-md border border-slate-700" title="Telegram bot is polling">✈ Telegram</span>}
           <span
             className={`px-3 py-1 rounded-md border ${

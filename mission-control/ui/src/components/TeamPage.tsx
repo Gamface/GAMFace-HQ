@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { PresetsSection, reloadPresets } from "./Presets";
 import { AGENT_LABELS, getJson, send, splitModel } from "../api";
 import ApprovalsSettings from "./ApprovalsSettings";
 
@@ -168,7 +169,8 @@ export default function TeamPage() {
   const [dirty, setDirty] = useState(false);
 
   const load = () =>
-    getJson<ModelsReply>("/api/models").then((d) => {
+    // The header's preset follows the team's models
+    (void reloadPresets(), getJson<ModelsReply>("/api/models")).then((d) => {
       setData(d);
       setRoles(d.settings.roles);
       setAliases(Object.entries(d.settings.aliases));
@@ -184,6 +186,15 @@ export default function TeamPage() {
       .then((rows) => setChecks(Object.fromEntries(rows.map((r) => [r.id, r]))))
       .catch(() => {});
   }, []);
+  // A preset switched from the header: show the new models (unsaved edits stay)
+  useEffect(() => {
+    const onChange = () => {
+      if (!dirty) void load();
+    };
+    window.addEventListener("mc:models-changed", onChange);
+    return () => window.removeEventListener("mc:models-changed", onChange);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty]);
 
   const loadModels = (p: string) => {
     if (available[p]) return;
@@ -247,6 +258,7 @@ export default function TeamPage() {
 
   return (
     <div className="col-span-3 min-h-0 overflow-y-auto space-y-4 pr-1">
+      <PresetsSection onApplied={() => void load()} />
       <section className="bg-slate-900 border border-slate-800 rounded-xl p-4">
         <div className="flex items-center gap-3 mb-3">
           <h2 className="text-sm font-semibold text-slate-200">Agent models</h2>

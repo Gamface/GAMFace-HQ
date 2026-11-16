@@ -38,6 +38,12 @@ export const ProjectInputSchema = z.object({
       .nullable()
       .optional(),
   ),
+  // A model preset its cards use instead of the team's setup (null: the team's)
+  preset: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9-]{0,40}$/)
+    .nullable()
+    .optional(),
   // Browser profiles (sign-ins) that belong to this project; others are shared
   profiles: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/)).max(20).default([]),
 });
@@ -55,6 +61,8 @@ export interface ProjectScope {
   id: string | null;
   name: string;
   localOnly: boolean;
+  /** Model preset for this project's cards */
+  preset?: string;
 }
 export const projectScope = new AsyncLocalStorage<ProjectScope>();
 
@@ -170,7 +178,7 @@ export class Projects {
 
   scope(id: string | null | undefined): ProjectScope {
     const p = this.get(id);
-    return p ? { id: p.id, name: p.name, localOnly: p.localOnly } : { id: null, name: "General", localOnly: false };
+    return p ? { id: p.id, name: p.name, localOnly: p.localOnly, ...(p.preset ? { preset: p.preset } : {}) } : { id: null, name: "General", localOnly: false };
   }
 }
 

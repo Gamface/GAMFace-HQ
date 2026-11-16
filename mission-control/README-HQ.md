@@ -155,6 +155,28 @@ into an MP4 that appears on the card (🎬): play it there or download it.
 API: `POST /api/tasks/:id/video` renders the scene in a finished card's answer. The video
 service itself: `POST /render`, `GET /jobs/:id`, `GET /jobs/:id/video`, `GET /health`.
 
+## Model presets
+
+Saved team setups: which model (and fallback) each agent uses, switched in one go.
+
+- **Built in:** **All local** (every agent on its default local model) and **Fast** (every
+  agent on `OLLAMA_FAST_MODEL`; vision and audio keep models that can see and hear). Fast
+  only appears when the fast model differs from the main one, so set
+  `OLLAMA_FAST_MODEL=qwen3:4b` in `.env` to get it.
+- **Your own:** set the agents up on the Team page (say, cloud models for Jarvis and the
+  Coder), then **Save the current setup as a preset** ("Best quality"). **Update** stores
+  the current setup in it again; Rename and Delete do what they say.
+- **Switching:** the **Models** picker at the top of every page, **Apply** on the Team page,
+  or type "use preset fast" (also "switch to the local preset") in a card or on Telegram.
+  Local-only agents keep a local model when a preset would give them a cloud one; you're
+  told which.
+- **Per project:** pick a preset in a project's settings and its cards use those models,
+  whatever the team is switched to (other cards are unaffected). A project kept on this
+  PC still replaces cloud models with local ones.
+
+API: `GET/POST /api/presets`, `PATCH/DELETE /api/presets/:id`, `POST /api/presets/:id/apply`;
+`preset` on projects; `/api/system` reports the active preset.
+
 ## Workspaces and undo (time travel)
 
 The Coder and File agents can now edit real files, and every change can be undone
@@ -522,7 +544,7 @@ arrive on their own:
 cd ~/sandcastle/ts-harness
 docker compose pull browser               # newer headless Chrome
 docker compose up -d --build --force-recreate   # --build: the video and voice services (first time ~2 GB)
-docker compose exec harness npm test      # optional: about 130 tests
+docker compose exec harness npm test      # optional: about 135 tests
 docker compose exec voice python -m unittest test_timing   # optional: the voice service's timing
 ```
 
