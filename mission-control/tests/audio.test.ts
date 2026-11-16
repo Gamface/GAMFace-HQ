@@ -78,6 +78,7 @@ interface Fake {
 }
 
 /** Fake Ollama + OpenAI server: /api/show (gemma4 has audio), /v1/audio/transcriptions and /audio/transcriptions. */
+const hints: string[] = [];
 function fakeServer(): Promise<Fake> {
   const hits: Fake["hits"] = [];
   const server = createServer((req, res) => {
@@ -92,6 +93,8 @@ function fakeServer(): Promise<Fake> {
       const text = raw.toString("latin1");
       const model = /name="model"\r\n\r\n([^\r]+)/.exec(text)?.[1];
       hits.push({ path: req.url ?? "", model, hasFile: text.includes('name="file"') && text.includes("RIFF") });
+      const hint = /name="prompt"\r\n\r\n([^\r]*)/.exec(text)?.[1];
+      if (hint) hints.push(hint);
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ text: `heard ${hits.length}` }));
     });
@@ -171,4 +174,13 @@ test("audio stays local unless the Transcriber may send private context, and nev
 test("a model without audio is refused with a clear message", async () => {
   assert.equal(models.update({ roles: { audio: { model: "ollama/qwen3:14b" } } as never }), null);
   await assert.rejects(gateway.transcribe(makeWav(1), undefined), /can't take audio\. On the Team page, give the Transcriber an audio model/);
+});
+
+test("a spelling hint goes to the transcriber as the prompt field, and no hint sends none", async () => {
+  assert.equal(models.update({ roles: { audio: { model: "ollama/gemma4:12b" } } as never }), null);
+  hints.length = 0;
+  await gateway.transcribe(makeWav(1), undefined, () => {}, "Mission Control, Jarvis, Gamface");
+  assert.deepEqual(hints, ["Mission Control, Jarvis, Gamface"]);
+  await gateway.transcribe(makeWav(1), undefined);
+  assert.equal(hints.length, 1);
 });

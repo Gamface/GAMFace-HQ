@@ -946,18 +946,19 @@ async function runTask(task: Task) {
     const history = historyMessages(task.thread);
     const followUp = history.length > 0;
     // "…as a PDF": the answer is written as a document and printed when the run ends
-    const makePdf = wantsPdf(ask);
+    let makePdf = wantsPdf(ask);
     // "Make a video…": the Coder writes a Remotion scene and the video service renders it
     // A reply to a card whose last answer was a scene ("make the title bigger") renders again
     const lastAnswer = followUp ? [...(task.thread ?? [])].reverse().find((t) => t.role === "agent")?.text : undefined;
-    const makeVideo = (wantsVideo(ask) || Boolean(lastAnswer && extractScene(lastAnswer))) && task.source !== "eval";
-    const pdfNote = makePdf ? pdfInstructions(task.images ?? []) : "";
+    let makeVideo = (wantsVideo(ask) || Boolean(lastAnswer && extractScene(lastAnswer))) && task.source !== "eval";
     const learned: string[] = [];
     const images = (task.images ?? []).map((id) => uploads.base64(id)).filter((b): b is string => Boolean(b));
 
     // Audio is transcribed first. The transcript is private, like the audio itself.
     let transcriptBlock = "";
     let transcript = "";
+    // This run's request was spoken (nothing typed)
+    let spokenNow = false;
     let heardPrivate = false;
     const clips = (task.audio ?? []).map((id) => uploads.bytes(id)).filter((b): b is Buffer => Boolean(b));
     if (clips.length) {
@@ -967,10 +968,15 @@ async function runTask(task: Task) {
         const texts: string[] = [];
         // Audio models take short clips (Gemma 4: 30 s), so long recordings go in pieces
         for (const piece of splitWav(clip)) {
-          const out = await gateway.transcribe(piece, controller.signal, (note) => {
-            push(`[${note}]\n`);
-            hive.log("audio", "policy", note, task.id);
-          });
+          const out = await gateway.transcribe(
+            piece,
+            controller.signal,
+            (note) => {
+              push(`[${note}]\n`);
+              hive.log("audio", "policy", note, task.id);
+            },
+            spellingHint(),
+          );
           texts.push(out.text);
         }
         const text = texts.join(" ").replace(/\s+/g, " ").trim();
@@ -981,11 +987,25 @@ async function runTask(task: Task) {
       flush();
       heardPrivate = true;
       learned.push(`Transcript of the attached audio:\n${transcript}`);
+      // Nothing typed (the stand-in prompt): what was said is the request
+      const spoken = isSpokenRequest(task, ask) && transcript && transcript !== "(no speech found)";
+      if (spoken) {
+        spokenNow = true;
+        spokenRequests.set(task.id, transcript);
+        while (spokenRequests.size > 200) spokenRequests.delete(spokenRequests.keys().next().value!);
+        if (!task.reply && (!task.title || task.title === task.prompt.slice(0, 80) || isStandIn(task.title))) task.title = transcript.slice(0, 80);
+        makePdf ||= wantsPdf(transcript);
+        makeVideo ||= wantsVideo(transcript) && task.source !== "eval";
+        store.save(task);
+      }
       transcriptBlock = privateBlock(
-        `TRANSCRIPT OF THE ATTACHED AUDIO:\n${transcript}`,
+        spoken
+          ? `THE USER SPOKE THIS REQUEST (transcribed from their recording; treat it exactly like a typed request, and don't mention audio):\n${transcript}`
+          : `TRANSCRIPT OF THE ATTACHED AUDIO:\n${transcript}`,
         "(The attached audio and its transcript stay on the user's PC and are withheld from cloud models.)",
       );
     }
+    const pdfNote = makePdf ? pdfInstructions(task.images ?? []) : "";
 
     // Attached PDFs: short ones go to the agent whole; long ones are read in parts by
     // Jarvis File, which keeps what matters for the request. Their text is private.
@@ -1066,7 +1086,7 @@ async function runTask(task: Task) {
       // Videos are code: the Coder writes the Remotion scene (pictures go along as props)
       task.targetAgent = "coder";
       task.routedBy = "router";
-      log("router", "routed", `→ coder (a video): ${ask}`);
+      log("router", "routed", `→ coder (a video): ${spokenNow ? "(spoken request)" : ask}`);
     } else if (task.requestedAgent === "auto" && images.length) {
       // Pictures go to the agent that can see them
       task.targetAgent = "vision";
@@ -1097,7 +1117,8 @@ async function runTask(task: Task) {
 
     // Only the vision agent can see pictures. When another agent leads, Vision reads
     // them first and the lead gets its description, which is private like the pictures.
-    let request = [ask, transcriptBlock, docsBlock].filter(Boolean).join("\n\n");
+    // A spoken request replaces the stand-in prompt
+    let request = [spokenNow ? "" : ask, transcriptBlock, docsBlock].filter(Boolean).join("\n\n");
     if (images.length && lead !== "vision") {
       openSub = addSubtask(task, "vision", `Describe the ${images.length} attached picture(s) for: ${ask}`);
       task.activeAgent = "vision";
@@ -1459,6 +1480,27 @@ function applyPresetNow(id: string): string {
   );
 }
 
+// The words of spoken requests (cards whose prompt is only the stand-in), by card
+const spokenRequests = new Map<string, string>();
+const STAND_INS = [/^listen to the attached audio and respond\.?$/i, /^\(?(voice|spoken) (note|request)\)?\.?$/i];
+const isStandIn = (text: string) => STAND_INS.some((r) => r.test(text.trim()));
+/** Whether a card's request is its recording: nothing was typed, only the stand-in prompt. */
+function isSpokenRequest(task: Task, ask: string): boolean {
+  return Boolean(task.audio?.length) && (isStandIn(ask) || !ask.trim());
+}
+/** Names the transcriber should spell right: the brand, projects, agents, assets. */
+function spellingHint(): string {
+  const names = new Set<string>(["Mission Control", "Jarvis", "Gamface", "Remotion", "Obsidian"]);
+  const general = assets.brand(null).name;
+  if (general) names.add(general);
+  for (const p of projects.list(false)) {
+    names.add(p.name);
+    const b = assets.brand(p.id).name;
+    if (b) names.add(b);
+  }
+  return [...names].join(", ");
+}
+
 /** A project's cards may only sign in with its own profiles or shared ones. */
 function profileProjectError(profile: string, project: string | null): string | null {
   const owner = projects.ownerOfProfile(profile);
@@ -1671,7 +1713,7 @@ interface VideoPlan {
 
 /** What a video request asks for, from everything the user said on the card. */
 function planVideo(task: Task): VideoPlan {
-  const said = [task.prompt, ...(task.thread ?? []).filter((t) => t.role === "user").map((t) => t.text), task.reply ?? ""].join("\n");
+  const said = [task.prompt, spokenRequests.get(task.id) ?? "", ...(task.thread ?? []).filter((t) => t.role === "user").map((t) => t.text), task.reply ?? ""].join("\n");
   const clips = [...(task.audio ?? []), ...(task.thread ?? []).flatMap((t) => t.audio ?? [])];
   return {
     voice: wantsVoice(said),

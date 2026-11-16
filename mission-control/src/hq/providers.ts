@@ -148,12 +148,14 @@ export async function supportsAudio(p: Provider, model: string): Promise<boolean
  * Speech to text through the OpenAI-style /audio/transcriptions endpoint, which
  * Ollama serves under /v1 for audio models (gemma4) and Whisper servers serve too.
  */
-export async function transcribe(p: Provider, model: string, wav: Buffer, signal?: AbortSignal): Promise<string> {
+export async function transcribe(p: Provider, model: string, wav: Buffer, signal?: AbortSignal, hint?: string): Promise<string> {
   const url = p.kind === "ollama" ? `${p.baseUrl}/v1/audio/transcriptions` : `${p.baseUrl}/audio/transcriptions`;
   const form = new FormData();
   form.append("file", new Blob([new Uint8Array(wav)], { type: "audio/wav" }), "audio.wav");
   form.append("model", model);
   form.append("response_format", "json");
+  // Names and words to spell right ("Gamface", project names); servers that don't use it ignore it
+  if (hint) form.append("prompt", hint.slice(0, 600));
   const h = headers(p);
   delete h["Content-Type"]; // fetch sets the multipart boundary
   const res = await fetch(url, { method: "POST", headers: h, body: form, signal: signal ?? AbortSignal.timeout(180000) });

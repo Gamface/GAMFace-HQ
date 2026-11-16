@@ -262,7 +262,7 @@ export class ModelGateway {
    * context, and never while a spend cap applies (audio spend can't be measured
    * in tokens). The fallback model goes through the same rules.
    */
-  async transcribe(wav: Buffer, signal: AbortSignal | undefined, onNote: (note: string) => void = () => {}): Promise<{ text: string; ref: string }> {
+  async transcribe(wav: Buffer, signal: AbortSignal | undefined, onNote: (note: string) => void = () => {}, hint?: string): Promise<{ text: string; ref: string }> {
     const role: ModelRole = "audio";
     const attempt = async (candidate: Resolved) => {
       const notes: string[] = [];
@@ -293,7 +293,7 @@ export class ModelGateway {
         throw new Error(`${r.ref} can't take audio. On the Team page, give the Transcriber an audio model (for example ollama/gemma4:12b) or a Whisper server.`);
       }
       try {
-        const text = await transcribe(r.provider, r.model, wav, signal);
+        const text = await transcribe(r.provider, r.model, wav, signal, hint);
         this.store.recordUsage(role, r.ref, 0, 0);
         this.onServed(r.ref);
         return { text, ref: r.ref };
