@@ -28,6 +28,8 @@ const RENDER_TIMEOUT_MS = (Number(process.env.VIDEO_TIMEOUT_MIN) || 15) * 60_000
 const CONCURRENCY = process.env.VIDEO_CONCURRENCY ? Number(process.env.VIDEO_CONCURRENCY) : null;
 // No GPU in the container: SwiftShader-ANGLE is Remotion's software path that also runs WebGL (3D)
 const GL = process.env.VIDEO_GL || "swangle";
+// Remotion serves each bundle to its Chrome on a local port (3000 by default); keep it off 3000
+const BUNDLE_PORT = Number(process.env.VIDEO_BUNDLE_PORT) || 3100;
 const JOBS_DIR = path.resolve(process.env.JOBS_DIR || "/app/jobs");
 const KEEP_MS = 60 * 60_000;
 const MAX_BODY = 160 * 1024 * 1024;
@@ -122,13 +124,14 @@ async function run(job) {
     const serveUrl = await bundle({ entryPoint, publicDir, outDir: path.join(dir, "bundle"), onProgress: (p) => (job.progress = Math.round(p * 0.2)) });
     job.status = "rendering";
     const inputProps = job.spec.props;
-    const composition = await selectComposition({ serveUrl, id: "Main", inputProps, chromiumOptions: { gl: GL } });
+    const composition = await selectComposition({ serveUrl, id: "Main", inputProps, chromiumOptions: { gl: GL }, port: BUNDLE_PORT });
     const { cancelSignal, cancel } = makeCancelSignal();
     job.cancel = cancel;
     const file = path.join(dir, "video.mp4");
     await renderMedia({
       composition,
       serveUrl,
+      port: BUNDLE_PORT,
       codec: "h264",
       outputLocation: file,
       inputProps,

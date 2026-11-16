@@ -70,6 +70,8 @@ services:
       VIDEO_MAX_SECONDS: ${VIDEO_MAX_SECONDS:-60}
       # Chrome tabs rendering frames in parallel; blank lets Remotion choose
       VIDEO_CONCURRENCY: ${VIDEO_CONCURRENCY:-}
+      # The port Remotion serves bundles on inside the container (its default, 3000, is avoided)
+      VIDEO_BUNDLE_PORT: ${VIDEO_BUNDLE_PORT:-3100}
     networks: [render]
     restart: unless-stopped
 
