@@ -26,6 +26,8 @@ export interface CardFields {
   profile?: string;
   // Project (null: General)
   project?: string | null;
+  // The Coder and File agents may edit the project's workspace
+  workspace?: boolean;
 }
 
 /** The browser profiles a project's cards may use (its own and shared ones), for a picker. */
@@ -195,6 +197,17 @@ export function CardForm({
           </label>
         )}
       </div>
+      {!f.readOnly && (
+        <label className="flex items-start gap-2 text-xs text-slate-300 cursor-pointer select-none">
+          <input type="checkbox" className="mt-0.5" checked={Boolean(f.workspace)} onChange={(e) => set("workspace", e.target.checked)} />
+          <span>
+            Edit files in the workspace{" "}
+            <span className="text-slate-500">
+              (“{proj.byId(f.project)?.workspace || f.project || "general"}”): the Coder and File agents may create, change and delete files there. Every change can be undone from the card or the Files page.
+            </span>
+          </span>
+        </label>
+      )}
       {(proj.active.length > 0 || f.project) && (
         <label className="flex items-center gap-2 text-xs text-slate-400">
           Project

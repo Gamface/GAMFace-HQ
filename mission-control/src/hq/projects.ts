@@ -28,6 +28,16 @@ export const ProjectInputSchema = z.object({
   // Every model call for this project stays on a local model
   localOnly: z.boolean().default(false),
   archived: z.boolean().default(false),
+  // The workspace folder (under WORKSPACES_DIR) its agents may edit; the project's id when empty
+  workspace: z.preprocess(
+    (v) => (typeof v === "string" && !v.trim() ? null : typeof v === "string" ? v.trim() : v),
+    z
+      .string()
+      .regex(/^[A-Za-z0-9_][\w.-]{0,63}(\/[A-Za-z0-9_][\w.-]{0,63}){0,3}$/, "A folder name inside the workspaces folder (letters, numbers, - _ . and /)")
+      .refine((v) => !v.split("/").includes(".."), "No ..")
+      .nullable()
+      .optional(),
+  ),
   // Browser profiles (sign-ins) that belong to this project; others are shared
   profiles: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/)).max(20).default([]),
 });

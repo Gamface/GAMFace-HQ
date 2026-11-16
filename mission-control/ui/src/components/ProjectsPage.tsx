@@ -15,8 +15,9 @@ interface Form {
   instructions: string;
   localOnly: boolean;
   profiles: string[];
+  workspace: string;
 }
-const blank = (): Form => ({ name: "", color: COLORS[Math.floor(Math.random() * COLORS.length)], instructions: "", localOnly: false, profiles: [] });
+const blank = (): Form => ({ name: "", color: COLORS[Math.floor(Math.random() * COLORS.length)], instructions: "", localOnly: false, profiles: [], workspace: "" });
 
 function ProjectForm({
   start,
@@ -54,6 +55,16 @@ function ProjectForm({
         placeholder={"Instructions every agent follows on this project's cards. For example:\nGamface is a mobile gaming app for casual players. Write in a playful, upbeat voice. Our site is gamface.com; the repo is Gamface/GAMFace-HQ."}
         className={input}
       />
+      <label className="flex items-center gap-2 text-xs text-slate-400">
+        Workspace folder
+        <input
+          value={f.workspace}
+          onChange={(e) => setF({ ...f, workspace: e.target.value })}
+          placeholder="the project's own folder"
+          className="bg-slate-950 border border-slate-700 rounded-md px-2 py-1 text-sm text-slate-200 font-mono w-64"
+        />
+        <span className="text-slate-500">inside the workspaces folder (WORKSPACES_DIR). Name a repo you mounted there to let agents work on it.</span>
+      </label>
       <div className="flex flex-wrap gap-6 text-xs text-slate-300">
         <label className="flex items-start gap-2 max-w-sm">
           <input type="checkbox" checked={f.localOnly} onChange={(e) => setF({ ...f, localOnly: e.target.checked })} className="mt-0.5" />
@@ -188,7 +199,7 @@ export default function ProjectsPage() {
             <div key={p.id} className={`border rounded-xl p-3 ${view === p.id ? "border-cyan-700 bg-slate-950/60" : "border-slate-800"} ${p.archived ? "opacity-60" : ""}`}>
               {editing === p.id ? (
                 <ProjectForm
-                  start={{ name: p.name, color: p.color, instructions: p.instructions, localOnly: p.localOnly, profiles: p.profiles }}
+                  start={{ name: p.name, color: p.color, instructions: p.instructions, localOnly: p.localOnly, profiles: p.profiles, workspace: p.workspace ?? "" }}
                   profiles={names}
                   owners={owners}
                   saveLabel="Save"
@@ -213,6 +224,7 @@ export default function ProjectsPage() {
                     <div className="text-[11px] text-slate-500">
                       <Counts p={p} />
                       {p.profiles.length ? ` · sign-ins: ${p.profiles.join(", ")}` : ""}
+                      {` · workspace: ${p.workspace || p.id}`}
                     </div>
                   </div>
                   <div className="flex gap-1 text-xs shrink-0">

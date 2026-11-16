@@ -31,9 +31,14 @@ services:
       VIDEO_RENDER_URL: http://video:3020
       # Voiceovers and word-timed captions: the voice service below
       VOICE_URL: http://voice:3030
+      # Folders the Coder and File agents may edit (one per project; data/workspaces by
+      # default). To let them work on your own repos, mount the folder that holds them
+      # (the volume line below) and uncomment this:
+      # WORKSPACES_DIR: /workspaces
     volumes:
       - .:/app
       # - /mnt/c/Users/aldra/Documents/ObsidianVault:/vault
+      # - ~/code:/workspaces
     # Published on localhost only; port 3008 is taken by jarvis-harness
     ports:
       - "127.0.0.1:3010:3008"

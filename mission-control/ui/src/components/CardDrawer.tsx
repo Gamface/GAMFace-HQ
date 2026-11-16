@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import ChangeList from "./ChangeList";
+import type { ChangeSummary } from "./ChangeList";
 import { useProjects } from "../project";
 import { AGENT_COLORS, AGENT_LABELS, getJson, imageUrl, send, splitModel, uploadUrl } from "../api";
 import type { BoardCard } from "../api";
@@ -34,6 +36,8 @@ interface Detail {
   documents?: string[];
   profile?: string;
   project?: string;
+  workspace?: boolean;
+  changes?: string[];
   archived?: boolean;
   thread?: { role: "user" | "agent"; text: string }[];
   reply?: string;
@@ -254,6 +258,7 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
               <FilesBar taskId={id} files={d.files} canMake={Boolean(d.answer) && (col === "done" || col === "review")} />
             </div>
           ) : null}
+          {d?.changes?.length ? <CardChanges taskId={id} count={d.changes.length} /> : null}
           {error && <p className="mt-2 text-xs text-rose-300">{error}</p>}
           {skillNote && <p className="mt-2 text-xs text-violet-300">{skillNote}</p>}
           <div className="mt-3">
@@ -278,6 +283,7 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
                 documents: d.documents ?? [],
                 profile: d.profile ?? "",
                 project: d.project ?? null,
+                workspace: Boolean(d.workspace),
               }}
               cards={cards}
               selfId={id}
@@ -352,6 +358,26 @@ function DocChips({ ids }: { ids: string[] }) {
       {ids.map((id) => (
         <DocChip key={id} id={id} info={info[id]} />
       ))}
+    </div>
+  );
+}
+
+/** The files this card changed, with diffs and Undo. */
+function CardChanges({ taskId, count }: { taskId: string; count: number }) {
+  const [list, setList] = useState<ChangeSummary[]>([]);
+  const load = () =>
+    getJson<ChangeSummary[]>(`/api/changes?task=${taskId}`)
+      .then(setList)
+      .catch(() => {});
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId, count]);
+  if (!list.length) return null;
+  return (
+    <div className="mt-3 space-y-1">
+      <h3 className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold">File changes</h3>
+      <ChangeList list={list} onChanged={() => void load()} />
     </div>
   );
 }

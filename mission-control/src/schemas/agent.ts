@@ -74,6 +74,8 @@ export const AgentTaskSchema = z.object({
   profile: ProfileNameSchema.optional(),
   // The project the card belongs to; General when missing
   project: ProjectIdSchema.nullable().optional(),
+  // The Coder and File agents may create, change and delete files in the project's workspace (every change can be undone)
+  workspace: z.boolean().default(false),
   // Pictures for the vision agent to look at
   images: z.array(ImageIdSchema).max(6).default([]),
   // Audio clips, transcribed before the agent starts
@@ -161,6 +163,7 @@ export const TaskPatchSchema = z.object({
   profile: ProfileNameSchema.nullable().optional(),
   // Move the card to another project (null: General)
   project: ProjectIdSchema.nullable().optional(),
+  workspace: z.boolean().optional(),
   allowedSites: z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{1,253}$/)).max(10).optional(),
   images: z.array(ImageIdSchema).max(6).optional(),
   audio: z.array(AudioIdSchema).max(4).optional(),
@@ -211,6 +214,9 @@ export const TaskSummarySchema = z.object({
   // Browser profile (sign-ins) the card's browsing uses
   profile: z.string().optional(),
   project: z.string().optional(),
+  workspace: z.boolean().optional(),
+  // Change sets (file edits) this card made, newest last
+  changes: z.array(z.string()).optional(),
   images: z.array(z.string()).optional(),
   audio: z.array(z.string()).optional(),
   documents: z.array(z.string()).optional(),

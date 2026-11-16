@@ -11,6 +11,7 @@ export interface ProjectInfo {
   instructions: string;
   localOnly: boolean;
   archived: boolean;
+  workspace?: string | null;
   profiles: string[];
   ownBrand: boolean;
   counts: { cards: number; open: number; memories: number; skills: number; assets: number; routines: number };

@@ -61,6 +61,10 @@ import { KNOWN_VOICES, VoiceClient, extractNarration, sceneVoice, wantsCaptions,
 import type { Word } from "./hq/voice";
 import { AssetPatchSchema, AssetUploadSchema, Assets, SYSTEM_FONTS, assetBlock, publicName } from "./hq/assets";
 import { Projects, projectPrompt, projectScope, visibleIn } from "./hq/projects";
+import { Changes, rootLabel } from "./hq/changes";
+import type { Root } from "./hq/changes";
+import { Workspace, extractFileOps, namedWorkspace, workspaceBlock } from "./hq/workspace";
+import { readFileSync as readFileSyncFs } from "node:fs";
 import type { Asset, Brand } from "./hq/assets";
 import { upcoming, parseSchedule, validTimeZone } from "./hq/schedule";
 
@@ -96,6 +100,10 @@ const HARNESS_TOKEN = process.env.HARNESS_TOKEN || "";
 // HQ features (see README-HQ.md)
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
 const OBSIDIAN_VAULT = process.env.OBSIDIAN_VAULT || "";
+// The folders the Coder and File agents may edit, one per project ("general" for General)
+const WORKSPACES_DIR = path.resolve(process.env.WORKSPACES_DIR || path.join(DATA_DIR, "workspaces"));
+// How much of the workspace's file contents goes into a request (fits an 8K context)
+const WORKSPACE_CONTEXT_CHARS = Number(process.env.WORKSPACE_CONTEXT_CHARS ?? 12_000);
 const MEMORY_INTERVAL_MIN = Number(process.env.MEMORY_INTERVAL_MIN) || 30;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const TELEGRAM_ALLOWED = new Set(
@@ -361,6 +369,34 @@ hive.projectOf = (taskId) => {
   const t = tasks.get(taskId);
   return t ? (t.project ?? null) : undefined;
 };
+/** The workspace a project's agents edit. */
+function workspaceOf(project: string | null | undefined): Workspace {
+  const p = projects.get(project);
+  return namedWorkspace(p?.workspace || p?.id || "general", WORKSPACES_DIR);
+}
+// Every file an agent writes is recorded, so it can be looked at and undone
+const changes = new Changes(store.sql, DATA_DIR, (root: Root) => {
+  if (root.kind === "vault") return OBSIDIAN_VAULT ? new Workspace("vault", OBSIDIAN_VAULT) : null;
+  try {
+    const ws = namedWorkspace(root.name, WORKSPACES_DIR);
+    ws.ensure();
+    return ws;
+  } catch {
+    return null;
+  }
+});
+/** Records notes saved to the vault, so they can be undone. */
+function recordVault(task: Task, label: string, files: string[]) {
+  if (!OBSIDIAN_VAULT || !files.length) return;
+  const set = changes.recordCreated(
+    { taskId: task.id, project: projects.idOf(task.project), label, root: { kind: "vault" } },
+    files.map((f) => ({ path: path.relative(OBSIDIAN_VAULT, f).split(path.sep).join("/"), text: readFileSyncFs(f, "utf8") })),
+  );
+  if (set) {
+    task.changes = [...(task.changes ?? []), set.id];
+    store.save(task);
+  }
+}
 /** Runs fn with the card's project as the scope of every model call (local-only projects stay local). */
 const inProject = <T>(project: string | null | undefined, fn: () => Promise<T>) => projectScope.run(projects.scope(project), fn);
 
@@ -1091,6 +1127,14 @@ async function runTask(task: Task) {
       });
       if (plan.picked.length) push(`[Assets for this video: ${plan.picked.map((a) => a.name).join(", ")}]\n`);
     }
+    // Workspace cards: the files, and how to change them
+    const editsFiles = Boolean(task.workspace) && !task.readOnly && !isRoutine(task);
+    const workspace = editsFiles ? workspaceOf(task.project) : null;
+    if (workspace) {
+      workspace.ensure();
+      request += workspaceBlock(workspace, ask, WORKSPACE_CONTEXT_CHARS);
+      push(`[Workspace: ${workspace.name}]\n`);
+    }
     // Approved skills that fit this request
     const leadSkills = useTeam ? skills.match(ask, lead, 2, projects.idOf(task.project)) : [];
     if (leadSkills.length) {
@@ -1127,6 +1171,8 @@ async function runTask(task: Task) {
 
     const handoffs = delegate ? parseDelegations(first) : [];
     let answer = first;
+    // Teammates' file blocks (the lead's final answer may only summarize them)
+    const mateEdits: string[] = [];
     if (handoffs.length) {
       task.delegatedTo = [];
       const results: { agent: AgentTarget; task: string; output: string; private: boolean }[] = [];
@@ -1143,7 +1189,8 @@ async function runTask(task: Task) {
           push(`[Using skill${mateSkills.length > 1 ? "s" : ""}: ${mateSkills.map((s) => s.name).join(", ")}]\n`);
           for (const s of mateSkills) skills.recordUse(s.id);
         }
-        const mateTask = h.task + skillBlock(mateSkills);
+        // Coder and File teammates get the workspace too
+        const mateTask = h.task + skillBlock(mateSkills) + (workspace && (h.agent === "coder" || h.agent === "file") ? workspaceBlock(workspace, `${ask}\n${h.task}`, WORKSPACE_CONTEXT_CHARS) : "");
         const turn = await agentTurn(
           task,
           h.agent,
@@ -1171,6 +1218,7 @@ async function runTask(task: Task) {
         openSub = null;
         // Remember which answers came from private material, so they're withheld if the lead runs in the cloud
         results.push({ agent: h.agent, task: h.task, output, private: turn.sawPrivate });
+        if (workspace && (h.agent === "coder" || h.agent === "file")) mateEdits.push(output);
         log(h.agent, "finished", output);
       }
       flush();
@@ -1197,6 +1245,25 @@ async function runTask(task: Task) {
     // Read-only runs don't write to the vault
     const notes = task.readOnly || isRoutine(task) ? [] : saveNotes(OBSIDIAN_VAULT, redact(answer).text);
     if (notes.length) push(`\n\n(Saved to vault: ${notes.map((n) => path.basename(n)).join(", ")})`);
+    recordVault(task, `Notes from “${task.title || task.prompt.slice(0, 60)}”`, notes);
+    // File edits: the teammates' first, then the lead's (a later block for the same file wins)
+    if (workspace) {
+      const ops = new Map<string, string | null>();
+      for (const text of [...mateEdits, answer]) for (const op of extractFileOps(text)) ops.set(op.path, op.text);
+      if (ops.size) {
+        const out = changes.apply(
+          { taskId: task.id, project: projects.idOf(task.project), label: task.reply ? `${task.title || task.prompt.slice(0, 60)} (reply)` : task.title || task.prompt.slice(0, 80), root: { kind: "workspace", name: workspace.name } },
+          [...ops].map(([p, text]) => ({ path: p, text })),
+        );
+        if (out.set) {
+          task.changes = [...(task.changes ?? []), out.set.id];
+          const list = out.set.files.map((f) => `${f.path} (${f.before === null ? "new, " : f.after === null ? "deleted, " : ""}+${f.added} −${f.removed})`).join(", ");
+          push(`\n\n📝 Changed ${out.set.files.length} file${out.set.files.length > 1 ? "s" : ""} in ${rootLabel(out.set.root)}: ${list}. Undo it from the card.\n`);
+          log(lead, "files", `${out.set.files.length} file(s) changed in ${workspace.name}`);
+        } else if (!out.errors.length) push("\n\n(The file blocks matched what's already there; nothing changed.)\n");
+        for (const e of out.errors) push(`\n[Not written: ${e}]\n`);
+      }
+    }
     flush();
     task.answer = redact(answer.replace(/<note title="[^"]*">[\s\S]*?<\/note>/g, "")).text.trim();
     log(lead, "complete", task.answer);
@@ -1404,6 +1471,7 @@ function createTask(input: unknown, extra: { chatId?: string; routineId?: string
     allowedSites: d.allowedSites.length ? d.allowedSites : undefined,
     profile: d.profile,
     project: project?.id,
+    workspace: d.workspace && !routine.readOnly && d.source !== "routine" ? true : undefined,
     images: d.images.length ? d.images : undefined,
     audio: d.audio.length ? d.audio : undefined,
     documents: d.documents.length ? d.documents : undefined,
@@ -1788,6 +1856,10 @@ function patchTask(task: Task, input: unknown): { error?: string } {
     task.readOnly = p.readOnly || undefined;
   }
   if (p.allowedSites !== undefined) task.allowedSites = p.allowedSites.length ? p.allowedSites : undefined;
+  if (p.workspace !== undefined) {
+    if (!editable) return { error: "Only cards in Backlog or Ready can change workspace editing" };
+    task.workspace = p.workspace && !isRoutine(task) ? true : undefined;
+  }
   if (p.project !== undefined) {
     const to = p.project ? projects.get(p.project) : undefined;
     if (p.project && !to) return { error: "Unknown project" };
@@ -1846,7 +1918,8 @@ function deliverRoutine(task: Task) {
     if (task.deliverTo === "telegram" && telegram && task.chatId) {
       telegram.send(task.chatId, deliveryText(task)).catch((e) => hive.log("telegram", "error", String(e)));
     } else if (task.deliverTo === "obsidian" && OBSIDIAN_VAULT && task.status === "complete" && task.answer) {
-      saveRoutineNote(OBSIDIAN_VAULT, task.title || "routine", task.answer);
+      const file = saveRoutineNote(OBSIDIAN_VAULT, task.title || "routine", task.answer);
+      recordVault(task, `Routine note “${task.title || "routine"}”`, [file]);
     }
   } catch (error) {
     hive.log("routine", "error", `delivery failed: ${error instanceof Error ? error.message : String(error)}`, task.id);
@@ -2133,6 +2206,55 @@ app.delete("/api/brand", requireToken, (req, res) => {
   res.json(assets.brand(null));
 });
 
+// --- Change history and workspaces ----------------------------------------------
+
+const changeView = (c: ReturnType<Changes["list"]>[number]) => ({
+  ...c,
+  where: rootLabel(c.root),
+  taskTitle: c.taskId ? (tasks.get(c.taskId)?.title ?? store.find(c.taskId)?.title) : undefined,
+});
+
+app.get("/api/changes", (req, res) => {
+  const list = changes.list({ project: projectParam(req.query.project), taskId: typeof req.query.task === "string" ? req.query.task : undefined, limit: Number(req.query.limit) || 100 });
+  res.json(list.map(changeView));
+});
+app.get("/api/changes/:id", (req, res) => {
+  const d = changes.detail(String(req.params.id));
+  if (!d) return res.status(404).json({ error: "Change not found" });
+  res.json({ ...changeView(d), files: d.files, conflicts: d.undoneBy ? [] : changes.conflicts(d) });
+});
+// Undo (or redo, for an undo). Files changed since need { force: true }.
+app.post("/api/changes/:id/undo", requireToken, (req, res) => {
+  const set = changes.get(String(req.params.id));
+  if (!set) return res.status(404).json({ error: "Change not found" });
+  const running = set.taskId ? tasks.get(set.taskId) : undefined;
+  if (running && RUNNING_STATUSES.includes(running.status)) return res.status(409).json({ error: "Wait for the card to finish" });
+  const out = changes.undo(set.id, req.body?.force === true);
+  if ("conflicts" in out) return res.status(409).json({ error: `Changed since: ${out.conflicts.join(", ")}. Undo anyway?`, conflicts: out.conflicts });
+  if ("error" in out) return res.status(400).json(out);
+  const t = set.taskId ? tasks.get(set.taskId) : undefined;
+  if (t) {
+    t.changes = [...(t.changes ?? []), out.set.id];
+    store.save(t);
+  }
+  hive.log("changes", out.set.label.startsWith("Redo") ? "redo" : "undo", `${set.label} (${set.files.length} file${set.files.length > 1 ? "s" : ""} in ${rootLabel(set.root)})`, set.taskId);
+  res.json(changeView(out.set));
+});
+
+app.get("/api/workspace", (req, res) => {
+  const p = projectParam(req.query.project) ?? null;
+  const ws = workspaceOf(p);
+  const { files, truncated } = ws.tree(2000);
+  res.json({ name: ws.name, root: ws.root, exists: ws.exists(), files, truncated });
+});
+app.get("/api/workspace/file", (req, res) => {
+  const ws = workspaceOf(projectParam(req.query.project) ?? null);
+  const r = ws.read(String(req.query.path ?? ""));
+  if ("error" in r) return res.status(400).json(r);
+  if (r.text === null) return res.status(404).json({ error: "No such file" });
+  res.json({ path: String(req.query.path), text: r.text });
+});
+
 // --- Projects ---------------------------------------------------------------
 
 function projectView(p: ReturnType<Projects["list"]>[number]) {
@@ -2185,6 +2307,7 @@ app.delete("/api/projects/:id", requireToken, (req, res) => {
   ].filter(Boolean);
   if (left.length) return res.status(409).json({ error: `“${p.name}” still has ${left.join(", ")}. Move or delete them first, or archive the project.` });
   const forgot = memory.removeProject(p.id);
+  changes.moveProject(p.id, null);
   assets.clearBrand(p.id);
   projects.remove(p.id);
   hive.log("projects", "deleted", `${p.name}${forgot ? ` and ${forgot} memories` : ""}`);

@@ -155,6 +155,38 @@ into an MP4 that appears on the card (🎬): play it there or download it.
 API: `POST /api/tasks/:id/video` renders the scene in a finished card's answer. The video
 service itself: `POST /render`, `GET /jobs/:id`, `GET /jobs/:id/video`, `GET /health`.
 
+## Workspaces and undo (time travel)
+
+The Coder and File agents can now edit real files, and every change can be undone
+(Agent Zero's "time travel" idea).
+
+- **Workspaces.** Each project has a folder its agents may edit: `data/workspaces/<project>`
+  by default (`general` for General), or a folder you name in the project's settings. To
+  let them work on your own repos, mount the folder that holds them in
+  `docker-compose.yml` (`- ~/code:/workspaces`), set `WORKSPACES_DIR: /workspaces`, and
+  give the project the repo's folder name.
+- **Per card.** Tick **Edit files in the workspace** on a card. The agent sees the file
+  list and the contents of the files you name (or the whole workspace when it's small;
+  `WORKSPACE_CONTEXT_CHARS`, 12,000 by default for an 8K context), and writes whole files
+  in ```` ```file path=… ```` blocks (```` ```delete path=… ```` deletes). Mission Control
+  writes them after the answer. Teammates' blocks count too when Jarvis delegates.
+- **Never touched:** paths outside the workspace (no `..`, no absolute paths, no symlinks
+  leading out), secret files (`.env`, keys, `.npmrc`, credentials, `.git/`), binary files,
+  files over 256 KB. Read-only cards and routines never write.
+- **Undo.** Each card's edits are one change set: see it on the card (**File changes**,
+  with diffs) or on the **Files** page (the project's whole history, plus a file viewer).
+  **Undo** puts the files back as they were. If a file changed since (a later card or
+  your own edit), it asks first, and the overwritten version stays in the history.
+  Undoing an undo redoes it. Notes the agents save to your vault (and routine notes)
+  are recorded the same way, so they can be undone too.
+- Contents are kept by hash in `data/blobs`; the last 5,000 change sets are kept.
+- Workspace files go to the Coder's model like the rest of the request (secret files
+  never do). For code that mustn't reach a cloud model, use a project kept on this PC.
+
+API: `GET /api/changes?project=&task=`, `GET /api/changes/:id` (diffs and conflicts),
+`POST /api/changes/:id/undo` (`{force: true}` past conflicts), `GET /api/workspace?project=`,
+`GET /api/workspace/file?project=&path=`; `workspace` on cards, `changes` in card summaries.
+
 ## Projects
 
 Separate workspaces on one Mission Control (an idea from Agent Zero, MIT). Pick the
@@ -490,7 +522,7 @@ arrive on their own:
 cd ~/sandcastle/ts-harness
 docker compose pull browser               # newer headless Chrome
 docker compose up -d --build --force-recreate   # --build: the video and voice services (first time ~2 GB)
-docker compose exec harness npm test      # optional: about 125 tests
+docker compose exec harness npm test      # optional: about 130 tests
 docker compose exec voice python -m unittest test_timing   # optional: the voice service's timing
 ```
 
