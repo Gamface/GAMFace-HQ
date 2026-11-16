@@ -118,6 +118,11 @@ export class TaskStore {
     return row.m ?? 0;
   }
 
+  /** The database itself, for indexes that live beside the tasks (skills, history search). */
+  get sql(): DatabaseSync {
+    return this.db;
+  }
+
   save(task: Task) {
     const persisted: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(task)) if (!VOLATILE.has(k) && v !== undefined) persisted[k] = v;
@@ -142,6 +147,28 @@ export class TaskStore {
   archive(taskId: string) {
     this.db.prepare("UPDATE tasks SET archived = 1 WHERE id = ? OR parent_id = ?").run(taskId, taskId);
     for (const t of [...this.tasks.values()]) if (t.id === taskId || t.parentId === taskId) this.tasks.delete(t.id);
+  }
+
+  /** A card on the board, or an archived one read from disk (marked archived). */
+  find(taskId: string): (Task & { archived?: boolean }) | undefined {
+    const live = this.tasks.get(taskId);
+    if (live) return live;
+    const row = this.db.prepare("SELECT data FROM tasks WHERE id = ? AND archived = 1").get(taskId) as { data: string } | undefined;
+    if (!row) return undefined;
+    const t = JSON.parse(row.data) as Task;
+    return { ...t, events: [], archived: true };
+  }
+
+  /** Puts an archived card (and its subtasks) back on the board. */
+  restore(taskId: string): Task | undefined {
+    const rows = this.db.prepare("SELECT data FROM tasks WHERE (id = ? OR parent_id = ?) AND archived = 1").all(taskId, taskId) as { data: string }[];
+    if (!rows.length) return undefined;
+    this.db.prepare("UPDATE tasks SET archived = 0 WHERE id = ? OR parent_id = ?").run(taskId, taskId);
+    for (const r of rows) {
+      const t = JSON.parse(r.data) as Task;
+      this.tasks.set(t.id, { ...t, events: [] });
+    }
+    return this.tasks.get(taskId);
   }
 
   archiveOne(taskId: string) {

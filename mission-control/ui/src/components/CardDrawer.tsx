@@ -32,6 +32,7 @@ interface Detail {
   audio?: string[];
   documents?: string[];
   profile?: string;
+  archived?: boolean;
   thread?: { role: "user" | "agent"; text: string }[];
   reply?: string;
   acceptedAt?: number;
@@ -95,6 +96,7 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
   };
 
   const col = d ? columnOf(d) : null;
+  const [skillNote, setSkillNote] = useState<string | null>(null);
   const output = d ? d.events.map((e) => e.logChunk).join("") : "";
   const model = splitModel(d?.model || d?.plannedModel);
   const titleOf = (cid: string) => cards.find((c) => c.id === cid)?.title ?? cid.slice(0, 8);
@@ -163,7 +165,15 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
             </div>
           )}
           {d?.interrupted && <p className="mt-2 text-xs text-amber-300">⚠ A restart cut this run short. Retry to run it again.</p>}
-          {d && (
+          {d?.archived && (
+            <div className="flex items-center gap-2 mt-3 text-xs text-slate-400">
+              <span className="px-2 py-0.5 rounded bg-slate-800">Archived</span> This card was removed from the board; it's kept for history.
+              <button className={`${btn} bg-slate-700 hover:bg-slate-600 text-slate-200`} onClick={() => act(() => send("POST", `/api/tasks/${id}/restore`))}>
+                Put back on the board
+              </button>
+            </div>
+          )}
+          {d && !d.archived && (
             <div className="flex flex-wrap gap-2 mt-3">
               {col === "backlog" && (
                 <button className={`${btn} bg-cyan-600 hover:bg-cyan-500 text-white`} onClick={() => act(() => send("PATCH", `/api/tasks/${id}`, { column: "ready" }))}>
@@ -195,6 +205,20 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
                   Cancel
                 </button>
               )}
+              {(col === "done" || col === "review") && d.answer && (
+                <button
+                  className={`${btn} bg-violet-800 hover:bg-violet-700 text-violet-100`}
+                  title="Ask a local model to turn this card into a reusable skill (you review it on the Skills page)"
+                  onClick={() =>
+                    act(async () => {
+                      const s = await send<{ name: string }>("POST", `/api/tasks/${id}/skill`);
+                      setSkillNote(`Drafted the skill “${s.name}”: review it on the Skills page.`);
+                    })
+                  }
+                >
+                  ✨ Make a skill
+                </button>
+              )}
               {col !== "running" && (
                 <button className={`${btn} bg-slate-800 hover:bg-slate-700 text-slate-400 ml-auto`} onClick={() => act(() => send("POST", `/api/tasks/${id}/archive`), true)}>
                   Remove from board
@@ -208,6 +232,7 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
             </div>
           ) : null}
           {error && <p className="mt-2 text-xs text-rose-300">{error}</p>}
+          {skillNote && <p className="mt-2 text-xs text-violet-300">{skillNote}</p>}
           <div className="mt-3">
             <ApprovalsBar taskId={id} />
           </div>

@@ -14,6 +14,7 @@ import FilesBar from "./FilesBar";
 import PreviewPane from "./PreviewPane";
 import TeamPage from "./TeamPage";
 import RoutinesPage from "./RoutinesPage";
+import SkillsPage from "./SkillsPage";
 import ApprovalsBar from "./ApprovalsBar";
 
 interface SystemInfo {
@@ -48,8 +49,8 @@ interface MemoryItem {
 
 type RightTab = "commands" | "hive" | "memory";
 type CenterTab = "output" | "preview" | "browser";
-type View = "console" | "board" | "routines" | "team";
-const VIEWS: View[] = ["board", "routines", "team"];
+type View = "console" | "board" | "routines" | "skills" | "team";
+const VIEWS: View[] = ["board", "routines", "skills", "team"];
 
 const STATUS_STYLES: Record<AgentStatus, string> = {
   idle: "bg-slate-700 text-slate-200",
@@ -212,13 +213,16 @@ export default function MissionControl() {
       <header className="col-span-3 bg-slate-900 border border-slate-800 rounded-xl px-6 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className={`h-3 w-3 rounded-full ${connectionDot}`} title={`Harness: ${connection}`} />
-          <h1 className="font-semibold text-lg tracking-wide">Mission Control — Sandcastle & Jarvis</h1>
+          <h1 className="font-semibold text-lg tracking-wide whitespace-nowrap" title="Mission Control — Sandcastle & Jarvis">
+            Mission Control<span className="hidden 2xl:inline"> — Sandcastle & Jarvis</span>
+          </h1>
           <nav className="ml-4 flex gap-1 text-xs">
             {(
               [
                 ["console", "Console"],
                 ["board", "Board"],
                 ["routines", "Routines"],
+                ["skills", "Skills"],
                 ["team", "Team"],
               ] as [View, string][]
             ).map(([key, label]) => (
@@ -232,9 +236,9 @@ export default function MissionControl() {
             ))}
           </nav>
         </div>
-        <div className="flex items-center gap-3 text-sm font-mono">
+        <div className="flex items-center gap-3 text-sm font-mono whitespace-nowrap min-w-0">
           <NoticesBar />
-          <span className="text-cyan-400">
+          <span className="text-cyan-400 truncate max-w-[22rem]">
             State: {connection !== "open" ? `Harness ${connection}` : selected ? `${selected.agent} [${selected.status}]` : "Online / Ready"}
           </span>
           <span className="bg-slate-800 px-3 py-1 rounded-md border border-slate-700">Model: {system?.model ?? "—"}</span>
@@ -266,6 +270,7 @@ export default function MissionControl() {
       {view === "board" && <Board />}
       {view === "team" && <TeamPage />}
       {view === "routines" && <RoutinesPage />}
+      {view === "skills" && <SkillsPage />}
       {view === "console" && (<>
       {/* LEFT: TASK HISTORY */}
       <aside className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-4 min-h-0">

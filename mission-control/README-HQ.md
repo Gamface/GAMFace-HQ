@@ -126,6 +126,36 @@ runs. Each has one destination (`deliverTo`: `dashboard`, `telegram` or `obsidia
 in `HQ/routines`); its prompt can't switch models, and its findings stay on its card rather
 than in the hive log. Rules: `src/hq/routine.ts`.
 
+## Skills and history search (Phase 6)
+
+**Skills** are reusable procedures the agents follow when a request fits (an idea from
+Hermes Agent). They're learned from your own finished work, and nothing is used until you
+approve it.
+- After a complex card (Jarvis delegated, the browser took 4+ steps, or you replied to
+  it), your local **Memory** model drafts a skill from it when nothing else is running:
+  a name, when to use it, which agents use it, and general numbered steps. You can also
+  press **✨ Make a skill** on any finished card. A notice tells you a draft is waiting.
+- **Skills** page: edit a draft and **Approve** it, or **Discard** it. A draft named like
+  an existing skill is shown as an update and merges into it. Switch skills on and off,
+  edit or delete them, or add your own (those are on straight away). Turn off automatic
+  drafts there too.
+- When a request shares at least two words with an active skill's name or description,
+  and the skill is for that agent, it's added to the agent's instructions for that
+  request (at most two). The output says "[Using skill: …]". Teammates Jarvis delegates
+  to get their matching skills too.
+- Skills drafted from private material (vault notes, memories, attachments) are marked 🔒
+  and withheld from cloud models. Read-only runs, routines, voice and evals never draft
+  skills.
+
+**History search:** the box on the Board searches every card's request, replies and
+answer, removed (archived) cards included. Words match as prefixes; put "an exact
+phrase" in quotes. Click a result to open the card; archived cards have **Put back on
+the board**. Cards from before this update are indexed on first start.
+
+API: `GET/POST /api/skills`, `PATCH/DELETE /api/skills/:id`, `POST /api/skills/:id/approve`,
+`PUT /api/skills/settings` (`{ auto }`), `POST /api/tasks/:id/skill`, `GET /api/search?q=`,
+`POST /api/tasks/:id/restore`.
+
 ## Browser profiles and taking over (Phase 5)
 
 Each **browser profile** is a separate set of sign-ins ("main", "shopping", "work"…). Its

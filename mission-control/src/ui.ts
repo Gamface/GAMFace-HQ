@@ -53,6 +53,8 @@ import { ApprovalCenter, ApprovalPolicySchema } from "./hq/approvals";
 import type { ActionRequest, Approval } from "./hq/approvals";
 import { PROFILE_NAME, Profiles } from "./hq/profiles";
 import { BrowserControl } from "./hq/takeover";
+import { HistoryIndex, SKILL_DRAFT_SYSTEM, Skills, skillDraftPrompt } from "./hq/skills";
+import type { Skill } from "./hq/skills";
 import { upcoming, parseSchedule, validTimeZone } from "./hq/schedule";
 
 // --- Config (env vars, see .env.example) ------------------------------------
@@ -340,6 +342,57 @@ let runningTaskId: string | null = null;
 let lastModelRef: string | null = null;
 // Memory extraction runs between tasks so it never competes with one for the GPU
 const memoryJobs: { agent: AgentTarget; prompt: string; answer: string; private: boolean }[] = [];
+
+// --- Skills and history search (Phase 6) -----------------------------------------
+const skills = new Skills(store.sql);
+const historyIndex = new HistoryIndex(store.sql);
+// Index cards from before history search existed
+if (historyIndex.count() === 0) for (const t of store.tasks.values()) if (!t.parentId) historyIndex.put(t);
+// Finished cards waiting for a skill draft (run when nothing else is queued)
+const skillJobs: string[] = [];
+const autoSkills = () => store.getSetting<boolean>("autoSkills", true);
+
+/** Skills as instructions for an agent. Private ones are withheld from cloud models. */
+function skillBlock(list: Skill[]): string {
+  if (!list.length) return "";
+  return (
+    "\n\nSKILLS (procedures that worked before; follow them when they fit this request, and adapt them when they don't quite):\n" +
+    list.map((s) => (s.private ? privateBlock(`### ${s.name}\n${s.steps}`, `(The skill “${s.name}” is private and stays on the user's PC.)`) : `### ${s.name}\n${s.steps}`)).join("\n\n")
+  );
+}
+
+/** Whether a finished card is worth a skill draft: teamwork, real browsing or a back-and-forth. */
+function worthASkill(task: Task): boolean {
+  if (task.source === "eval" || task.source === "voice" || isRoutine(task) || task.readOnly || !task.answer) return false;
+  const browserSteps = (task.events ?? []).reduce((n, e) => n + (e.logChunk.match(/🌐 /g)?.length ?? 0), 0);
+  return (task.delegatedTo?.length ?? 0) >= 1 || browserSteps >= 4 || (task.thread?.length ?? 0) >= 2;
+}
+
+/** Asks a local model for a skill from a finished card. Returns the draft, or why there isn't one. */
+async function draftSkill(task: Task): Promise<Skill | { error: string }> {
+  if (!task.answer) return { error: "This card has no answer to learn from" };
+  const steps = (task.events ?? [])
+    .flatMap((e) => e.logChunk.split("\n"))
+    .filter((l) => l.startsWith("🌐 ") || l.startsWith("── "))
+    .join("\n");
+  const priv = Boolean(task.usedPrivate);
+  const content = skillDraftPrompt({
+    request: task.thread?.length ? `${task.prompt}\n(then: ${task.reply ?? ""})` : task.prompt,
+    agents: [task.targetAgent, ...(task.delegatedTo ?? [])],
+    answer: priv ? privateBlock(task.answer, "(The result used private material and is withheld.)") : task.answer,
+    steps,
+  });
+  const out = (await roleJson("memory", { privateTask: priv })("memory", [
+    { role: "system", content: SKILL_DRAFT_SYSTEM },
+    { role: "user", content },
+  ])) as { skill?: unknown };
+  if (!out.skill || typeof out.skill !== "object") return { error: "The model found no reusable procedure in this card" };
+  const made = skills.create(out.skill, { status: "draft", private: priv, sourceTaskId: task.id, sourceTitle: task.title || task.prompt });
+  if ("error" in made) return { error: `The draft wasn't usable (${made.error})` };
+  hive.log("skills", "drafted", `${made.name}${made.replaces ? " (update)" : ""}`, task.id);
+  notices.add("skill", `skill:${made.id}`, `New skill draft “${made.name}” from “${made.sourceTitle}”: review it on the Skills page.`);
+  return made;
+}
 let backgroundBusy = false;
 // Ids keep increasing across restarts, so a reconnecting UI never mistakes
 // new events for ones it already has
@@ -977,6 +1030,13 @@ async function runTask(task: Task) {
       emit(task, "thinking");
     }
     request += pdfNote;
+    // Approved skills that fit this request
+    const leadSkills = useTeam ? skills.match(ask, lead) : [];
+    if (leadSkills.length) {
+      push(`[Using skill${leadSkills.length > 1 ? "s" : ""}: ${leadSkills.map((s) => s.name).join(", ")}]\n`);
+      for (const s of leadSkills) skills.recordUse(s.id);
+      request += skillBlock(leadSkills);
+    }
 
     const firstTurn = await agentTurn(
       task,
@@ -991,7 +1051,7 @@ async function runTask(task: Task) {
         },
       ],
       // The browser agent works from this text alone, so a reply carries the original request
-      (followUp ? `${ask}\n\n(This follows up on the earlier request: ${task.prompt.slice(0, 500)})` : ask) + pdfNote,
+      (followUp ? `${ask}\n\n(This follows up on the earlier request: ${task.prompt.slice(0, 500)})` : ask) + pdfNote + skillBlock(leadSkills),
       controller.signal,
       push,
       override,
@@ -1017,6 +1077,12 @@ async function runTask(task: Task) {
         log("planner", "delegated", `→ ${h.agent}: ${h.task}`);
         emit(task, "delegating", `\n\n── ${TEAM[h.agent].name} (${openSub.model}) ── ${h.task}\n\n`);
         emit(task, "thinking");
+        const mateSkills = skills.match(h.task, h.agent).filter((s) => !leadSkills.some((l) => l.id === s.id));
+        if (mateSkills.length) {
+          push(`[Using skill${mateSkills.length > 1 ? "s" : ""}: ${mateSkills.map((s) => s.name).join(", ")}]\n`);
+          for (const s of mateSkills) skills.recordUse(s.id);
+        }
+        const mateTask = h.task + skillBlock(mateSkills);
         const turn = await agentTurn(
           task,
           h.agent,
@@ -1024,12 +1090,12 @@ async function runTask(task: Task) {
             { role: "system", content: systemPrompt(task, h.agent, { team: true, delegate: false }) },
             {
               role: "user",
-              content: userMessage(h.agent, h.task, h.task, true),
+              content: userMessage(h.agent, mateTask, h.task, true),
               // A handoff to Vision brings the card's pictures with it
               ...(h.agent === "vision" && images.length ? { images } : {}),
             },
           ],
-          h.task,
+          mateTask,
           controller.signal,
           push,
           undefined,
@@ -1074,6 +1140,7 @@ async function runTask(task: Task) {
     task.answer = redact(answer.replace(/<note title="[^"]*">[\s\S]*?<\/note>/g, "")).text.trim();
     log(lead, "complete", task.answer);
     // Read-only runs don't save memories either
+    if (autoSkills() && worthASkill(task) && !skills.draftedFrom(task.id)) skillJobs.push(task.id);
     if (useTeam && !task.readOnly && !isRoutine(task) && task.answer) memoryJobs.push({ agent: lead, prompt: ask, answer: task.answer, private: usedPrivate });
     if (makePdf && task.answer) {
       emit(task, "executing_tool", "\n\n── Making the PDF ──\n");
@@ -1107,6 +1174,7 @@ async function runTask(task: Task) {
     clearTimeout(timeout);
     clearInterval(flushTimer);
     taskTimers.delete(task.id);
+    if (!task.parentId) historyIndex.put(task);
     approvals.endTask(task.id);
     task.awaitingApproval = undefined;
     task.finishedAt = Date.now();
@@ -1135,10 +1203,27 @@ async function pump() {
   }
 }
 
+// A skill draft from a finished card, when nothing else is waiting
+async function runSkillJob() {
+  const id = skillJobs.shift();
+  const task = id ? tasks.get(id) : undefined;
+  if (!task) return;
+  backgroundBusy = true;
+  try {
+    const out = await draftSkill(task);
+    if ("error" in out) hive.log("skills", "no draft", out.error, task.id);
+  } catch (error) {
+    hive.log("skills", "error", error instanceof Error ? error.message : String(error));
+  } finally {
+    backgroundBusy = false;
+    void pump();
+  }
+}
+
 // Memory extraction only runs when no task is waiting
 async function runBackgroundJob() {
   const job = memoryJobs.shift();
-  if (!job) return;
+  if (!job) return runSkillJob();
   backgroundBusy = true;
   try {
     const saved = await memory.extract(job.agent, job.prompt, job.answer, job.private);
@@ -1241,6 +1326,7 @@ function createTask(input: unknown, extra: { chatId?: string; routineId?: string
   }
 
   store.add(task);
+  historyIndex.put(task);
   emit(task, task.status, `> ${task.prompt}\n\n`);
   void pump();
   return { task, status: 202 };
@@ -1517,10 +1603,12 @@ app.get("/api/tasks", (_req: Request, res: Response) => {
 });
 
 app.get("/api/tasks/:id", (req: Request, res: Response) => {
-  const task = tasks.get(String(req.params.id));
+  // Archived cards open too (from history search), read from disk
+  const task = store.find(String(req.params.id));
   if (!task) return res.status(404).json({ error: "Task not found" });
   res.json({
     ...summarize(task),
+    archived: (task as { archived?: boolean }).archived || undefined,
     answer: task.answer,
     thread: task.thread,
     plannedModel: plannedModel(task),
@@ -1732,6 +1820,74 @@ app.post("/api/memories/:id/:action", requireToken, (req, res) => {
 app.get("/stream", handleStream);
 app.post("/command", requireToken, (req, res) => enqueue(req.body, res));
 app.post("/cancel", requireToken, (req, res) => cancel(req.body?.taskId, res));
+
+// --- Skills and history search API ----------------------------------------------
+app.get("/api/skills", (_req, res) => {
+  res.json({ skills: skills.list(), auto: autoSkills() });
+});
+app.post("/api/skills", requireToken, (req, res) => {
+  // Skills you write yourself are on straight away
+  const out = skills.create(req.body, { status: "active" });
+  if ("error" in out) return res.status(400).json(out);
+  hive.log("skills", "added", out.name);
+  res.status(201).json(out);
+});
+app.patch("/api/skills/:id", requireToken, (req, res) => {
+  const out = skills.update(String(req.params.id), req.body);
+  if ("error" in out) return res.status(out.error === "Skill not found" ? 404 : 400).json(out);
+  if (req.body?.status === "active") hive.log("skills", "approved", out.name);
+  res.json(out);
+});
+app.post("/api/skills/:id/approve", requireToken, (req, res) => {
+  const out = skills.approve(String(req.params.id));
+  if ("error" in out) return res.status(out.error === "Skill not found" ? 404 : 400).json(out);
+  hive.log("skills", "approved", out.name);
+  res.json(out);
+});
+app.delete("/api/skills/:id", requireToken, (req, res) => {
+  if (!skills.remove(String(req.params.id))) return res.status(404).json({ error: "Skill not found" });
+  res.json({ ok: true });
+});
+app.put("/api/skills/settings", requireToken, (req, res) => {
+  store.setSetting("autoSkills", req.body?.auto !== false);
+  res.json({ auto: autoSkills() });
+});
+// Draft a skill from a finished card now
+app.post("/api/tasks/:id/skill", requireToken, async (req, res) => {
+  const task = tasks.get(String(req.params.id));
+  if (!task || task.parentId) return res.status(404).json({ error: "Task not found" });
+  if (!TERMINAL_STATUSES.includes(task.status)) return res.status(400).json({ error: "Wait for the card to finish" });
+  try {
+    const out = await draftSkill(task);
+    if ("error" in out) return res.status(422).json(out);
+    res.status(201).json(out);
+  } catch (e) {
+    res.status(502).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+app.post("/api/tasks/:id/restore", requireToken, (req, res) => {
+  const t = store.restore(String(req.params.id));
+  if (!t) return res.status(404).json({ error: "No archived card with that id" });
+  hive.log(t.targetAgent, "restored", t.title || t.prompt.slice(0, 80), t.id);
+  res.json(summarize(t));
+});
+
+app.get("/api/search", (req, res) => {
+  const q = String(req.query.q ?? "").slice(0, 200);
+  const hits = historyIndex
+    .search(q)
+    .map((h) => {
+      const t = store.find(h.taskId);
+      if (!t) {
+        historyIndex.remove(h.taskId);
+        return null;
+      }
+      return { ...h, status: t.status, createdAt: t.createdAt, archived: Boolean(t.archived), agent: t.targetAgent };
+    })
+    .filter(Boolean);
+  res.json(hits);
+});
 
 // --- Approvals API -----------------------------------------------------------
 app.get("/api/approvals", (_req, res) => {

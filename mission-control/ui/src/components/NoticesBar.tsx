@@ -12,7 +12,7 @@ interface Notice {
   count: number;
 }
 
-const ICON: Record<string, string> = { budget: "💸", "local-only": "🔒", "price-missing": "🏷", fallback: "↪", "read-only": "👁" };
+const ICON: Record<string, string> = { budget: "💸", "local-only": "🔒", "price-missing": "🏷", fallback: "↪", "read-only": "👁", routine: "⏱", skill: "✨" };
 
 export default function NoticesBar() {
   const [list, setList] = useState<Notice[]>([]);
@@ -46,7 +46,7 @@ export default function NoticesBar() {
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="px-3 py-1 rounded-md border border-amber-700 bg-amber-950/70 text-amber-200 text-sm font-mono"
+        className="px-3 py-1 rounded-md border border-amber-700 bg-amber-950/70 text-amber-200 text-sm font-mono whitespace-nowrap"
         title="Budget, local-only and fallback notices"
       >
         ⚠ {list.length} notice{list.length === 1 ? "" : "s"}

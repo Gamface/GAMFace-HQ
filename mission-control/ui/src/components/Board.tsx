@@ -90,6 +90,7 @@ export default function Board() {
           <input type="checkbox" checked={hideDone} onChange={(e) => setHideDone(e.target.checked)} /> Hide Done
         </label>
         <span className="text-slate-500">Drag cards between columns. Drop on a card to reorder.</span>
+        <HistorySearch onOpen={setOpenId} />
         {error && (
           <span className="ml-auto text-rose-300 bg-rose-950/60 border border-rose-900 rounded px-2 py-1">
             {error}{" "}
@@ -225,5 +226,81 @@ function Card({
         <p className={`mt-1.5 text-[11px] line-clamp-2 ${c.column === "failed" ? "text-rose-300/80" : "text-slate-500"}`}>{c.preview}</p>
       )}
     </article>
+  );
+}
+
+interface Hit {
+  taskId: string;
+  title: string;
+  snippet: string;
+  status: string;
+  createdAt: number;
+  archived: boolean;
+  agent: string;
+}
+
+/** Full-text search over every card's request, conversation and answer, archived ones included. */
+function HistorySearch({ onOpen }: { onOpen: (id: string) => void }) {
+  const [q, setQ] = useState("");
+  const [hits, setHits] = useState<Hit[] | null>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (q.trim().length < 2) return setHits(null);
+    const t = setTimeout(() => {
+      getJson<Hit[]>(`/api/search?q=${encodeURIComponent(q)}`)
+        .then((h) => {
+          setHits(h);
+          setOpen(true);
+        })
+        .catch(() => setHits([]));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [q]);
+  // «matches» from the server become highlights
+  const mark = (s: string) =>
+    s.split(/(«[^»]*»)/).map((part, i) =>
+      part.startsWith("«") ? (
+        <mark key={i} className="bg-amber-500/30 text-amber-100 rounded px-0.5">
+          {part.slice(1, -1)}
+        </mark>
+      ) : (
+        <span key={i}>{part}</span>
+      ),
+    );
+  return (
+    <div className="relative ml-auto">
+      <input
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        onFocus={() => hits && setOpen(true)}
+        onKeyDown={(e) => e.key === "Escape" && setOpen(false)}
+        placeholder="🔍 Search past cards…"
+        className="w-72 bg-slate-950 border border-slate-700 rounded-md px-3 py-1.5 text-slate-200 focus:outline-none focus:border-cyan-500"
+      />
+      {open && hits && (
+        <div className="absolute right-0 top-9 z-30 w-[520px] max-h-[70vh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-lg shadow-2xl shadow-black/60 p-1">
+          {hits.length === 0 && <p className="p-3 text-slate-500">No cards match. Try fewer words, or "an exact phrase".</p>}
+          {hits.map((h) => (
+            <button
+              key={h.taskId}
+              onClick={() => {
+                setOpen(false);
+                onOpen(h.taskId);
+              }}
+              className="block w-full text-left px-3 py-2 rounded hover:bg-slate-800"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-slate-100 truncate">{h.title}</span>
+                {h.archived && <span className="px-1.5 rounded bg-slate-800 text-slate-400 text-[10px]">archived</span>}
+                <span className="ml-auto text-[10px] text-slate-500 shrink-0">
+                  {h.status} · {new Date(h.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-0.5 line-clamp-2">{mark(h.snippet)}</p>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
