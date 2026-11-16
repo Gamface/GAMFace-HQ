@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { inView, useProjects } from "../project";
 import { AGENT_LABELS, fileUrl, getJson, send } from "../api";
 import type { CardFile } from "../api";
 
@@ -20,6 +21,7 @@ interface Routine {
   catchUp: boolean;
   mayAct: boolean;
   profile?: string;
+  project?: string | null;
   nextRunAt?: number;
   lastRunAt?: number;
   lastStatus?: string;
@@ -41,7 +43,7 @@ interface Run {
   preview: string;
   files?: CardFile[];
 }
-type Draft = Pick<Routine, "name" | "prompt" | "schedule" | "targetAgent" | "deliverTo" | "enabled" | "catchUp" | "mayAct"> & { sites: string; timezone: string; profile: string };
+type Draft = Pick<Routine, "name" | "prompt" | "schedule" | "targetAgent" | "deliverTo" | "enabled" | "catchUp" | "mayAct"> & { sites: string; timezone: string; profile: string; project: string };
 
 const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const AGENTS = ["auto", "planner", "browser", "coder", "file", "security_audit"];
@@ -64,17 +66,19 @@ function relative(t: number) {
   return text === "now" ? text : m > 0 ? `in ${text}` : `${text} ago`;
 }
 
-function ProfilePicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const [names, setNames] = useState<string[]>([]);
+function ProfilePicker({ value, onChange, project }: { value: string; onChange: (v: string) => void; project: string }) {
+  const [all, setAll] = useState<{ name: string; project?: string | null }[]>([]);
   const [def, setDef] = useState("");
   useEffect(() => {
-    getJson<{ profiles: { name: string }[]; default: string }>("/api/profiles")
+    getJson<{ profiles: { name: string; project?: string | null }[]; default: string }>("/api/profiles")
       .then((d) => {
-        setNames(d.profiles.map((p) => p.name));
+        setAll(d.profiles);
         setDef(d.default);
       })
       .catch(() => {});
   }, []);
+  // A project's routines may use its own sign-ins and shared ones
+  const names = all.filter((p) => !p.project || p.project === (project || null)).map((p) => p.name);
   return (
     <label className="flex items-center gap-2">
       Signed in as
@@ -203,7 +207,8 @@ function RoutineForm({ initial, info, onSave, onCancel }: { initial: Draft; info
         <label className="flex items-center gap-2" title="Let runs type, submit and click buttons. Each action waits for your approval on the dashboard or in Telegram.">
           <input type="checkbox" checked={d.mayAct} onChange={(e) => set("mayAct", e.target.checked)} /> May act (asks you first)
         </label>
-        {d.mayAct && <ProfilePicker value={d.profile} onChange={(v) => set("profile", v)} />}
+        {d.mayAct && <ProfilePicker value={d.profile} project={d.project} onChange={(v) => set("profile", v)} />}
+        <ProjectPicker value={d.project} onChange={(v) => setD((prev) => ({ ...prev, project: v, profile: "" }))} />
         <span className="text-[11px] text-slate-500">
           {d.mayAct
             ? "Runs may type, submit and click on its sites, but every action waits for your approval; no answer in time means no. Passwords and payment details are never typed."
@@ -250,7 +255,29 @@ function Runs({ id, tz }: { id: string; tz: string }) {
   );
 }
 
+/** Which project a routine's cards go in. */
+function ProjectPicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const { projects } = useProjects();
+  if (!projects.length && !value) return null;
+  return (
+    <label className="flex items-center gap-2">
+      Project
+      <select value={value} onChange={(e) => onChange(e.target.value)} className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200">
+        <option value="">General</option>
+        {projects
+          .filter((p) => !p.archived || p.id === value)
+          .map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+      </select>
+    </label>
+  );
+}
+
 export default function RoutinesPage() {
+  const proj = useProjects();
   const [data, setData] = useState<Reply | null>(null);
   const [editing, setEditing] = useState<string | "new" | null>(null);
   const [open, setOpen] = useState<string | null>(null);
@@ -268,8 +295,8 @@ export default function RoutinesPage() {
   }, []);
 
   const blank: Draft = useMemo(
-    () => ({ name: "", prompt: "", schedule: "", targetAgent: "auto", deliverTo: "dashboard", enabled: true, catchUp: false, mayAct: false, sites: "", timezone: BROWSER_TZ, profile: "" }),
-    [],
+    () => ({ name: "", prompt: "", schedule: "", targetAgent: "auto", deliverTo: "dashboard", enabled: true, catchUp: false, mayAct: false, sites: "", timezone: BROWSER_TZ, profile: "", project: proj.target ?? "" }),
+    [proj.target],
   );
   const toBody = (d: Draft) => ({
     name: d.name,
@@ -282,6 +309,7 @@ export default function RoutinesPage() {
     catchUp: d.catchUp,
     mayAct: d.mayAct,
     profile: d.profile || null,
+    project: d.project || null,
     allowedSites: d.sites
       .split(/[\s,]+/)
       .map((s) => s.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
@@ -338,11 +366,11 @@ export default function RoutinesPage() {
         </section>
       )}
 
-      {data.routines.map((r) =>
+      {data.routines.filter((r) => inView(r.project, proj.view)).map((r) =>
         editing === r.id ? (
           <RoutineForm
             key={r.id}
-            initial={{ ...r, sites: r.allowedSites.join(", "), profile: r.profile ?? "" }}
+            initial={{ ...r, sites: r.allowedSites.join(", "), profile: r.profile ?? "", project: r.project ?? "" }}
             info={data}
             onCancel={() => setEditing(null)}
             onSave={async (d) => {

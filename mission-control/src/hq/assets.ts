@@ -37,6 +37,8 @@ export interface Asset {
   uses: number;
   addedAt: number;
   updatedAt: number;
+  // The project it belongs to; missing: every project (General)
+  project?: string;
 }
 
 export const MAX_ASSETS = 300;
@@ -61,6 +63,11 @@ export const AssetInputSchema = z.object({
   seconds: z.number().positive().max(36_000).optional(),
   width: z.number().int().positive().max(20_000).optional(),
   height: z.number().int().positive().max(20_000).optional(),
+  project: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9-]{0,30}-[a-f0-9]{4}$/)
+    .nullable()
+    .optional(),
 });
 export const AssetUploadSchema = AssetInputSchema.extend({ data: z.string().min(10) });
 export const AssetPatchSchema = AssetInputSchema.partial();
@@ -142,6 +149,8 @@ export class Assets {
   private filesDir: string;
   private index: Asset[] = [];
   private brandData: Brand;
+  // Projects with a brand of their own
+  private projectBrands: Record<string, Brand> = {};
 
   constructor(dataDir: string) {
     this.dir = path.join(dataDir, "assets");
@@ -158,8 +167,14 @@ export class Assets {
     } catch {
       /* first run */
     }
+    // brand.json: the General brand, plus { projects: { id: brand } }
+    const stored = brand as { projects?: Record<string, unknown> };
     const parsed = BrandSchema.safeParse(brand);
     this.brandData = parsed.success ? parsed.data : BrandSchema.parse({});
+    for (const [id, b] of Object.entries(stored?.projects ?? {})) {
+      const pb = BrandSchema.safeParse(b);
+      if (pb.success) this.projectBrands[id] = pb.data;
+    }
   }
 
   private write(file: string, data: string) {
@@ -220,12 +235,15 @@ export class Assets {
       uses: 0,
       addedAt: now,
       updatedAt: now,
+      ...(input.project ? { project: input.project } : {}),
     };
     this.index.push(asset);
     this.saveIndex();
-    // The first logo or font becomes the brand's
-    if (asset.role === "logo" && !this.brandData.logo) this.setBrand({ ...this.brandData, logo: asset.id });
-    if (asset.kind === "font" && !this.brandData.fontAsset) this.setBrand({ ...this.brandData, fontAsset: asset.id });
+    // The first logo or font becomes the brand's (the project's brand, if it has one)
+    const owner = asset.project && this.projectBrands[asset.project] ? asset.project : null;
+    const b = this.brand(owner);
+    if (asset.role === "logo" && !b.logo && (!asset.project || owner)) this.setBrand({ ...b, logo: asset.id }, owner);
+    if (asset.kind === "font" && !b.fontAsset && (!asset.project || owner)) this.setBrand({ ...b, fontAsset: asset.id }, owner);
     return asset;
   }
 
@@ -248,6 +266,10 @@ export class Assets {
     if (patch.height !== undefined) a.height = patch.height;
     if (patch.tempo !== undefined) a.tempo = patch.tempo;
     if (patch.beats !== undefined) a.beats = patch.beats.slice(0, 4000);
+    if (patch.project !== undefined) {
+      if (patch.project) a.project = patch.project;
+      else delete a.project;
+    }
     a.updatedAt = Date.now();
     this.saveIndex();
     return a;
@@ -259,32 +281,62 @@ export class Assets {
     rmSync(path.join(this.filesDir, `${a.id}.${a.ext}`), { force: true });
     this.index = this.index.filter((x) => x.id !== id);
     this.saveIndex();
-    if (this.brandData.logo === id || this.brandData.fontAsset === id) this.setBrand({ ...this.brandData, logo: this.brandData.logo === id ? null : this.brandData.logo, fontAsset: this.brandData.fontAsset === id ? null : this.brandData.fontAsset });
+    const clear = (b: Brand): Brand => ({ ...b, logo: b.logo === id ? null : b.logo, fontAsset: b.fontAsset === id ? null : b.fontAsset, font: b.fontAsset === id && b.font === "brand" ? BrandSchema.parse({}).font : b.font });
+    this.brandData = clear(this.brandData);
+    for (const k of Object.keys(this.projectBrands)) this.projectBrands[k] = clear(this.projectBrands[k]);
+    this.saveBrands();
     return true;
   }
 
-  brand(): Brand {
-    return { ...this.brandData };
+  private saveBrands() {
+    this.write("brand.json", JSON.stringify({ ...this.brandData, projects: this.projectBrands }, null, 1));
   }
 
-  /** Saves the brand. Logo and font must be assets of the right kind. */
-  setBrand(input: unknown): Brand | { error: string } {
+  /** The brand for a project: its own, or the General brand. */
+  brand(project: string | null = null): Brand {
+    return { ...((project && this.projectBrands[project]) || this.brandData) };
+  }
+
+  /** Whether a project has a brand of its own. */
+  hasOwnBrand(project: string): boolean {
+    return Boolean(this.projectBrands[project]);
+  }
+
+  /** Saves the General brand, or a project's own. Logo and font must be assets of the right kind that the project can use. */
+  setBrand(input: unknown, project: string | null = null): Brand | { error: string } {
     const parsed = BrandSchema.safeParse(input);
     if (!parsed.success) return { error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") };
     const b = parsed.data;
-    if (b.logo && this.get(b.logo)?.kind !== "image") return { error: "The logo must be a picture from the asset dictionary" };
-    if (b.fontAsset && this.get(b.fontAsset)?.kind !== "font") return { error: "The brand font must be a font from the asset dictionary" };
+    const usable = (id: string) => {
+      const a = this.get(id);
+      return a && (!a.project || a.project === project) ? a : undefined;
+    };
+    if (b.logo && usable(b.logo)?.kind !== "image") return { error: "The logo must be a picture from the asset dictionary" + (project ? " (General or this project's)" : " (a General one)") };
+    if (b.fontAsset && usable(b.fontAsset)?.kind !== "font") return { error: "The brand font must be a font from the asset dictionary" + (project ? " (General or this project's)" : " (a General one)") };
     if (b.font === "brand" && !b.fontAsset) return { error: "Upload a font first to use it as the brand font" };
-    this.brandData = b;
-    this.write("brand.json", JSON.stringify(b, null, 1));
-    return this.brand();
+    if (project) this.projectBrands[project] = b;
+    else this.brandData = b;
+    this.saveBrands();
+    return this.brand(project);
+  }
+
+  /** A project goes back to the General brand. */
+  clearBrand(project: string) {
+    if (!this.projectBrands[project]) return;
+    delete this.projectBrands[project];
+    this.saveBrands();
   }
 
   /** Whether a brand has been set up (a name, a logo or changed colours). */
-  branded(): boolean {
+  branded(project: string | null = null): boolean {
     const d = BrandSchema.parse({});
-    const b = this.brandData;
+    const b = this.brand(project);
     return Boolean(b.name || b.logo || b.primary !== d.primary || b.accent !== d.accent || b.background !== d.background);
+  }
+
+  /** How many assets belong to a project. */
+  countIn(project: string): number {
+    return this.index.filter((a) => a.project === project).length;
   }
 
   /**
@@ -292,11 +344,12 @@ export class Assets {
    * share words with it (or are named in it), plus music when it asks for music.
    * The brand logo and font aren't counted here; render() adds them.
    */
-  pick(request: string, max = MAX_VIDEO_ASSETS): Asset[] {
+  pick(request: string, max = MAX_VIDEO_ASSETS, project: string | null = null): Asset[] {
     const words = new Set(keywords(request, 30).map(stem));
     const lower = request.toLowerCase();
+    const logo = this.brand(project).logo;
     const scored = this.index
-      .filter((a) => a.kind !== "font" && a.id !== this.brandData.logo)
+      .filter((a) => a.kind !== "font" && a.id !== logo && (!a.project || a.project === project))
       .map((a) => {
         const own = new Set(keywords(`${a.name} ${a.description} ${a.tags.join(" ")} ${a.role}`, 60).map(stem));
         let score = 0;
@@ -334,8 +387,9 @@ export class Assets {
   }
 
   /** The brand logo and font assets, when set. */
-  brandAssets(): Asset[] {
-    return [this.brandData.logo, this.brandData.fontAsset].map((id) => (id ? this.get(id) : undefined)).filter((a): a is Asset => Boolean(a));
+  brandAssets(project: string | null = null): Asset[] {
+    const b = this.brand(project);
+    return [b.logo, b.fontAsset].map((id) => (id ? this.get(id) : undefined)).filter((a): a is Asset => Boolean(a));
   }
 }
 

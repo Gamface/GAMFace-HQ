@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useProjects } from "../project";
 import { AGENT_COLORS, AGENT_LABELS, getJson, imageUrl, send, splitModel, uploadUrl } from "../api";
 import type { BoardCard } from "../api";
 import { CardForm } from "./NewCardDialog";
@@ -32,6 +33,7 @@ interface Detail {
   audio?: string[];
   documents?: string[];
   profile?: string;
+  project?: string;
   archived?: boolean;
   thread?: { role: "user" | "agent"; text: string }[];
   reply?: string;
@@ -64,6 +66,7 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [openSub, setOpenSub] = useState<string | null>(null);
+  const proj = useProjects();
   const outRef = useRef<HTMLPreElement>(null);
 
   useEffect(() => {
@@ -130,6 +133,26 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
                 </span>
               )}
               {(d.attempts ?? 0) > 1 && <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-400">attempt {d.attempts}</span>}
+              {(proj.projects.length > 0 || d.project) && (
+                <label className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 flex items-center gap-1" title="Move the card to another project">
+                  <span className="h-2 w-2 rounded-full" style={{ background: proj.byId(d.project)?.color ?? "#94a3b8" }} />
+                  <select
+                    value={d.project ?? ""}
+                    disabled={col === "running" || Boolean(d.archived)}
+                    onChange={(e) => void act(() => send("PATCH", `/api/tasks/${id}`, { project: e.target.value || null }))}
+                    className="bg-transparent text-slate-200 focus:outline-none"
+                  >
+                    <option value="">General</option>
+                    {proj.projects
+                      .filter((p) => !p.archived || p.id === d.project)
+                      .map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+              )}
               {d.readOnly && (
                 <span className="px-2 py-0.5 rounded bg-sky-900/70 text-sky-200" title={`May open: ${(d.allowedSites ?? []).join(", ") || "sites named in the task"}`}>
                   👁 read-only
@@ -254,6 +277,7 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
                 audio: d.audio ?? [],
                 documents: d.documents ?? [],
                 profile: d.profile ?? "",
+                project: d.project ?? null,
               }}
               cards={cards}
               selfId={id}

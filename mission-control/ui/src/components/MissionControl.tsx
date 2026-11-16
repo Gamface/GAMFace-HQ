@@ -16,6 +16,9 @@ import TeamPage from "./TeamPage";
 import RoutinesPage from "./RoutinesPage";
 import SkillsPage from "./SkillsPage";
 import AssetsPage from "./AssetsPage";
+import ProjectsPage from "./ProjectsPage";
+import ProjectSwitcher from "./ProjectSwitcher";
+import { useProjects } from "../project";
 import ApprovalsBar from "./ApprovalsBar";
 
 interface SystemInfo {
@@ -46,12 +49,13 @@ interface MemoryItem {
   importance: number;
   pinned: boolean;
   hits: number;
+  project?: string;
 }
 
 type RightTab = "commands" | "hive" | "memory";
 type CenterTab = "output" | "preview" | "browser";
-type View = "console" | "board" | "routines" | "skills" | "assets" | "team";
-const VIEWS: View[] = ["board", "routines", "skills", "assets", "team"];
+type View = "console" | "board" | "routines" | "skills" | "assets" | "team" | "projects";
+const VIEWS: View[] = ["board", "routines", "skills", "assets", "team", "projects"];
 
 const STATUS_STYLES: Record<AgentStatus, string> = {
   idle: "bg-slate-700 text-slate-200",
@@ -74,6 +78,7 @@ function StatusBadge({ status }: { status: AgentStatus }) {
 
 export default function MissionControl() {
   const { connection, tasks, statusEvents } = useAgentStream(HARNESS_URL);
+  const proj = useProjects();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("");
   const [images, setImages] = useState<string[]>([]);
@@ -136,12 +141,12 @@ export default function MissionControl() {
 
   // Hive mind and memory panels refresh while they are open
   const loadHive = () =>
-    fetch(`${HARNESS_URL}/api/hive?limit=150`)
+    fetch(`${HARNESS_URL}/api/hive?limit=150${proj.query ? `&${proj.query}` : ""}`)
       .then((r) => r.json())
       .then(setHive)
       .catch(() => {});
   const loadMemories = () =>
-    fetch(`${HARNESS_URL}/api/memories`)
+    fetch(`${HARNESS_URL}/api/memories${proj.query ? `?${proj.query}` : ""}`)
       .then((r) => r.json())
       .then(setMemories)
       .catch(() => {});
@@ -151,7 +156,8 @@ export default function MissionControl() {
     load();
     const timer = setInterval(load, 4000);
     return () => clearInterval(timer);
-  }, [rightTab]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rightTab, proj.query]);
 
   const memoryAction = async (path: string, body?: unknown) => {
     await fetch(`${HARNESS_URL}/api/memories${path}`, {
@@ -182,6 +188,7 @@ export default function MissionControl() {
           prompt: prompt.trim() || defaultPrompt(audio.length, documents.length),
           targetAgent,
           source: "ui",
+          project: proj.target,
           images,
           audio,
           documents,
@@ -217,7 +224,8 @@ export default function MissionControl() {
           <h1 className="font-semibold text-lg tracking-wide whitespace-nowrap" title="Mission Control — Sandcastle & Jarvis">
             Mission Control<span className="hidden 2xl:inline"> — Sandcastle & Jarvis</span>
           </h1>
-          <nav className="ml-4 flex gap-1 text-xs">
+          <ProjectSwitcher onManage={() => setView("projects")} />
+          <nav className="ml-2 flex gap-1 text-xs">
             {(
               [
                 ["console", "Console"],
@@ -274,6 +282,7 @@ export default function MissionControl() {
       {view === "routines" && <RoutinesPage />}
       {view === "skills" && <SkillsPage />}
       {view === "assets" && <AssetsPage />}
+      {view === "projects" && <ProjectsPage />}
       {view === "console" && (<>
       {/* LEFT: TASK HISTORY */}
       <aside className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-4 min-h-0">
@@ -442,7 +451,7 @@ export default function MissionControl() {
                 />
                 <button
                   onClick={() => {
-                    if (newMemory.trim()) void memoryAction("", { text: newMemory.trim(), pinned: true }).then(() => setNewMemory(""));
+                    if (newMemory.trim()) void memoryAction("", { text: newMemory.trim(), pinned: true, project: proj.target }).then(() => setNewMemory(""));
                   }}
                   className="px-2 bg-cyan-700 rounded text-white"
                 >
@@ -459,7 +468,7 @@ export default function MissionControl() {
                     {m.pinned ? "📌 " : ""}
                     {m.text}
                     <div className="text-[10px] text-slate-600">
-                      {m.agent} · importance {m.importance.toFixed(2)} · used {m.hits}×
+                      {m.agent} · importance {m.importance.toFixed(2)} · used {m.hits}× · {proj.byId(m.project)?.name ?? "General"}
                     </div>
                   </div>
                   <button onClick={() => void memoryAction(`/${m.id}/${m.pinned ? "unpin" : "pin"}`)} className="text-slate-500 hover:text-slate-200">

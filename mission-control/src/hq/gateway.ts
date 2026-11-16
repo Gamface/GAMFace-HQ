@@ -1,4 +1,5 @@
 import type { ModelRegistry, ModelRole, Resolved } from "./models";
+import { projectScope } from "./projects";
 import type { Notices } from "./notices";
 import type { ChatMessage } from "./ollama";
 import { resolvePrivate } from "./privacy";
@@ -80,6 +81,16 @@ export class ModelGateway {
       const msg = `${who} is local only, so it used ${local.ref} instead of ${r.ref}.`;
       notes.push(msg);
       this.notices.add("local-only", `local-only:${role}:${r.ref}`, msg);
+      r = local;
+    }
+
+    // 1a. A project kept on this PC: every call made for it stays local
+    const scope = projectScope.getStore();
+    if (!r.provider.local && scope?.localOnly) {
+      const local = this.models.localFor(role);
+      const msg = `The project “${scope.name}” is kept on this PC, so ${who} used ${local.ref} instead of ${r.ref}.`;
+      notes.push(msg);
+      this.notices.add("local-only", `project:${scope.id}:${role}:${r.ref}`, msg);
       r = local;
     }
 

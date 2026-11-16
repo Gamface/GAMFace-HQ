@@ -155,6 +155,34 @@ into an MP4 that appears on the card (🎬): play it there or download it.
 API: `POST /api/tasks/:id/video` renders the scene in a finished card's answer. The video
 service itself: `POST /render`, `GET /jobs/:id`, `GET /jobs/:id/video`, `GET /health`.
 
+## Projects
+
+Separate workspaces on one Mission Control (an idea from Agent Zero, MIT). Pick the
+project in the switcher at the top of the page; **Manage projects…** creates and edits them.
+
+- **Instructions.** Each project has instructions every agent follows on its cards ("Gamface
+  is a mobile gaming app; write in a playful voice; the repo is …"). A note in your vault at
+  `HQ/projects/<project name>.md` is added too (private, like the other vault notes).
+- **What stays inside a project:** memories (facts the memory model marks as being about the
+  project; facts about you in general stay General), the activity log, skills, assets, its
+  own brand (optional; otherwise the General one), browser sign-ins (profiles you assign to
+  it) and routines. Anything in **General** is shared with every project.
+- **Kept on this PC.** Tick it and every model call for that project uses a local model,
+  whatever the agents' settings say (enforced in the gateway, like the local-only lock),
+  and everything it learns stays in the project.
+- **Sign-ins.** A project's profiles can't be used by other projects' cards or routines. If
+  the default profile belongs to a project, other cards browse without sign-ins.
+- **Moving and tidying.** Move a card from its detail view (not while it runs). Archive a
+  project to hide it (its cards stay). Deleting needs an empty project (no cards, assets,
+  skills or routines left); its memories and brand are deleted with it.
+- The board, history search, Hive Mind, Memory, Skills, Routines and Assets show the chosen
+  project (its own items plus General ones); **All projects** shows everything, with a
+  coloured project tag on each card.
+
+API: `GET/POST /api/projects`, `PATCH/DELETE /api/projects/:id`; `project` on cards,
+routines, skills, assets and memories; `?project=<id>|general` on `/api/hive`,
+`/api/memories`, `/api/search` and `/api/assets`; `PUT/DELETE /api/brand?project=<id>`.
+
 ## Voiceovers, captions, assets and templates
 
 Videos can now talk, show captions in sync, use your real logos, pictures, clips and
@@ -462,7 +490,7 @@ arrive on their own:
 cd ~/sandcastle/ts-harness
 docker compose pull browser               # newer headless Chrome
 docker compose up -d --build --force-recreate   # --build: the video and voice services (first time ~2 GB)
-docker compose exec harness npm test      # optional: about 115 tests
+docker compose exec harness npm test      # optional: about 125 tests
 docker compose exec voice python -m unittest test_timing   # optional: the voice service's timing
 ```
 

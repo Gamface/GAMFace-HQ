@@ -6,6 +6,9 @@ import { z } from "zod";
 export const AgentTargetSchema = z.enum(["planner", "browser", "coder", "file", "security_audit", "vision"]);
 // An attached audio clip (WAV), by its upload id
 export const ProfileNameSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/, "Profile names are lowercase letters, numbers and dashes");
+// A project, by id (see hq/projects.ts); null or missing means General
+export const PROJECT_ID = /^[a-z0-9][a-z0-9-]{0,30}-[a-f0-9]{4}$/;
+export const ProjectIdSchema = z.string().regex(PROJECT_ID);
 export const DocIdSchema = z.string().regex(/^[a-f0-9]{64}\.pdf$/);
 export const AudioIdSchema = z.string().regex(/^[a-f0-9]{64}\.wav$/);
 // What a client may ask for: a specific agent, or "auto" to let the router pick
@@ -69,6 +72,8 @@ export const AgentTaskSchema = z.object({
   deliverTo: DeliverySchema.optional(),
   // Browser profile to browse with (its sign-ins); the default profile when unset
   profile: ProfileNameSchema.optional(),
+  // The project the card belongs to; General when missing
+  project: ProjectIdSchema.nullable().optional(),
   // Pictures for the vision agent to look at
   images: z.array(ImageIdSchema).max(6).default([]),
   // Audio clips, transcribed before the agent starts
@@ -95,6 +100,8 @@ export const RoutineInputSchema = z.object({
   mayAct: z.boolean().default(false),
   // Browser profile its runs sign in with (when it may act); the default when unset
   profile: ProfileNameSchema.nullable().optional(),
+  // The project its cards go in; General when missing
+  project: ProjectIdSchema.nullable().optional(),
 });
 export const RoutinePatchSchema = RoutineInputSchema.partial();
 
@@ -152,6 +159,8 @@ export const TaskPatchSchema = z.object({
   position: z.number().optional(),
   readOnly: z.boolean().optional(),
   profile: ProfileNameSchema.nullable().optional(),
+  // Move the card to another project (null: General)
+  project: ProjectIdSchema.nullable().optional(),
   allowedSites: z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9.-]{1,253}$/)).max(10).optional(),
   images: z.array(ImageIdSchema).max(6).optional(),
   audio: z.array(AudioIdSchema).max(4).optional(),
@@ -201,6 +210,7 @@ export const TaskSummarySchema = z.object({
   deliverTo: DeliverySchema.optional(),
   // Browser profile (sign-ins) the card's browsing uses
   profile: z.string().optional(),
+  project: z.string().optional(),
   images: z.array(z.string()).optional(),
   audio: z.array(z.string()).optional(),
   documents: z.array(z.string()).optional(),

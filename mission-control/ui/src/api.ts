@@ -136,6 +136,8 @@ export interface BoardCard {
   waitingOn: string[];
   needsReview?: boolean;
   readOnly?: boolean;
+  project?: string;
+  profile?: string;
   deliverTo?: "dashboard" | "telegram" | "obsidian";
   allowedSites?: string[];
   usedPrivate?: boolean;

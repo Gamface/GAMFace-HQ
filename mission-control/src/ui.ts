@@ -60,6 +60,7 @@ import type { SceneSpec } from "./hq/video";
 import { KNOWN_VOICES, VoiceClient, extractNarration, sceneVoice, wantsCaptions, wantsOwnAudio, wantsVoice } from "./hq/voice";
 import type { Word } from "./hq/voice";
 import { AssetPatchSchema, AssetUploadSchema, Assets, SYSTEM_FONTS, assetBlock, publicName } from "./hq/assets";
+import { Projects, projectPrompt, projectScope, visibleIn } from "./hq/projects";
 import type { Asset, Brand } from "./hq/assets";
 import { upcoming, parseSchedule, validTimeZone } from "./hq/schedule";
 
@@ -353,11 +354,20 @@ gateway.onServed = (ref) => {
   lastModelRef = ref;
 };
 const tasks = store.tasks;
+// Separate workspaces: instructions, memories, skills, assets, sign-ins, routines
+const projects = new Projects(DATA_DIR);
+// Activity about a card is only shown inside the card's project
+hive.projectOf = (taskId) => {
+  const t = tasks.get(taskId);
+  return t ? (t.project ?? null) : undefined;
+};
+/** Runs fn with the card's project as the scope of every model call (local-only projects stay local). */
+const inProject = <T>(project: string | null | undefined, fn: () => Promise<T>) => projectScope.run(projects.scope(project), fn);
 
 let runningTaskId: string | null = null;
 let lastModelRef: string | null = null;
 // Memory extraction runs between tasks so it never competes with one for the GPU
-const memoryJobs: { agent: AgentTarget; prompt: string; answer: string; private: boolean }[] = [];
+const memoryJobs: { agent: AgentTarget; prompt: string; answer: string; private: boolean; taskId: string; project: string | null }[] = [];
 
 // --- Skills and history search (Phase 6) -----------------------------------------
 const skills = new Skills(store.sql);
@@ -403,7 +413,7 @@ async function draftSkill(task: Task): Promise<Skill | { error: string }> {
     { role: "user", content },
   ])) as { skill?: unknown };
   if (!out.skill || typeof out.skill !== "object") return { error: "The model found no reusable procedure in this card" };
-  const made = skills.create(out.skill, { status: "draft", private: priv, sourceTaskId: task.id, sourceTitle: task.title || task.prompt });
+  const made = skills.create(out.skill, { status: "draft", private: priv, sourceTaskId: task.id, sourceTitle: task.title || task.prompt, project: projects.idOf(task.project) });
   if ("error" in made) return { error: `The draft wasn't usable (${made.error})` };
   hive.log("skills", "drafted", `${made.name}${made.replaces ? " (update)" : ""}`, task.id);
   notices.add("skill", `skill:${made.id}`, `New skill draft “${made.name}” from “${made.sourceTitle}”: review it on the Skills page.`);
@@ -633,13 +643,14 @@ function systemPrompt(task: Task, agent: AgentTarget, opts: { team: boolean; del
   if (task.readOnly) system += READ_ONLY_RULES;
   if (agent === "file" && OBSIDIAN_VAULT && task.source !== "voice" && !task.readOnly) system += NOTE_RULES;
   if (opts.team) system += teamContext(agent, vaultNotes(OBSIDIAN_VAULT, agent));
+  if (task.source !== "eval") system += projectPrompt(projects.get(task.project), OBSIDIAN_VAULT);
   return system;
 }
 
 // The parts that change on every call ride along with the request
-function userMessage(agent: AgentTarget, text: string, recallFor: string, team: boolean) {
+function userMessage(agent: AgentTarget, text: string, recallFor: string, team: boolean, project: string | null) {
   if (!team) return text;
-  return withLiveContext(text, { hive: hive.promptText(), hivePublic: hive.publicText(), memories: memory.recall(recallFor, agent) });
+  return withLiveContext(text, { hive: hive.promptText(15, project), hivePublic: hive.publicText(15, project), memories: memory.recall(recallFor, agent, 6, project) });
 }
 
 const browsingEnabled = (task: Task) => Boolean(BROWSER_CDP_URL) && task.source !== "eval";
@@ -657,6 +668,12 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
   const sites = task.readOnly ? readOnlySites(task) : [];
   // Runs that may act sign in with a browser profile; read-only runs never do
   let profileName = task.readOnly ? undefined : task.profile ?? defaultProfile();
+  // Another project's sign-ins are never used (the default profile may belong to one)
+  const foreign = profileName ? profileProjectError(profileName, projects.idOf(task.project)) : null;
+  if (foreign) {
+    push(`[Browsing without sign-ins: ${foreign}]\n`);
+    profileName = undefined;
+  }
   let profile = profileName ? profileFor(profileName) : undefined;
   if (profile && "error" in profile) {
     push(`[Browsing without sign-ins: ${profile.error}]\n`);
@@ -784,6 +801,7 @@ function addSubtask(parent: Task, agent: AgentTarget, prompt: string): Task {
     requestedAgent: agent,
     routedBy: "user",
     source: parent.source,
+    project: parent.project,
     model: models.resolve(agent).ref,
     status: "thinking",
     createdAt: Date.now(),
@@ -1074,7 +1092,7 @@ async function runTask(task: Task) {
       if (plan.picked.length) push(`[Assets for this video: ${plan.picked.map((a) => a.name).join(", ")}]\n`);
     }
     // Approved skills that fit this request
-    const leadSkills = useTeam ? skills.match(ask, lead) : [];
+    const leadSkills = useTeam ? skills.match(ask, lead, 2, projects.idOf(task.project)) : [];
     if (leadSkills.length) {
       push(`[Using skill${leadSkills.length > 1 ? "s" : ""}: ${leadSkills.map((s) => s.name).join(", ")}]\n`);
       for (const s of leadSkills) skills.recordUse(s.id);
@@ -1089,7 +1107,7 @@ async function runTask(task: Task) {
         ...history,
         {
           role: "user",
-          content: userMessage(lead, request, ask, useTeam),
+          content: userMessage(lead, request, ask, useTeam, projects.idOf(task.project)),
           ...(lead === "vision" && images.length ? { images } : {}),
         },
       ],
@@ -1120,7 +1138,7 @@ async function runTask(task: Task) {
         log("planner", "delegated", `→ ${h.agent}: ${h.task}`);
         emit(task, "delegating", `\n\n── ${TEAM[h.agent].name} (${openSub.model}) ── ${h.task}\n\n`);
         emit(task, "thinking");
-        const mateSkills = skills.match(h.task, h.agent).filter((s) => !leadSkills.some((l) => l.id === s.id));
+        const mateSkills = skills.match(h.task, h.agent, 2, projects.idOf(task.project)).filter((s) => !leadSkills.some((l) => l.id === s.id));
         if (mateSkills.length) {
           push(`[Using skill${mateSkills.length > 1 ? "s" : ""}: ${mateSkills.map((s) => s.name).join(", ")}]\n`);
           for (const s of mateSkills) skills.recordUse(s.id);
@@ -1133,7 +1151,7 @@ async function runTask(task: Task) {
             { role: "system", content: systemPrompt(task, h.agent, { team: true, delegate: false }) },
             {
               role: "user",
-              content: userMessage(h.agent, mateTask, h.task, true),
+              content: userMessage(h.agent, mateTask, h.task, true, projects.idOf(task.project)),
               // A handoff to Vision brings the card's pictures with it
               ...(h.agent === "vision" && images.length ? { images } : {}),
             },
@@ -1164,7 +1182,7 @@ async function runTask(task: Task) {
         [
           { role: "system", content: systemPrompt(task, lead, { team: true, delegate: false }) },
           ...history,
-          { role: "user", content: userMessage(lead, synthesisPrompt(ask, results) + pdfNote, ask, true) },
+          { role: "user", content: userMessage(lead, synthesisPrompt(ask, results) + pdfNote, ask, true, projects.idOf(task.project)) },
         ],
         controller.signal,
         push,
@@ -1184,7 +1202,7 @@ async function runTask(task: Task) {
     log(lead, "complete", task.answer);
     // Read-only runs don't save memories either
     if (autoSkills() && worthASkill(task) && !skills.draftedFrom(task.id)) skillJobs.push(task.id);
-    if (useTeam && !task.readOnly && !isRoutine(task) && task.answer) memoryJobs.push({ agent: lead, prompt: ask, answer: task.answer, private: usedPrivate });
+    if (useTeam && !task.readOnly && !isRoutine(task) && task.answer) memoryJobs.push({ agent: lead, prompt: ask, answer: task.answer, private: usedPrivate, taskId: task.id, project: projects.idOf(task.project) });
     if (makeVideo && task.answer) {
       // Render, and let the lead fix the scene when Remotion can't render it
       let current = answer;
@@ -1197,7 +1215,7 @@ async function runTask(task: Task) {
           lead,
           [
             { role: "system", content: systemPrompt(task, lead, { team: useTeam, delegate: false }) },
-            { role: "user", content: userMessage(lead, request, ask, useTeam) },
+            { role: "user", content: userMessage(lead, request, ask, useTeam, projects.idOf(task.project)) },
             { role: "assistant", content: current },
             {
               role: "user",
@@ -1268,7 +1286,7 @@ async function pump() {
   if (!task) return runBackgroundJob();
   runningTaskId = task.id;
   try {
-    await runTask(task);
+    await inProject(task.project, () => runTask(task));
   } finally {
     runningTaskId = null;
     store.trim();
@@ -1283,7 +1301,7 @@ async function runSkillJob() {
   if (!task) return;
   backgroundBusy = true;
   try {
-    const out = await draftSkill(task);
+    const out = await inProject(task.project, () => draftSkill(task));
     if ("error" in out) hive.log("skills", "no draft", out.error, task.id);
   } catch (error) {
     hive.log("skills", "error", error instanceof Error ? error.message : String(error));
@@ -1299,8 +1317,10 @@ async function runBackgroundJob() {
   if (!job) return runSkillJob();
   backgroundBusy = true;
   try {
-    const saved = await memory.extract(job.agent, job.prompt, job.answer, job.private);
-    if (saved.length) hive.log("memory", "saved", saved.join("; "));
+    const p = projects.get(job.project);
+    const saved = await inProject(job.project, () => memory.extract(job.agent, job.prompt, job.answer, job.private, p ? { id: p.id, name: p.name, keepAll: p.localOnly } : null));
+    // With the card's id, so it shows only in the card's project
+    if (saved.length) hive.log("memory", "saved", saved.join("; "), job.taskId);
   } catch (error) {
     hive.log("memory", "error", error instanceof Error ? error.message : String(error));
   } finally {
@@ -1334,6 +1354,12 @@ function handleSwitch(text: string): string | null {
   return `${cmd.role === "all" ? "Every agent" : ROLE_LABEL[cmd.role]} now uses ${ref}.`;
 }
 
+/** A project's cards may only sign in with its own profiles or shared ones. */
+function profileProjectError(profile: string, project: string | null): string | null {
+  const owner = projects.ownerOfProfile(profile);
+  return owner && owner.id !== project ? `The profile “${profile}” belongs to the project “${owner.name}”` : null;
+}
+
 function createTask(input: unknown, extra: { chatId?: string; routineId?: string; mayAct?: boolean } = {}): { task?: Task; status: number; error?: unknown } {
   const parsed = AgentTaskSchema.safeParse(input);
   if (!parsed.success) return { status: 400, error: parsed.error.flatten() };
@@ -1348,6 +1374,11 @@ function createTask(input: unknown, extra: { chatId?: string; routineId?: string
   if (d.audio.some((id) => !uploads.exists(id))) return { status: 400, error: "Unknown audio: upload it with POST /api/uploads first" };
   if (d.documents.some((id) => !uploads.exists(id))) return { status: 400, error: "Unknown PDF: upload it with POST /api/uploads first" };
   if (d.profile && !profiles.exists(d.profile)) return { status: 400, error: `There's no browser profile called “${d.profile}”` };
+  const project = d.project ? projects.get(d.project) : undefined;
+  if (d.project && !project) return { status: 400, error: "Unknown project" };
+  if (project?.archived) return { status: 400, error: `The project “${project.name}” is archived; restore it first` };
+  const profileError = d.profile ? profileProjectError(d.profile, project?.id ?? null) : null;
+  if (profileError) return { status: 400, error: profileError };
   // Routine runs are forced read-only and get exactly one destination
   const routine = routineFields(d, { telegramChat: telegram ? [...TELEGRAM_ALLOWED][0] : undefined, vault: OBSIDIAN_VAULT || undefined }, d.source === "routine" && extra.mayAct);
   if ("error" in routine) return { status: 400, error: routine.error };
@@ -1372,6 +1403,7 @@ function createTask(input: unknown, extra: { chatId?: string; routineId?: string
     deliverTo: routine.deliverTo,
     allowedSites: d.allowedSites.length ? d.allowedSites : undefined,
     profile: d.profile,
+    project: project?.id,
     images: d.images.length ? d.images : undefined,
     audio: d.audio.length ? d.audio : undefined,
     documents: d.documents.length ? d.documents : undefined,
@@ -1539,8 +1571,8 @@ function planVideo(task: Task): VideoPlan {
     voice: wantsVoice(said),
     captions: wantsCaptions(said),
     recording: wantsOwnAudio(said) && clips.length ? clips[clips.length - 1] : null,
-    picked: assets.pick(said),
-    brand: assets.branded() ? assets.brand() : null,
+    picked: assets.pick(said, undefined, projects.idOf(task.project)),
+    brand: assets.branded(projects.idOf(task.project)) ? assets.brand(projects.idOf(task.project)) : null,
     vertical: wantsVertical(said),
   };
 }
@@ -1566,7 +1598,7 @@ async function videoMedia(
   push: (t: string) => void,
 ): Promise<{ props: Record<string, unknown>; files: { name: string; base64: string }[]; assetIds: string[]; assetCount: number; voiceNote: string; captions: boolean }> {
   const plan = planVideo(task);
-  const brand = assets.brand();
+  const brand = assets.brand(projects.idOf(task.project));
   const files: { name: string; base64: string }[] = [];
   let words: Word[] = [];
   let audio: string | null = null;
@@ -1620,7 +1652,7 @@ async function videoMedia(
   }
 
   // Assets: the ones that match, plus the brand logo and font
-  const chosen = [...plan.picked, ...assets.brandAssets().filter((b) => !plan.picked.some((p) => p.id === b.id))];
+  const chosen = [...plan.picked, ...assets.brandAssets(projects.idOf(task.project)).filter((b) => !plan.picked.some((p) => p.id === b.id))];
   const assetProps: Record<string, { file: string; kind: string; name: string; seconds?: number }> = {};
   let music: { file: string; beats: number[]; tempo: number | null } | null = null;
   for (const a of chosen) {
@@ -1756,8 +1788,20 @@ function patchTask(task: Task, input: unknown): { error?: string } {
     task.readOnly = p.readOnly || undefined;
   }
   if (p.allowedSites !== undefined) task.allowedSites = p.allowedSites.length ? p.allowedSites : undefined;
+  if (p.project !== undefined) {
+    const to = p.project ? projects.get(p.project) : undefined;
+    if (p.project && !to) return { error: "Unknown project" };
+    if (to?.archived) return { error: `The project “${to.name}” is archived` };
+    if (RUNNING_STATUSES.includes(task.status)) return { error: "A running card can't change project" };
+    const keep = p.profile !== undefined ? p.profile : task.profile;
+    if (keep && profileProjectError(keep, to?.id ?? null)) return { error: `${profileProjectError(keep, to?.id ?? null)}. Pick another profile first.` };
+    task.project = to?.id;
+    historyIndex.put(task);
+  }
   if (p.profile !== undefined) {
     if (p.profile && !profiles.exists(p.profile)) return { error: `There's no browser profile called “${p.profile}”` };
+    const err = p.profile ? profileProjectError(p.profile, projects.idOf(task.project)) : null;
+    if (err) return { error: err };
     task.profile = p.profile ?? undefined;
   }
   if (p.documents !== undefined) {
@@ -2017,12 +2061,15 @@ async function findBeats(id: string): Promise<string | null> {
   }
 }
 
-app.get("/api/assets", async (_req, res) => {
+app.get("/api/assets", async (req, res) => {
   const h = voice ? await voice.health() : null;
   const ids = h?.voices?.length ? h.voices : Object.keys(KNOWN_VOICES);
+  const p = projectParam(req.query.project);
+  const project = p ?? null;
   res.json({
-    assets: assets.list(),
-    brand: assets.brand(),
+    assets: p === undefined ? assets.list() : assets.list().filter((a) => visibleIn(a.project, p)),
+    brand: assets.brand(project),
+    ownBrand: project ? assets.hasOwnBrand(project) : true,
     fonts: SYSTEM_FONTS,
     voices: ids.map((id) => ({ id, label: KNOWN_VOICES[id] ?? id })),
     voice: !voice ? "off" : !h ? "down" : h.ready ? (h.error ? "partial" : "ready") : "loading",
@@ -2072,10 +2119,76 @@ app.post("/api/assets/:id/beats", requireToken, async (req, res) => {
   res.json(assets.get(a.id));
 });
 
+// ?project=<id>: that project's own brand (otherwise the General brand)
 app.put("/api/brand", requireToken, (req, res) => {
-  const out = assets.setBrand(req.body);
+  const out = assets.setBrand(req.body, projectParam(req.query.project) ?? null);
   if ("error" in out) return res.status(400).json(out);
   res.json(out);
+});
+// A project goes back to the General brand
+app.delete("/api/brand", requireToken, (req, res) => {
+  const p = projectParam(req.query.project);
+  if (!p) return res.status(400).json({ error: "Say which project (?project=<id>)" });
+  assets.clearBrand(p);
+  res.json(assets.brand(null));
+});
+
+// --- Projects ---------------------------------------------------------------
+
+function projectView(p: ReturnType<Projects["list"]>[number]) {
+  const cards = [...tasks.values()].filter((t) => !t.parentId && t.project === p.id);
+  return {
+    ...p,
+    counts: {
+      cards: cards.length,
+      open: cards.filter((t) => !TERMINAL_STATUSES.includes(t.status)).length,
+      memories: memory.list().filter((m) => m.project === p.id).length,
+      skills: skills.list().filter((s) => s.project === p.id).length,
+      assets: assets.countIn(p.id),
+      routines: scheduler.list().filter((r) => r.project === p.id).length,
+    },
+    ownBrand: assets.hasOwnBrand(p.id),
+  };
+}
+
+app.get("/api/projects", (_req, res) => {
+  res.json({ projects: projects.list().map(projectView) });
+});
+app.post("/api/projects", requireToken, (req, res) => {
+  const bad = (req.body?.profiles ?? []).find?.((n: unknown) => typeof n === "string" && !profiles.exists(n));
+  if (bad) return res.status(400).json({ error: `There's no browser profile called “${bad}”` });
+  const out = projects.create(req.body);
+  if ("error" in out) return res.status(400).json(out);
+  hive.log("projects", "created", out.name);
+  res.status(201).json(projectView(out));
+});
+app.patch("/api/projects/:id", requireToken, (req, res) => {
+  const bad = (req.body?.profiles ?? []).find?.((n: unknown) => typeof n === "string" && !profiles.exists(n));
+  if (bad) return res.status(400).json({ error: `There's no browser profile called “${bad}”` });
+  const before = projects.get(String(req.params.id));
+  const out = projects.update(String(req.params.id), req.body);
+  if ("error" in out) return res.status(out.error === "Project not found" ? 404 : 400).json(out);
+  if (before && JSON.stringify(req.body?.profiles ?? null) !== "null") hive.log("projects", "updated", `${out.name}: sign-ins ${out.profiles.join(", ") || "none"}`);
+  res.json(projectView(out));
+});
+// Deleting needs an empty project (move or remove its cards, assets, skills and routines first,
+// or archive it instead). Its memories and own brand go with it.
+app.delete("/api/projects/:id", requireToken, (req, res) => {
+  const p = projects.get(String(req.params.id));
+  if (!p) return res.status(404).json({ error: "Project not found" });
+  const v = projectView(p);
+  const left = [
+    v.counts.cards && `${v.counts.cards} card${v.counts.cards > 1 ? "s" : ""}`,
+    v.counts.assets && `${v.counts.assets} asset${v.counts.assets > 1 ? "s" : ""}`,
+    v.counts.skills && `${v.counts.skills} skill${v.counts.skills > 1 ? "s" : ""}`,
+    v.counts.routines && `${v.counts.routines} routine${v.counts.routines > 1 ? "s" : ""}`,
+  ].filter(Boolean);
+  if (left.length) return res.status(409).json({ error: `“${p.name}” still has ${left.join(", ")}. Move or delete them first, or archive the project.` });
+  const forgot = memory.removeProject(p.id);
+  assets.clearBrand(p.id);
+  projects.remove(p.id);
+  hive.log("projects", "deleted", `${p.name}${forgot ? ` and ${forgot} memories` : ""}`);
+  res.json({ ok: true, memories: forgot });
 });
 
 // Try a voice: speaks a short line and returns the WAV
@@ -2200,10 +2313,20 @@ app.get("/api/agents", (_req, res) => {
     AGENT_KEYS.map((k) => ({ key: k, name: TEAM[k].name, role: TEAM[k].role, canDelegate: k === "planner", model: models.resolve(k).ref })),
   );
 });
+/** ?project=: "all" or missing → undefined (everything), "general" → null, or a project id. */
+function projectParam(q: unknown): string | null | undefined {
+  if (q === undefined || q === "all" || q === "") return undefined;
+  if (q === "general") return null;
+  return projects.idOf(String(q));
+}
+
 app.get("/api/hive", (req, res) => {
-  res.json(hive.recent(Math.min(Number(req.query.limit) || 100, 500)));
+  res.json(hive.recent(Math.min(Number(req.query.limit) || 100, 500), projectParam(req.query.project)));
 });
-app.get("/api/memories", (_req, res) => res.json(memory.list()));
+app.get("/api/memories", (req, res) => {
+  const p = projectParam(req.query.project);
+  res.json(p === undefined ? memory.list() : memory.list().filter((m) => visibleIn(m.project, p)));
+});
 // Pictures for cards: upload as base64 (a data: URL is fine), then pass the id in "images"
 app.post("/api/uploads", requireToken, async (req, res) => {
   const data = typeof req.body?.data === "string" ? req.body.data : "";
@@ -2243,7 +2366,8 @@ app.get("/api/uploads/:id", (req, res) => {
 
 app.post("/api/memories", requireToken, (req, res) => {
   const text = typeof req.body?.text === "string" ? req.body.text : "";
-  const id = memory.add(text, "shared", 0.7, req.body?.pinned !== false);
+  const project = typeof req.body?.project === "string" ? projects.idOf(req.body.project) : null;
+  const id = memory.add(text, "shared", 0.7, req.body?.pinned !== false, project);
   if (id === null) return res.status(400).json({ error: "Memory text is too short" });
   res.status(201).json({ id });
 });
@@ -2299,7 +2423,7 @@ app.post("/api/tasks/:id/skill", requireToken, async (req, res) => {
   if (!task || task.parentId) return res.status(404).json({ error: "Task not found" });
   if (!TERMINAL_STATUSES.includes(task.status)) return res.status(400).json({ error: "Wait for the card to finish" });
   try {
-    const out = await draftSkill(task);
+    const out = await inProject(task.project, () => draftSkill(task));
     if ("error" in out) return res.status(422).json(out);
     res.status(201).json(out);
   } catch (e) {
@@ -2316,6 +2440,7 @@ app.post("/api/tasks/:id/restore", requireToken, (req, res) => {
 
 app.get("/api/search", (req, res) => {
   const q = String(req.query.q ?? "").slice(0, 200);
+  const only = projectParam(req.query.project);
   const hits = historyIndex
     .search(q)
     .map((h) => {
@@ -2324,7 +2449,8 @@ app.get("/api/search", (req, res) => {
         historyIndex.remove(h.taskId);
         return null;
       }
-      return { ...h, status: t.status, createdAt: t.createdAt, archived: Boolean(t.archived), agent: t.targetAgent };
+      if (only !== undefined && (t.project ?? null) !== only) return null;
+      return { ...h, status: t.status, createdAt: t.createdAt, archived: Boolean(t.archived), agent: t.targetAgent, project: t.project };
     })
     .filter(Boolean);
   res.json(hits);
@@ -2366,7 +2492,11 @@ app.put("/api/approvals/policy", requireToken, (req, res) => {
 
 // --- Browser profiles and take over API -----------------------------------------
 app.get("/api/profiles", (_req, res) => {
-  res.json({ profiles: profiles.list().map((p) => ({ ...p, open: liveBrowsers.has(`manual-${p.name}`) })), default: defaultProfile(), encrypted: Boolean(process.env.PROFILE_SECRET) });
+  res.json({
+    profiles: profiles.list().map((p) => ({ ...p, open: liveBrowsers.has(`manual-${p.name}`), project: projects.ownerOfProfile(p.name)?.id ?? null })),
+    default: defaultProfile(),
+    encrypted: Boolean(process.env.PROFILE_SECRET),
+  });
 });
 app.post("/api/profiles", requireToken, (req, res) => {
   const name = String(req.body?.name ?? "").trim().toLowerCase();
@@ -2392,6 +2522,7 @@ app.delete("/api/profiles/:name", requireToken, async (req, res) => {
     broadcastBrowser({ type: "end", taskId: open.id });
   }
   if (!profiles.remove(name)) return res.status(404).json({ error: "Profile not found" });
+  projects.dropProfile(name);
   hive.log("browser", "profile", `deleted “${name}” and its sign-ins`);
   res.json({ ok: true });
 });
@@ -2489,6 +2620,7 @@ const scheduler = new Scheduler(
           allowedSites: r.allowedSites,
           column: "ready",
           ...(r.profile ? { profile: r.profile } : {}),
+          ...(r.project && projects.exists(r.project) ? { project: r.project } : {}),
         },
         { routineId: r.id, mayAct: r.mayAct },
       );
@@ -2502,6 +2634,9 @@ const scheduler = new Scheduler(
     },
     checkDelivery: (r) => {
       if (r.profile && !profiles.exists(r.profile)) return `There's no browser profile called “${r.profile}”`;
+      const p = r.project ? projects.get(r.project) : undefined;
+      if (r.project && !p) return "its project was deleted";
+      if (p?.archived) return `its project “${p.name}” is archived`;
       const f = routineFields({ source: "routine", deliverTo: r.deliverTo }, routineEnv());
       return "error" in f ? f.error : null;
     },
@@ -2532,13 +2667,26 @@ app.post("/api/routines/preview", (req, res) => {
     res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
   }
 });
+/** A routine's project must exist and be able to use its profile. */
+function routineProjectError(body: unknown, current?: { project?: string | null; profile?: string | null }): string | null {
+  const b = (body ?? {}) as { project?: unknown; profile?: unknown };
+  const project = b.project !== undefined ? b.project : current?.project;
+  const profile = b.profile !== undefined ? b.profile : current?.profile;
+  if (typeof project === "string" && !projects.exists(project)) return "Unknown project";
+  return typeof profile === "string" ? profileProjectError(profile, typeof project === "string" ? project : null) : null;
+}
+
 app.post("/api/routines", requireToken, (req, res) => {
+  const bad = routineProjectError(req.body);
+  if (bad) return res.status(400).json({ error: bad });
   const out = scheduler.create(req.body);
   if ("error" in out) return res.status(400).json(out);
   hive.log("routine", "created", `${out.name}: ${out.label}`);
   res.status(201).json(routineView(out));
 });
 app.patch("/api/routines/:id", requireToken, (req, res) => {
+  const bad = routineProjectError(req.body, scheduler.list().find((r) => r.id === String(req.params.id)));
+  if (bad) return res.status(400).json({ error: bad });
   const out = scheduler.update(String(req.params.id), req.body);
   if ("error" in out) return res.status(out.error === "Routine not found" ? 404 : 400).json(out);
   res.json(routineView(out));

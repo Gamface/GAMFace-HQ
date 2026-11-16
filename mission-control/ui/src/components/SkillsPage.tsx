@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { AGENT_LABELS, getJson, send } from "../api";
+import { useProjects } from "../project";
 
 // Skills: reusable procedures the agents follow when a request fits. Drafts come
 // from finished cards (written by a local model) and do nothing until you approve
@@ -19,8 +20,9 @@ interface Skill {
   uses: number;
   lastUsedAt?: number;
   updatedAt: number;
+  project?: string | null;
 }
-type Fields = Pick<Skill, "name" | "description" | "agents" | "steps">;
+type Fields = Pick<Skill, "name" | "description" | "agents" | "steps" | "project">;
 
 const AGENTS = ["planner", "coder", "browser", "file", "security_audit", "vision"];
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e)).replace(/^\d+ /, "").replace(/^\{"error":"(.*)"\}$/, "$1");
@@ -28,6 +30,7 @@ const input = "w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 
 
 function SkillForm({ initial, saveLabel, onSave, onCancel, extra }: { initial: Fields; saveLabel: string; onSave: (f: Fields) => Promise<void>; onCancel?: () => void; extra?: ReactNode }) {
   const [f, setF] = useState<Fields>(initial);
+  const { projects } = useProjects();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   return (
@@ -64,6 +67,21 @@ function SkillForm({ initial, saveLabel, onSave, onCancel, extra }: { initial: F
           </label>
         ))}
         <span className="text-slate-500">(none ticked: any agent)</span>
+        {(projects.length > 0 || f.project) && (
+          <label className="flex items-center gap-1 text-slate-400">
+            Project
+            <select value={f.project ?? ""} onChange={(e) => setF({ ...f, project: e.target.value || null })} className="bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-slate-200">
+              <option value="">General (every project)</option>
+              {projects
+                .filter((p) => !p.archived || p.id === f.project)
+                .map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+        )}
         <div className="ml-auto flex gap-2">
           {extra}
           {onCancel && (
@@ -82,6 +100,7 @@ function SkillForm({ initial, saveLabel, onSave, onCancel, extra }: { initial: F
 }
 
 export default function SkillsPage() {
+  const proj = useProjects();
   const [list, setList] = useState<Skill[] | null>(null);
   const [auto, setAuto] = useState(true);
   const [editing, setEditing] = useState<string | null>(null);
@@ -109,8 +128,10 @@ export default function SkillsPage() {
     }
   };
   if (!list) return <div className="col-span-3 p-6 text-slate-500">{error ?? "Loading skills…"}</div>;
-  const drafts = list.filter((s) => s.status === "draft");
-  const rest = list.filter((s) => s.status !== "draft");
+  // A project shows its own skills and the General ones
+  const shown = list.filter((s) => proj.view === "all" || !s.project || s.project === proj.view);
+  const drafts = shown.filter((s) => s.status === "draft");
+  const rest = shown.filter((s) => s.status !== "draft");
   const nameOf = (id?: string) => list.find((s) => s.id === id)?.name;
 
   return (
@@ -137,7 +158,7 @@ export default function SkillsPage() {
       {adding && (
         <section className="bg-slate-900 border border-cyan-800/60 rounded-xl p-4">
           <SkillForm
-            initial={{ name: "", description: "", agents: [], steps: "" }}
+            initial={{ name: "", description: "", agents: [], steps: "", project: proj.target }}
             saveLabel="Add skill"
             onCancel={() => setAdding(false)}
             onSave={async (f) => {
@@ -208,6 +229,12 @@ export default function SkillsPage() {
               <div className="min-w-0">
                 <h3 className="text-sm font-semibold text-slate-100">
                   {s.name} {s.private && <span title="Private: never sent to cloud models">🔒</span>}
+                  {s.project && (
+                    <span className="ml-2 text-[10px] font-normal px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                      <span className="inline-block h-1.5 w-1.5 rounded-full mr-1" style={{ background: proj.byId(s.project)?.color }} />
+                      {proj.byId(s.project)?.name ?? "project"}
+                    </span>
+                  )}
                 </h3>
                 <p className="text-xs text-slate-400">{s.description}</p>
               </div>

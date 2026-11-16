@@ -16,6 +16,8 @@ export interface MemoryItem {
   hits: number;
   createdAt: number;
   lastUsed: number;
+  // The project it belongs to; missing means General (seen by every project)
+  project?: string;
 }
 
 interface MemoryData {
@@ -72,11 +74,11 @@ export class Memory {
     );
   }
 
-  add(text: string, agent = "shared", importance = 0.5, pinned = false): number | null {
+  add(text: string, agent = "shared", importance = 0.5, pinned = false, project: string | null = null): number | null {
     text = text.trim();
     if (text.length < 8) return null;
     const now = Date.now();
-    const dup = this.store.data.items.find((m) => m.agent === agent && similarity(m.text, text) >= MERGE_SIMILARITY);
+    const dup = this.store.data.items.find((m) => m.agent === agent && (m.project ?? null) === project && similarity(m.text, text) >= MERGE_SIMILARITY);
     if (dup) {
       dup.importance = Math.min(1, dup.importance + 0.1);
       dup.lastUsed = now;
@@ -93,6 +95,7 @@ export class Memory {
       hits: 0,
       createdAt: now,
       lastUsed: now,
+      ...(project ? { project } : {}),
     };
     this.store.data.items.push(item);
     this.store.save();
@@ -115,12 +118,12 @@ export class Memory {
     return this.store.data.items.length < before;
   }
 
-  /** Memories relevant to a prompt, for one agent (its own plus shared ones). */
-  recall(query: string, agent: string, limit = 6): string[] {
+  /** Memories relevant to a prompt, for one agent (its own plus shared ones), in a project (its own plus General ones). */
+  recall(query: string, agent: string, limit = 6, project: string | null = null): string[] {
     const q = words(query);
     const now = Date.now();
     const scored = this.store.data.items
-      .filter((m) => m.agent === "shared" || m.agent === agent)
+      .filter((m) => (m.agent === "shared" || m.agent === agent) && (!m.project || m.project === project))
       .map((m) => {
         let overlap = 0;
         for (const w of words(m.text)) if (q.has(w)) overlap++;
@@ -139,15 +142,23 @@ export class Memory {
 
   /** Ask the model which durable facts from one exchange are worth keeping. */
   /** `privateAnswer`: the answer was written from private material, so a cloud model must not see it. */
-  async extract(agent: string, prompt: string, answer: string, privateAnswer = false): Promise<string[]> {
+  /**
+   * `project`: the card's project. Facts only about it stay in it; facts about the user in
+   * general are General. A project kept on this PC keeps everything it learns.
+   */
+  async extract(agent: string, prompt: string, answer: string, privateAnswer = false, project: { id: string; name: string; keepAll: boolean } | null = null): Promise<string[]> {
     const shown = sanitize(answer.slice(0, 3000));
+    const scoped = project && !project.keepAll;
     const data = await this.chat(this.model, [
       {
         role: "system",
         content:
           "Extract durable facts worth remembering about the user, their projects, preferences, decisions or setup. " +
           "Skip small talk and one-off details. Reply with JSON only: " +
-          '{"memories": [{"text": "...", "importance": 0.0-1.0, "shared": true}]} and an empty list if nothing is worth keeping.',
+          (scoped
+            ? `{"memories": [{"text": "...", "importance": 0.0-1.0, "shared": true, "project": true}]} and an empty list if nothing is worth keeping. ` +
+              `This conversation is in the project "${project.name}": set "project" to true for facts only about that project, false for facts about the user in general.`
+            : '{"memories": [{"text": "...", "importance": 0.0-1.0, "shared": true}]} and an empty list if nothing is worth keeping.'),
       },
       { role: "user", content: `USER: ${sanitize(prompt.slice(0, 3000))}\n\nASSISTANT: ${privateAnswer ? privateBlock(shown, "(withheld)") : shown}` },
     ]);
@@ -155,13 +166,32 @@ export class Memory {
     const items = Array.isArray(data.memories) ? data.memories.slice(0, 5) : [];
     for (const raw of items) {
       if (!raw || typeof raw !== "object") continue;
-      const item = raw as { text?: unknown; importance?: unknown; shared?: unknown };
+      const item = raw as { text?: unknown; importance?: unknown; shared?: unknown; project?: unknown };
       if (typeof item.text !== "string" || !item.text.trim()) continue;
       const importance = Number(item.importance);
       const owner = item.shared === false ? agent : "shared";
-      if (this.add(item.text, owner, Number.isFinite(importance) ? importance : 0.5) !== null) saved.push(item.text);
+      // Unsure counts as the project's: it doesn't leak into others
+      const where = project && (project.keepAll || item.project !== false) ? project.id : null;
+      if (this.add(item.text, owner, Number.isFinite(importance) ? importance : 0.5, false, where) !== null) saved.push(item.text);
     }
     return saved;
+  }
+
+  /** Deletes a project's memories (when the project is deleted). */
+  removeProject(project: string): number {
+    const before = this.store.data.items.length;
+    this.store.data.items = this.store.data.items.filter((m) => m.project !== project);
+    this.store.save();
+    return before - this.store.data.items.length;
+  }
+
+  setProject(id: number, project: string | null): boolean {
+    const m = this.store.data.items.find((x) => x.id === id);
+    if (!m) return false;
+    if (project) m.project = project;
+    else delete m.project;
+    this.store.save();
+    return true;
   }
 
   maintain(now = Date.now()) {
@@ -193,7 +223,7 @@ export class Memory {
       const a = keep[i];
       if (gone.has(a.id)) continue;
       for (const b of keep.slice(i + 1)) {
-        if (gone.has(b.id) || b.pinned || a.agent !== b.agent) continue;
+        if (gone.has(b.id) || b.pinned || a.agent !== b.agent || (a.project ?? null) !== (b.project ?? null)) continue;
         if (similarity(a.text, b.text) >= MERGE_SIMILARITY) {
           a.importance = Math.min(1, Math.max(a.importance, b.importance) + 0.05);
           a.hits += b.hits;

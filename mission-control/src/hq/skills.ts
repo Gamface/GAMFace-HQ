@@ -19,6 +19,12 @@ export const SkillInputSchema = z.object({
   // Which agents may use it; empty means any
   agents: z.array(z.enum(["planner", "coder", "browser", "file", "security_audit", "vision"])).max(6).default([]),
   steps: z.string().trim().min(10).max(4000),
+  // The project it belongs to; null or missing: every project (General)
+  project: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9-]{0,30}-[a-f0-9]{4}$/)
+    .nullable()
+    .optional(),
 });
 export const SkillPatchSchema = SkillInputSchema.partial().extend({ status: z.enum(["draft", "active", "off"]).optional() });
 export type SkillInput = z.infer<typeof SkillInputSchema>;
@@ -89,7 +95,7 @@ export class Skills {
   }
 
   /** Adds a skill. Drafts named like an existing skill are marked as an update to it. */
-  create(raw: unknown, opts: { status?: Skill["status"]; private?: boolean; sourceTaskId?: string; sourceTitle?: string } = {}): Skill | { error: string } {
+  create(raw: unknown, opts: { status?: Skill["status"]; private?: boolean; sourceTaskId?: string; sourceTitle?: string; project?: string | null } = {}): Skill | { error: string } {
     const parsed = SkillInputSchema.safeParse(raw);
     if (!parsed.success) {
       const f = parsed.error.flatten().fieldErrors;
@@ -101,8 +107,10 @@ export class Skills {
     const existing = this.byName(parsed.data.name);
     if (existing && status !== "draft") return { error: `There's already a skill called “${existing.name}”` };
     const now = Date.now();
+    const project = opts.project !== undefined ? opts.project : (parsed.data.project ?? null);
     const s: Skill = {
       ...parsed.data,
+      project: project ?? undefined,
       id: crypto.randomUUID(),
       status,
       private: Boolean(opts.private),
@@ -123,7 +131,7 @@ export class Skills {
     const parsed = SkillPatchSchema.safeParse(raw);
     if (!parsed.success) return { error: "Invalid skill" };
     const { status, ...fields } = parsed.data;
-    const next: Skill = { ...s, ...fields, updatedAt: Date.now() };
+    const next: Skill = { ...s, ...fields, project: fields.project === undefined ? s.project : (fields.project ?? undefined), updatedAt: Date.now() };
     if (status === "active" && s.status === "draft") return this.approve(id, next);
     if (status) next.status = status;
     this.write(next);
@@ -169,8 +177,8 @@ export class Skills {
     return this.list().some((s) => s.sourceTaskId === taskId);
   }
 
-  /** Active skills for this agent whose words match the request: at most `limit`, best first. */
-  match(request: string, agent: string, limit = 2): Skill[] {
+  /** Active skills for this agent whose words match the request: at most `limit`, best first. Only General skills and the project's own. */
+  match(request: string, agent: string, limit = 2, project: string | null = null): Skill[] {
     const words = keywords(request);
     if (words.length < 2) return [];
     let rows: { id: string }[];
@@ -184,6 +192,7 @@ export class Skills {
     for (const { id } of rows) {
       const s = this.get(id);
       if (!s || s.status !== "active" || (s.agents.length && !s.agents.includes(agent as never))) continue;
+      if (s.project && s.project !== project) continue;
       // Needs two of the request's words in the skill's name or description, so a skill
       // isn't pulled in by one shared word
       const own = new Set(keywords(`${s.name} ${s.description}`, 40).map(stem));

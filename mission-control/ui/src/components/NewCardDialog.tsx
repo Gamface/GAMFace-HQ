@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useProjects } from "../project";
 import type { ReactNode } from "react";
 import { AGENT_LABELS, getJson, send } from "../api";
 import type { BoardCard } from "../api";
@@ -23,17 +24,19 @@ export interface CardFields {
   documents: string[];
   // Browser profile ("" = the default); read-only runs never use one
   profile?: string;
+  // Project (null: General)
+  project?: string | null;
 }
 
-/** The browser profiles, for a picker. */
-function useProfileNames(): { names: string[]; def: string } {
-  const [state, setState] = useState<{ names: string[]; def: string }>({ names: [], def: "" });
+/** The browser profiles a project's cards may use (its own and shared ones), for a picker. */
+function useProfileNames(project: string | null | undefined): { names: string[]; def: string } {
+  const [state, setState] = useState<{ profiles: { name: string; project?: string | null }[]; def: string }>({ profiles: [], def: "" });
   useEffect(() => {
-    getJson<{ profiles: { name: string }[]; default: string }>("/api/profiles")
-      .then((d) => setState({ names: d.profiles.map((p) => p.name), def: d.default }))
+    getJson<{ profiles: { name: string; project?: string | null }[]; default: string }>("/api/profiles")
+      .then((d) => setState({ profiles: d.profiles, def: d.default }))
       .catch(() => {});
   }, []);
-  return state;
+  return { names: state.profiles.filter((p) => !p.project || p.project === (project ?? null)).map((p) => p.name), def: state.def };
 }
 
 export function CardForm({
@@ -57,7 +60,8 @@ export function CardForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof CardFields>(k: K, v: CardFields[K]) => setF((prev) => ({ ...prev, [k]: v }));
-  const profileNames = useProfileNames();
+  const profileNames = useProfileNames(f.project);
+  const proj = useProjects();
   const uploader = useImageUploads(f.images, (ids) => set("images", ids));
   const audioUp = useAudioUploads(f.audio, (ids) => set("audio", ids));
   const docUp = useDocUploads(f.documents, (ids) => set("documents", ids));
@@ -69,7 +73,7 @@ export function CardForm({
     setBusy(true);
     try {
       const ready = f.prompt.trim() ? f : { ...f, prompt: defaultPrompt(f.audio.length, f.documents.length) };
-      await onSubmit({ ...ready, profile: ready.profile || undefined });
+      await onSubmit({ ...ready, profile: ready.profile || undefined, project: ready.project ?? null });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
@@ -191,6 +195,27 @@ export function CardForm({
           </label>
         )}
       </div>
+      {(proj.active.length > 0 || f.project) && (
+        <label className="flex items-center gap-2 text-xs text-slate-400">
+          Project
+          <select
+            className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200"
+            value={f.project ?? ""}
+            onChange={(e) => setF((prev) => ({ ...prev, project: e.target.value || null, profile: undefined }))}
+          >
+            <option value="">General</option>
+            {proj.projects
+              .filter((p) => !p.archived || p.id === f.project)
+              .map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.localOnly ? "🔒 " : ""}
+                  {p.name}
+                </option>
+              ))}
+          </select>
+          {proj.byId(f.project)?.localOnly && <span className="text-[10px] text-emerald-300">local models only</span>}
+        </label>
+      )}
       {extra}
       {error && <p className="text-rose-300 text-xs">{error}</p>}
       <div className="flex justify-end gap-2 pt-1">
@@ -217,12 +242,13 @@ export default function NewCardDialog({
   onCreated: () => void;
 }) {
   const [where, setWhere] = useState(column);
+  const { target } = useProjects();
   return (
     <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="w-full max-w-lg bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-2xl">
         <h2 className="text-base font-semibold text-slate-100 mb-3">New card</h2>
         <CardForm
-          initial={{ title: "", prompt: "", targetAgent: "auto", priority: "normal", dependsOn: [], needsReview: false, readOnly: false, allowedSites: [], images: [], audio: [], documents: [] }}
+          initial={{ title: "", prompt: "", targetAgent: "auto", priority: "normal", dependsOn: [], needsReview: false, readOnly: false, allowedSites: [], images: [], audio: [], documents: [], project: target }}
           cards={cards}
           submitLabel={where === "ready" ? "Add & queue" : "Add to Backlog"}
           onCancel={onClose}

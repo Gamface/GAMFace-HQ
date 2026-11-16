@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { HARNESS_URL, authHeaders } from "../config";
 import { getJson, send } from "../api";
+import { useProjects } from "../project";
 
 // The asset dictionary: logos, pictures, clips, music and fonts the Coder may use in
 // videos, each with a description so it picks the right one. Plus the brand the
@@ -21,6 +22,7 @@ interface Asset {
   tempo?: number | null;
   beats?: number[];
   uses: number;
+  project?: string;
 }
 interface Brand {
   name: string;
@@ -40,6 +42,7 @@ interface Brand {
 interface Data {
   assets: Asset[];
   brand: Brand;
+  ownBrand: boolean;
   fonts: string[];
   voices: { id: string; label: string }[];
   voice: "off" | "down" | "loading" | "ready" | "partial";
@@ -136,6 +139,7 @@ function Preview({ a }: { a: Asset }) {
 }
 
 function AssetCard({ a, onChange, onError }: { a: Asset; onChange: () => Promise<void>; onError: (e: string) => void }) {
+  const proj = useProjects();
   const [f, setF] = useState({ name: a.name, description: a.description, tags: a.tags.join(", "), role: a.role });
   const [busy, setBusy] = useState("");
   useEffect(() => setF({ name: a.name, description: a.description, tags: a.tags.join(", "), role: a.role }), [a.name, a.description, a.tags, a.role]);
@@ -175,6 +179,23 @@ function AssetCard({ a, onChange, onError }: { a: Asset; onChange: () => Promise
           </select>
         ) : (
           <span className="px-2 py-1 rounded-md bg-slate-800 text-slate-300">{ROLE_LABEL[a.role]}</span>
+        )}
+        {(proj.projects.length > 0 || a.project) && (
+          <select
+            value={a.project ?? ""}
+            onChange={(e) => void run("project", () => send("PATCH", `/api/assets/${a.id}`, { project: e.target.value || null }))}
+            className="bg-slate-950 border border-slate-700 rounded-md px-1 py-1 text-slate-200 max-w-[7rem]"
+            title="Which projects can use it"
+          >
+            <option value="">General</option>
+            {proj.projects
+              .filter((p) => !p.archived || p.id === a.project)
+              .map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} only
+                </option>
+              ))}
+          </select>
         )}
         <span>
           {a.ext.toUpperCase()} · {size(a.bytes)}
@@ -229,6 +250,9 @@ function AssetCard({ a, onChange, onError }: { a: Asset; onChange: () => Promise
 }
 
 function BrandForm({ data, onSaved, onError }: { data: Data; onSaved: () => Promise<void>; onError: (e: string) => void }) {
+  const proj = useProjects();
+  const project = proj.byId(proj.target);
+  const inherits = Boolean(project && !data.ownBrand);
   const [b, setB] = useState<Brand>(data.brand);
   const [busy, setBusy] = useState("");
   const [saved, setSaved] = useState(false);
@@ -265,8 +289,29 @@ function BrandForm({ data, onSaved, onError }: { data: Data; onSaved: () => Prom
   return (
     <section className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
       <div className="flex items-center gap-3">
-        <h2 className="text-sm font-semibold text-slate-200">Brand</h2>
-        <p className="text-xs text-slate-500">The video templates use these colours, font, logo and voice. Set them once; every video follows them.</p>
+        <h2 className="text-sm font-semibold text-slate-200">{project ? `Brand for ${project.name}` : "Brand"}</h2>
+        <p className="text-xs text-slate-500">
+          {project
+            ? inherits
+              ? "This project uses the General brand. Change anything below and save to give it its own."
+              : "This project has its own brand."
+            : "The video templates use these colours, font, logo and voice. Set them once; every video follows them (projects can have their own)."}
+        </p>
+        {project && !inherits && (
+          <button
+            onClick={async () => {
+              try {
+                await send("DELETE", `/api/brand?project=${project.id}`);
+                await onSaved();
+              } catch (e) {
+                onError(errText(e));
+              }
+            }}
+            className="ml-auto text-xs px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300"
+          >
+            Use the General brand
+          </button>
+        )}
       </div>
       <div className="grid grid-cols-[1fr_2fr] gap-2">
         <input value={b.name} onChange={(e) => setB({ ...b, name: e.target.value })} placeholder="Brand name" maxLength={60} className={input} />
@@ -362,7 +407,7 @@ function BrandForm({ data, onSaved, onError }: { data: Data; onSaved: () => Prom
             setBusy("save");
             setSaved(false);
             try {
-              await send("PUT", "/api/brand", b);
+              await send("PUT", `/api/brand${project ? `?project=${project.id}` : ""}`, b);
               await onSaved();
               setSaved(true);
             } catch (e) {
@@ -374,7 +419,7 @@ function BrandForm({ data, onSaved, onError }: { data: Data; onSaved: () => Prom
           disabled={Boolean(busy)}
           className="ml-auto px-4 py-1.5 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white font-medium disabled:opacity-50"
         >
-          {busy === "save" ? "Saving…" : "Save brand"}
+          {busy === "save" ? "Saving…" : project ? (inherits ? "Give it its own brand" : "Save project brand") : "Save brand"}
         </button>
       </div>
     </section>
@@ -382,6 +427,8 @@ function BrandForm({ data, onSaved, onError }: { data: Data; onSaved: () => Prom
 }
 
 export default function AssetsPage() {
+  const proj = useProjects();
+  const [onlyHere, setOnlyHere] = useState(true);
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState<string[]>([]);
@@ -389,12 +436,13 @@ export default function AssetsPage() {
   const [drag, setDrag] = useState(false);
   const picker = useRef<HTMLInputElement | null>(null);
   const load = () =>
-    getJson<Data>("/api/assets")
+    getJson<Data>(`/api/assets${proj.target ? `?project=${proj.target}` : proj.view === "general" ? "?project=general" : ""}`)
       .then(setData)
       .catch((e) => setError(errText(e)));
   useEffect(() => {
     void load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proj.view]);
 
   const upload = async (list: FileList | File[]) => {
     setError(null);
@@ -402,7 +450,7 @@ export default function AssetsPage() {
       setUploading((u) => [...u, file.name]);
       try {
         const info = await readFile(file);
-        await send("POST", "/api/assets", { name: niceName(file.name), description: "", tags: [], ...info });
+        await send("POST", "/api/assets", { name: niceName(file.name), description: "", tags: [], ...info, project: proj.target && onlyHere ? proj.target : null });
       } catch (e) {
         setError(`${file.name}: ${errText(e)}`);
       } finally {
@@ -438,6 +486,12 @@ export default function AssetsPage() {
             Your logos, pictures, B-roll, music and fonts. Describe each one: when you ask for a video, the assets whose words match your request go to the Coder, which uses them instead of inventing visuals. Ask for "music" to get a track.
           </p>
           <input ref={picker} type="file" multiple accept={ACCEPT} className="hidden" onChange={(e) => e.target.files && void upload(e.target.files)} />
+          {proj.target && (
+            <label className="flex items-center gap-1.5 text-xs text-slate-300" title="Off: every project can use the new files">
+              <input type="checkbox" checked={onlyHere} onChange={(e) => setOnlyHere(e.target.checked)} />
+              Only for {proj.byId(proj.target)?.name}
+            </label>
+          )}
           <button onClick={() => picker.current?.click()} className="px-4 py-1.5 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-medium">
             ＋ Add files
           </button>

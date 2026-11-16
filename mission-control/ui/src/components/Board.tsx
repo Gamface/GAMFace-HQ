@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { inView, useProjects } from "../project";
 import { AGENT_COLORS, AGENT_LABELS, getJson, send, splitModel } from "../api";
 import type { Board as BoardData, BoardCard } from "../api";
 import CardDrawer from "./CardDrawer";
@@ -52,8 +53,11 @@ export default function Board() {
     load();
   };
 
-  const cards = board?.cards ?? [];
-  const byId = new Map(cards.map((c) => [c.id, c]));
+  const proj = useProjects();
+  // The board shows the chosen project (dependencies can still point anywhere)
+  const allCards = board?.cards ?? [];
+  const cards = allCards.filter((c) => inView(c.project, proj.view));
+  const byId = new Map(allCards.map((c) => [c.id, c]));
 
   const dropOnColumn = (target: BoardCard["column"], beforeCard?: BoardCard) => {
     const card = dragId ? byId.get(dragId) : undefined;
@@ -90,7 +94,7 @@ export default function Board() {
           <input type="checkbox" checked={hideDone} onChange={(e) => setHideDone(e.target.checked)} /> Hide Done
         </label>
         <span className="text-slate-500">Drag cards between columns. Drop on a card to reorder.</span>
-        <HistorySearch onOpen={setOpenId} />
+        <HistorySearch onOpen={setOpenId} query={proj.query} />
         {error && (
           <span className="ml-auto text-rose-300 bg-rose-950/60 border border-rose-900 rounded px-2 py-1">
             {error}{" "}
@@ -133,6 +137,7 @@ export default function Board() {
                     onDragStart={() => setDragId(c.id)}
                     onDropOn={() => dropOnColumn(col, c)}
                     dragging={dragId === c.id}
+                    project={proj.view === "all" ? proj.byId(c.project) : undefined}
                   />
                 ))}
                 {list.length === 0 && <p className="text-[11px] text-slate-700 italic px-1 py-4 text-center">Empty</p>}
@@ -154,7 +159,9 @@ function Card({
   onDragStart,
   onDropOn,
   dragging,
+  project,
 }: {
+  project?: { name: string; color: string };
   card: BoardCard;
   byId: Map<string, BoardCard>;
   onOpen: () => void;
@@ -187,6 +194,12 @@ function Card({
         <p className="text-[13px] leading-snug text-slate-200 line-clamp-2 flex-1">{c.title || c.prompt}</p>
       </div>
       <div className="flex flex-wrap items-center gap-1 mt-2 text-[10px]">
+        {project && (
+          <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 flex items-center gap-1 max-w-[8rem]" title={`Project: ${project.name}`}>
+            <span className="h-1.5 w-1.5 rounded-full shrink-0" style={{ background: project.color }} />
+            <span className="truncate">{project.name}</span>
+          </span>
+        )}
         <span className={`px-1.5 py-0.5 rounded ${AGENT_COLORS[c.targetAgent] ?? "bg-slate-800 text-slate-300"}`}>
           {c.routedBy === undefined && c.column !== "done" && c.column !== "failed" ? "auto" : AGENT_LABELS[c.targetAgent] ?? c.targetAgent}
         </span>
@@ -241,14 +254,14 @@ interface Hit {
 }
 
 /** Full-text search over every card's request, conversation and answer, archived ones included. */
-function HistorySearch({ onOpen }: { onOpen: (id: string) => void }) {
+function HistorySearch({ onOpen, query }: { onOpen: (id: string) => void; query: string }) {
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<Hit[] | null>(null);
   const [open, setOpen] = useState(false);
   useEffect(() => {
     if (q.trim().length < 2) return setHits(null);
     const t = setTimeout(() => {
-      getJson<Hit[]>(`/api/search?q=${encodeURIComponent(q)}`)
+      getJson<Hit[]>(`/api/search?q=${encodeURIComponent(q)}${query ? `&${query}` : ""}`)
         .then((h) => {
           setHits(h);
           setOpen(true);
@@ -256,7 +269,7 @@ function HistorySearch({ onOpen }: { onOpen: (id: string) => void }) {
         .catch(() => setHits([]));
     }, 250);
     return () => clearTimeout(t);
-  }, [q]);
+  }, [q, query]);
   // «matches» from the server become highlights
   const mark = (s: string) =>
     s.split(/(«[^»]*»)/).map((part, i) =>
