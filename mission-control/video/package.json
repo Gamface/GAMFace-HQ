@@ -1,0 +1,23 @@
+{
+  "name": "mission-control-video",
+  "private": true,
+  "description": "Renders Remotion videos for Mission Control, in its own container with no internet",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@react-three/fiber": "9.3.0",
+    "@remotion/bundler": "4.0.487",
+    "@remotion/noise": "4.0.487",
+    "@remotion/paths": "4.0.487",
+    "@remotion/renderer": "4.0.487",
+    "@remotion/shapes": "4.0.487",
+    "@remotion/three": "4.0.487",
+    "@remotion/transitions": "4.0.487",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "remotion": "4.0.487",
+    "three": "0.179.1"
+  }
+}

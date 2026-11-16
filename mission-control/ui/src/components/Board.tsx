@@ -199,7 +199,8 @@ function Card({
         {c.readOnly && <span className="px-1.5 py-0.5 rounded bg-sky-900/70 text-sky-200" title="Read-only run">👁 read-only</span>}
         {c.usedPrivate && <span title="Used your private notes, memories or pictures">🔒</span>}
         {(c.documents?.length ?? 0) > 0 && <span title={`${c.documents!.length} PDF(s) attached`}>📑{c.documents!.length > 1 ? c.documents!.length : ""}</span>}
-        {(c.files?.length ?? 0) > 0 && <span title={`${c.files!.length} PDF report(s)`}>📄{c.files!.length > 1 ? c.files!.length : ""}</span>}
+        {c.files?.some((f) => f.name.endsWith(".mp4")) && <span title="Video rendered">🎬</span>}
+        {c.files?.some((f) => f.name.endsWith(".pdf")) && <span title="PDF report">📄</span>}
         {(c.replies ?? 0) > 0 && <span title={`${c.replies} repl${c.replies === 1 ? "y" : "ies"}`}>💬{c.replies}</span>}
         {c.audio && c.audio.length > 0 && <span title={`${c.audio.length} audio clip(s) attached`}>🎧{c.audio.length > 1 ? c.audio.length : ""}</span>}
         {c.images && c.images.length > 0 && <span title={`${c.images.length} picture(s) attached`}>🖼{c.images.length > 1 ? c.images.length : ""}</span>}

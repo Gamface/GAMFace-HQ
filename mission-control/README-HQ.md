@@ -126,6 +126,35 @@ runs. Each has one destination (`deliverTo`: `dashboard`, `telegram` or `obsidia
 in `HQ/routines`); its prompt can't switch models, and its findings stay on its card rather
 than in the hive log. Rules: `src/hq/routine.ts`.
 
+## Videos with Remotion
+
+Ask for a video ("make a 20-second intro video for my channel", "create an animated logo",
+"use Remotion to…") and the **Coder** writes a Remotion scene: one React/TypeScript file.
+Mission Control sends it to the **video service**, which renders it with real Remotion
+into an MP4 that appears on the card (🎬): play it there or download it.
+- If Remotion can't render the scene, the error goes back to the Coder to fix, up to twice
+  (`VIDEO_FIX_ROUNDS`). Reply to the card ("make the title bigger") and it renders again;
+  **🎬 Render again** on the card re-renders without asking the model.
+- Limits: at most 1920×1080 (portrait is fine), 60 fps and `VIDEO_MAX_SECONDS` (60).
+  Scenes can use `remotion`, `@remotion/transitions`, `@remotion/shapes`,
+  `@remotion/paths`, `@remotion/noise`, `@remotion/three`, `three` and
+  `@react-three/fiber`. Pictures attached to the card are passed in as `props.images`.
+- The video service (`video/`, the `video` container) is built once with internet: it
+  downloads Remotion 4.0.487 and its Chrome, about 1 GB, so the first
+  `docker compose up -d --build` takes a while. At runtime it's on a private network with
+  no internet, sees none of your files or keys, runs as an ordinary user, and only the
+  harness can reach it. The scene code runs only inside it. No internet means scenes use
+  system fonts and draw their own graphics (no web fonts or remote images).
+- There's no GPU in the container, so Remotion renders in software (`VIDEO_GL=swangle`,
+  which also runs 3D). Expect roughly a few seconds of rendering per second of video for
+  simple scenes; `VIDEO_CONCURRENCY` sets how many Chrome tabs render frames at once.
+- Licence: Remotion is free for individuals and companies of up to 3 people; larger
+  companies need a company licence (remotion.pro).
+- The card's time limit is paused while rendering.
+
+API: `POST /api/tasks/:id/video` renders the scene in a finished card's answer. The video
+service itself: `POST /render`, `GET /jobs/:id`, `GET /jobs/:id/video`, `GET /health`.
+
 ## Skills and history search (Phase 6)
 
 **Skills** are reusable procedures the agents follow when a request fits (an idea from
@@ -388,7 +417,7 @@ arrive on their own:
 ```bash
 cd ~/sandcastle/ts-harness
 docker compose pull browser               # newer headless Chrome
-docker compose up -d --force-recreate
+docker compose up -d --build --force-recreate   # --build: the video service (first time ~1 GB)
 docker compose exec harness npm test      # optional: about 100 tests
 ```
 

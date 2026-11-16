@@ -201,15 +201,15 @@ export async function printPdf(html: string, cdpBase: string): Promise<Buffer> {
   }
 }
 
-export const FILE_ID = /^[a-z0-9][a-z0-9-]{0,70}-[a-f0-9]{8}\.pdf$/;
+export const FILE_ID = /^[a-z0-9][a-z0-9-]{0,70}-[a-f0-9]{8}\.(pdf|mp4)$/;
 
-/** Saved PDF reports, in data/files. */
+/** Saved PDF reports and rendered videos, in data/files. */
 export class Files {
   constructor(private dir: string) {
     mkdirSync(dir, { recursive: true });
   }
 
-  save(title: string, pdf: Buffer): { name: string; bytes: number } {
+  save(title: string, pdf: Buffer, ext: "pdf" | "mp4" = "pdf"): { name: string; bytes: number } {
     const slug =
       title
         .toLowerCase()
@@ -218,7 +218,7 @@ export class Files {
         .replace(/^-+|-+$/g, "")
         .slice(0, 60)
         .replace(/-+$/, "") || "report";
-    const name = `${slug}-${createHash("sha256").update(pdf).digest("hex").slice(0, 8)}.pdf`;
+    const name = `${slug}-${createHash("sha256").update(pdf).digest("hex").slice(0, 8)}.${ext}`;
     writeFileSync(path.join(this.dir, name), pdf);
     return { name, bytes: pdf.length };
   }

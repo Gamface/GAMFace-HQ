@@ -55,6 +55,8 @@ import { PROFILE_NAME, Profiles } from "./hq/profiles";
 import { BrowserControl } from "./hq/takeover";
 import { HistoryIndex, SKILL_DRAFT_SYSTEM, Skills, skillDraftPrompt } from "./hq/skills";
 import type { Skill } from "./hq/skills";
+import { VideoClient, extractScene, videoInstructions, wantsVideo } from "./hq/video";
+import type { SceneSpec } from "./hq/video";
 import { upcoming, parseSchedule, validTimeZone } from "./hq/schedule";
 
 // --- Config (env vars, see .env.example) ------------------------------------
@@ -134,6 +136,11 @@ function taskTimeoutMs(agent: string | undefined, delegates: boolean): number {
 }
 const uploads = new Uploads(DATA_DIR);
 const files = new Files(path.join(DATA_DIR, "files"));
+// Videos: the Remotion service (video/, docker-compose.yml)
+const VIDEO_RENDER_URL = process.env.VIDEO_RENDER_URL || "";
+const video = VIDEO_RENDER_URL ? new VideoClient(VIDEO_RENDER_URL.replace(/\/+$/, "")) : null;
+// How many times the Coder may fix a scene that fails to render
+const VIDEO_FIX_ROUNDS = Number(process.env.VIDEO_FIX_ROUNDS ?? 2);
 const docCache = new DocCache(path.join(DATA_DIR, "uploads"));
 // A long PDF is read in at most this many parts (about 14,000 characters each)
 const MAX_DOC_PARTS = Number(process.env.MAX_DOC_PARTS) || 10;
@@ -853,6 +860,10 @@ async function runTask(task: Task) {
     const followUp = history.length > 0;
     // "…as a PDF": the answer is written as a document and printed when the run ends
     const makePdf = wantsPdf(ask);
+    // "Make a video…": the Coder writes a Remotion scene and the video service renders it
+    // A reply to a card whose last answer was a scene ("make the title bigger") renders again
+    const lastAnswer = followUp ? [...(task.thread ?? [])].reverse().find((t) => t.role === "agent")?.text : undefined;
+    const makeVideo = (wantsVideo(ask) || Boolean(lastAnswer && extractScene(lastAnswer))) && task.source !== "eval";
     const pdfNote = makePdf ? pdfInstructions(task.images ?? []) : "";
     const learned: string[] = [];
     const images = (task.images ?? []).map((id) => uploads.base64(id)).filter((b): b is string => Boolean(b));
@@ -964,7 +975,12 @@ async function runTask(task: Task) {
       }
     }
 
-    if (task.requestedAgent === "auto" && images.length) {
+    if (task.requestedAgent === "auto" && makeVideo) {
+      // Videos are code: the Coder writes the Remotion scene (pictures go along as props)
+      task.targetAgent = "coder";
+      task.routedBy = "router";
+      log("router", "routed", `→ coder (a video): ${ask}`);
+    } else if (task.requestedAgent === "auto" && images.length) {
       // Pictures go to the agent that can see them
       task.targetAgent = "vision";
       task.routedBy = "router";
@@ -1030,6 +1046,7 @@ async function runTask(task: Task) {
       emit(task, "thinking");
     }
     request += pdfNote;
+    if (makeVideo) request += videoInstructions(Math.min(images.length, 4));
     // Approved skills that fit this request
     const leadSkills = useTeam ? skills.match(ask, lead) : [];
     if (leadSkills.length) {
@@ -1142,6 +1159,34 @@ async function runTask(task: Task) {
     // Read-only runs don't save memories either
     if (autoSkills() && worthASkill(task) && !skills.draftedFrom(task.id)) skillJobs.push(task.id);
     if (useTeam && !task.readOnly && !isRoutine(task) && task.answer) memoryJobs.push({ agent: lead, prompt: ask, answer: task.answer, private: usedPrivate });
+    if (makeVideo && task.answer) {
+      // Render, and let the lead fix the scene when Remotion can't render it
+      let current = answer;
+      for (let round = 0; ; round++) {
+        const out = await renderVideo(task, current, images, controller.signal, push);
+        if (out === "done" || out === "unfixable" || round >= VIDEO_FIX_ROUNDS) break;
+        push(`\n── ${TEAM[lead].name} fixes the scene (try ${round + 2}) ──\n\n`);
+        const fix = await streamTurn(
+          task,
+          lead,
+          [
+            { role: "system", content: systemPrompt(task, lead, { team: useTeam, delegate: false }) },
+            { role: "user", content: userMessage(lead, request, ask, useTeam) },
+            { role: "assistant", content: current },
+            {
+              role: "user",
+              content: `Rendering failed with this error:\n${out.error}\n\nFix the scene and reply with the whole file again in one \`\`\`tsx block, following the same rules.`,
+            },
+          ],
+          controller.signal,
+          push,
+        );
+        usedPrivate ||= fix.sawPrivate;
+        current = fix.text;
+        task.answer = redact(current).text.trim();
+      }
+      flush();
+    }
     if (makePdf && task.answer) {
       emit(task, "executing_tool", "\n\n── Making the PDF ──\n");
       const made = await makeReport(task);
@@ -1376,6 +1421,72 @@ function retry(task: Task): string | null {
   return null;
 }
 
+/**
+ * Renders the Remotion scene in an answer and adds the MP4 to the card.
+ * "done", "unfixable" (no scene, or the service is down), or the error for the Coder to fix.
+ */
+async function renderVideo(
+  task: Task,
+  answer: string,
+  images: string[],
+  signal: AbortSignal,
+  push: (t: string) => void,
+  /** false when re-rendering a finished card: its status and output stay as they are */
+  live = true,
+): Promise<"done" | "unfixable" | { error: string }> {
+  const scene: SceneSpec | null = extractScene(answer);
+  if (!scene) {
+    push("\n[No Remotion scene found in the answer, so there's no video to render.]\n");
+    return "unfixable";
+  }
+  if (!video) {
+    push("\n[The scene is ready, but no video service is set up (VIDEO_RENDER_URL). Start it with docker compose, then press 🎬 Render video on the card.]\n");
+    return "unfixable";
+  }
+  const header = `\n\n── Rendering the video with Remotion (${scene.width}×${scene.height}, ${scene.fps} fps, ${Math.round(scene.durationInFrames / scene.fps)} s) ──\n`;
+  // Through the same buffer as the agent's text, so it lands after it
+  push(header);
+  if (live) emit(task, "executing_tool");
+  // Rendering can take minutes; it doesn't count against the card's time limit
+  const timers = taskTimers.get(task.id);
+  timers?.pause();
+  let shown = -1;
+  try {
+    const props = {
+      images: (task.images ?? [])
+        .slice(0, 4)
+        .map((id, i) => (images[i] ? `data:image/${id.endsWith(".jpg") ? "jpeg" : id.split(".").pop()};base64,${images[i]}` : null))
+        .filter(Boolean),
+    };
+    const out = await video.render(
+      scene,
+      props,
+      (p) => {
+        const step = p.stage === "rendering" ? Math.floor(p.progress / 20) * 20 : p.stage === "bundling" ? 0 : -2;
+        if (step !== shown) {
+          shown = step;
+          push(p.stage === "queued" ? "  waiting for another video to finish…\n" : p.stage === "bundling" ? "  bundling the scene…\n" : `  rendering ${step}%\n`);
+        }
+      },
+      signal,
+    );
+    if ("error" in out) {
+      push(`\n✗ Remotion couldn't render it:\n${out.error}\n`);
+      hive.log("coder", "video", `render failed: ${out.error.split("\n")[0]}`, task.id);
+      return out.fixable ? { error: out.error } : "unfixable";
+    }
+    const title = /\/\/\s*title:\s*([^\n]+)/i.exec(scene.code)?.[1] ?? task.title ?? task.prompt.slice(0, 60);
+    const saved = files.save(title, out.mp4, "mp4");
+    task.files = [...(task.files ?? []).filter((f) => f.name !== saved.name), { ...saved, at: Date.now() }];
+    store.save(task);
+    push(`\n🎬 Video saved: ${saved.name} (${saved.bytes >= 1024 * 1024 ? `${(saved.bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(saved.bytes / 1024))} KB`}). Play it from the card.\n`);
+    hive.log("coder", "video", `rendered ${saved.name}`, task.id);
+    return "done";
+  } finally {
+    timers?.resume();
+  }
+}
+
 /** Turns a card's answer into a PDF report and adds it to the card's files. */
 async function makeReport(task: Task): Promise<{ name: string; pictures: number; missing: number } | { error: string }> {
   if (!BROWSER_CDP_URL) return { error: "PDFs are printed by the browser sidecar: set BROWSER_CDP_URL (see README-HQ)" };
@@ -1573,6 +1684,7 @@ app.get("/api/system", async (_req: Request, res: Response) => {
     telegram: Boolean(telegram),
     obsidian: Boolean(OBSIDIAN_VAULT),
     browser: Boolean(BROWSER_CDP_URL),
+    video: Boolean(video),
     memories: memory.list().length,
     lastModel: lastModelRef,
     notices: notices.list().length,
@@ -1667,6 +1779,23 @@ app.post("/api/tasks/:id/reply", requireToken, (req, res) => {
   res.json(summarize(task));
 });
 
+// Render (again) the Remotion scene in a finished card's answer
+app.post("/api/tasks/:id/video", requireToken, async (req, res) => {
+  const task = tasks.get(String(req.params.id));
+  if (!task || task.parentId) return res.status(404).json({ error: "Task not found" });
+  if (!TERMINAL_STATUSES.includes(task.status) || !task.answer) return res.status(400).json({ error: "Wait for the card to finish" });
+  if (!extractScene(task.answer)) return res.status(400).json({ error: "This card's answer has no Remotion scene" });
+  if (!video) return res.status(400).json({ error: "No video service is set up (VIDEO_RENDER_URL)" });
+  const lines: string[] = [];
+  const images = (task.images ?? []).map((id) => uploads.base64(id)).filter((b): b is string => Boolean(b));
+  const out = await renderVideo(task, task.answer, images, AbortSignal.timeout(30 * 60_000), (t) => lines.push(t), false);
+  if (out !== "done") {
+    const why = typeof out === "object" ? out.error : lines.join("").trim();
+    return res.status(422).json({ error: why || "The video couldn't be rendered" });
+  }
+  res.json({ files: task.files });
+});
+
 app.post("/api/tasks/:id/pdf", requireToken, async (req, res) => {
   const task = tasks.get(String(req.params.id));
   if (!task || task.parentId) return res.status(404).json({ error: "Task not found" });
@@ -1680,10 +1809,27 @@ app.get("/api/files/:name", (req, res) => {
   const name = String(req.params.name);
   const file = FILE_ID.test(name) ? files.read(name) : null;
   if (!file) return res.status(404).json({ error: "File not found" });
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Length", String(file.length));
+  res.setHeader("Content-Type", name.endsWith(".mp4") ? "video/mp4" : "application/pdf");
   res.setHeader("Content-Disposition", `${req.query.download ? "attachment" : "inline"}; filename="${name}"`);
   res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Accept-Ranges", "bytes");
+  // Video players ask for byte ranges so they can seek
+  const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ""));
+  if (range && (range[1] || range[2])) {
+    let start = range[1] ? Number(range[1]) : Math.max(0, file.length - Number(range[2]));
+    let end = range[1] && range[2] ? Number(range[2]) : file.length - 1;
+    end = Math.min(end, file.length - 1);
+    if (start > end || start >= file.length) {
+      res.setHeader("Content-Range", `bytes */${file.length}`);
+      return res.status(416).end();
+    }
+    start = Math.max(0, start);
+    res.status(206);
+    res.setHeader("Content-Range", `bytes ${start}-${end}/${file.length}`);
+    res.setHeader("Content-Length", String(end - start + 1));
+    return res.end(file.subarray(start, end + 1));
+  }
+  res.setHeader("Content-Length", String(file.length));
   res.end(file);
 });
 
@@ -2131,4 +2277,8 @@ app.listen(PORT, HOST, () => {
   scheduler.start();
   const active = scheduler.list().filter((r) => r.enabled).length;
   console.log(`Routines: ${active} active (time zone ${ROUTINE_TZ})`);
+  if (video)
+    void video.health().then((h) =>
+      console.log(h?.ok ? `Videos: Remotion ${h.remotion} ready at ${VIDEO_RENDER_URL}` : `Videos: the video service at ${VIDEO_RENDER_URL} isn't answering yet (it may still be building)`),
+    );
 });

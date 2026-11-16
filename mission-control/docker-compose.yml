@@ -27,12 +27,15 @@ services:
       # Real browsing for the browser agent (live view in the dashboard's Browser tab)
       BROWSER_CDP_URL: http://browser:9222
       BROWSER_MAX_STEPS: ${BROWSER_MAX_STEPS:-10}
+      # Videos: the Remotion service below
+      VIDEO_RENDER_URL: http://video:3020
     volumes:
       - .:/app
       # - /mnt/c/Users/aldra/Documents/ObsidianVault:/vault
     # Published on localhost only; port 3008 is taken by jarvis-harness
     ports:
       - "127.0.0.1:3010:3008"
+    networks: [default, render]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3008/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
@@ -47,6 +50,20 @@ services:
   browser:
     image: chromedp/headless-shell:latest
     shm_size: 1gb
+    restart: unless-stopped
+
+  # Remotion: renders the videos the Coder writes. Built once with internet
+  # (downloads Remotion and its Chrome, about 1 GB); at runtime it's on a private
+  # network with no internet, sees none of your files or keys, and only the
+  # harness can reach it.
+  video:
+    build: ./video
+    shm_size: 2gb
+    environment:
+      VIDEO_MAX_SECONDS: ${VIDEO_MAX_SECONDS:-60}
+      # Chrome tabs rendering frames in parallel; blank lets Remotion choose
+      VIDEO_CONCURRENCY: ${VIDEO_CONCURRENCY:-}
+    networks: [render]
     restart: unless-stopped
 
   ui:
@@ -66,3 +83,9 @@ services:
       harness:
         condition: service_healthy
     restart: unless-stopped
+
+networks:
+  default: {}
+  # Private: the harness and the video service only, no internet
+  render:
+    internal: true
