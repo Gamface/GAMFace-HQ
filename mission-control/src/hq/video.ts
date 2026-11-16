@@ -63,6 +63,7 @@ export function videoInstructions(opts: number | VideoOptions = 0): string {
     "- There is NO internet while rendering: no web fonts, remote images, videos, audio or data. Use system fonts (sans-serif, serif, monospace), the kit, CSS, SVG or three.",
   ];
   if (pictures) lines.push(`- The user's ${pictures} attached picture(s) are in props.images (data URLs): use them with <Img src={images[0]} /> or media={[images[0]]}.`);
+  else lines.push("- No pictures are attached: leave out media unless you use asset ids listed below.");
   if (o.assets) lines.push(o.assets);
   if (o.recording) {
     lines.push(

@@ -402,7 +402,7 @@ export function assetBlock(picked: Asset[], brand: Brand | null): string {
   if (brand) {
     lines.push(
       `- BRAND${brand.name ? ` "${brand.name}"` : ""}${brand.tagline ? ` (tagline: "${brand.tagline}")` : ""}: colours primary ${brand.primary}, secondary ${brand.secondary}, accent ${brand.accent}, background ${brand.background}, text ${brand.text}. ` +
-        "The kit's pieces use them automatically; in your own elements read them from useMC().brand (fields: name, tagline, primary, secondary, accent, background, text, font). " +
+        "The templates and the kit's pieces use them automatically: don't pass a brand prop or repeat these colours in your code; in your own elements read them from useMC().brand (fields: name, tagline, primary, secondary, accent, background, text, font). " +
         `${brand.logo ? "Show the logo with <Logo />." : brand.name ? "<Logo /> draws the brand name (there's no logo file)." : ""}`,
     );
   }
