@@ -3,6 +3,8 @@ import type { AgentStatus, AgentStreamPayload, TaskSource } from "../../src/sche
 
 export type Connection = "connecting" | "open" | "reconnecting";
 
+const STAND_IN = /^listen to the attached audio and respond\.?$/i;
+
 export interface TaskView {
   id: string;
   title: string;
@@ -54,6 +56,11 @@ export function useAgentStream(baseUrl: string) {
       task.agent = e.activeSubAgent;
       task.output += e.logChunk;
       task.updatedAt = e.timestamp;
+      // A spoken request's title is the stand-in prompt until the transcript arrives
+      if (STAND_IN.test(task.title)) {
+        const heard = /── Transcribing [^\n]*──\n+([^\n[]+)/.exec(task.output)?.[1]?.trim();
+        if (heard && heard !== "(no speech found)") task.title = heard;
+      }
     }
     return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt);
   }, [events]);
