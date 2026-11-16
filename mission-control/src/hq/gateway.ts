@@ -61,6 +61,8 @@ export class ModelGateway {
   private keepAlive: string;
   /** Called after each successful request with the model that served it */
   onServed: (ref: string) => void = () => {};
+  /** Speed of the last streamed answer, for the dashboard */
+  lastSpeed: { ref: string; tokensPerSec: number; firstTokenMs: number; at: number } | null = null;
 
   constructor(models: ModelRegistry, store: TaskStore, notices: Notices, keepAlive = "30m") {
     this.models = models;
@@ -195,11 +197,17 @@ export class ModelGateway {
       await this.checkVision(p);
       const s = p.r.settings;
       let gotTokens = false;
+      const started = Date.now();
+      let firstAt = 0;
       try {
         const out = await chatStream(p.r.provider, p.r.model, p.messages, { numCtx: s.numCtx, temperature: s.temperature, think: s.think, keepAlive: this.keepAlive }, signal, (t) => {
           gotTokens = true;
+          firstAt ||= Date.now();
           onToken(t);
         });
+        const tokens = out.completionTokens || Math.round(out.text.length / 4);
+        const seconds = (Date.now() - (firstAt || started)) / 1000;
+        if (firstAt && tokens > 8 && seconds > 0.2) this.lastSpeed = { ref: p.r.ref, tokensPerSec: Math.round((tokens / seconds) * 10) / 10, firstTokenMs: firstAt - started, at: Date.now() };
         this.record(role, p.r, p.messages, out.text, out);
         return { text: out.text, ref: p.r.ref, sawPrivate: p.sawPrivate };
       } catch (error) {

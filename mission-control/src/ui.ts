@@ -65,7 +65,7 @@ import { Changes, rootLabel } from "./hq/changes";
 import type { Root } from "./hq/changes";
 import { Workspace, extractFileOps, namedWorkspace, workspaceBlock } from "./hq/workspace";
 import type { PinnedElement } from "./hq/browser";
-import { readFileSync as readFileSyncFs } from "node:fs";
+import { readFileSync as readFileSyncFs, readdirSync as readdirSyncFs, statSync as statSyncFs } from "node:fs";
 import type { Asset, Brand } from "./hq/assets";
 import { upcoming, parseSchedule, validTimeZone } from "./hq/schedule";
 
@@ -2009,6 +2009,42 @@ app.get("/health", async (_req: Request, res: Response) => {
 });
 
 // GPU and queue state for the Mission Control system tile
+// The graphics card's memory, for the dashboard's VRAM bar
+const GPU_VRAM_GB = Number(process.env.GPU_VRAM_GB) || 16;
+// How many notes the vault holds and when one last changed (counted at most every 30 s)
+let vaultCache: { at: number; notes: number; lastChange: number } | null = null;
+function vaultStats(): { notes: number; lastChange: number } | null {
+  if (!OBSIDIAN_VAULT) return null;
+  if (vaultCache && Date.now() - vaultCache.at < 30_000) return vaultCache;
+  let notes = 0;
+  let lastChange = 0;
+  const walk = (dir: string, depth: number) => {
+    if (depth > 6 || notes > 20_000) return;
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = readdirSyncFs(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.name.startsWith(".")) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full, depth + 1);
+      else if (e.isFile() && e.name.endsWith(".md")) {
+        notes++;
+        try {
+          lastChange = Math.max(lastChange, statSyncFs(full).mtimeMs);
+        } catch {
+          /* gone */
+        }
+      }
+    }
+  };
+  walk(OBSIDIAN_VAULT, 0);
+  vaultCache = { at: Date.now(), notes, lastChange };
+  return vaultCache;
+}
+
 app.get("/api/system", async (_req: Request, res: Response) => {
   const queueInfo = {
     running: runningTaskId,
@@ -2023,6 +2059,9 @@ app.get("/api/system", async (_req: Request, res: Response) => {
     memories: memory.list().length,
     lastModel: lastModelRef,
     notices: notices.list().length,
+    speed: gateway.lastSpeed,
+    vault: vaultStats(),
+    agents: Object.fromEntries(AGENT_KEYS.map((a) => [a, { model: models.resolve(a).ref, localOnly: models.settings().roles[a].localOnly }])),
   };
   const model = models.resolve("planner").ref;
   try {
@@ -2033,9 +2072,10 @@ app.get("/api/system", async (_req: Request, res: Response) => {
       sizeGB: Math.round((m.size / 1024 ** 3) * 10) / 10,
       vramPct: m.size > 0 ? Math.round((100 * m.size_vram) / m.size) : 0,
     }));
-    res.json({ ollama: "up", url: OLLAMA_BASE_URL, model, models: loaded, ...queueInfo });
+    const vramUsedGB = Math.round(((ps.models ?? []).reduce((n, m) => n + (m.size_vram || 0), 0) / 1024 ** 3) * 10) / 10;
+    res.json({ ollama: "up", url: OLLAMA_BASE_URL, model, models: loaded, vramUsedGB, vramTotalGB: GPU_VRAM_GB, ...queueInfo });
   } catch {
-    res.json({ ollama: "down", url: OLLAMA_BASE_URL, model, models: [], ...queueInfo });
+    res.json({ ollama: "down", url: OLLAMA_BASE_URL, model, models: [], vramUsedGB: 0, vramTotalGB: GPU_VRAM_GB, ...queueInfo });
   }
 });
 

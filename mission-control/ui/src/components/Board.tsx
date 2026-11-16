@@ -86,14 +86,14 @@ export default function Board() {
 
   return (
     <div className="col-span-3 flex flex-col min-h-0 gap-3">
-      <div className="flex items-center gap-3 text-xs">
+      <div className="flex flex-wrap items-center gap-3 text-xs">
         <button onClick={() => setNewIn("ready")} className="px-3 py-1.5 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white font-medium">
           + New card
         </button>
         <label className="flex items-center gap-1.5 text-slate-400 cursor-pointer select-none">
           <input type="checkbox" checked={hideDone} onChange={(e) => setHideDone(e.target.checked)} /> Hide Done
         </label>
-        <span className="text-slate-500">Drag cards between columns. Drop on a card to reorder.</span>
+        <span className="text-slate-500 max-md:hidden">Drag cards between columns. Drop on a card to reorder.</span>
         <HistorySearch onOpen={setOpenId} query={proj.query} />
         {error && (
           <span className="ml-auto text-rose-300 bg-rose-950/60 border border-rose-900 rounded px-2 py-1">
@@ -104,7 +104,7 @@ export default function Board() {
           </span>
         )}
       </div>
-      <div className={`grid gap-3 flex-1 min-h-0`} style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))` }}>
+      <div className="grid gap-3 flex-1 min-h-0 mc-board-cols max-md:overflow-x-auto max-md:min-h-[65vh]" style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(var(--col-min), 1fr))` }}>
         {columns.map((col) => {
           const list = cards.filter((c) => c.column === col);
           if (col === "done" || col === "failed") list.sort((a, b) => (b.finishedAt ?? b.createdAt) - (a.finishedAt ?? a.createdAt));

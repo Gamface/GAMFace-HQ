@@ -22,19 +22,10 @@ import FilesPage from "./FilesPage";
 import ProjectSwitcher from "./ProjectSwitcher";
 import { useProjects } from "../project";
 import ApprovalsBar from "./ApprovalsBar";
-
-interface SystemInfo {
-  ollama: "up" | "down";
-  model: string;
-  models: { name: string; sizeGB: number; vramPct: number }[];
-  running: string | null;
-  queued: number;
-  fastModel?: string;
-  telegram?: boolean;
-  obsidian?: boolean;
-  browser?: boolean;
-  memories?: number;
-}
+import HomePage from "./HomePage";
+import type { SystemInfo } from "./HomePage";
+import { Rail, TabBar, VIEWS } from "./Nav";
+import type { View } from "./Nav";
 
 interface HiveEntry {
   ts: number;
@@ -56,8 +47,6 @@ interface MemoryItem {
 
 type RightTab = "commands" | "hive" | "memory";
 type CenterTab = "output" | "preview" | "browser";
-type View = "console" | "board" | "routines" | "skills" | "assets" | "files" | "team" | "projects";
-const VIEWS: View[] = ["board", "routines", "skills", "assets", "files", "team", "projects"];
 
 const STATUS_STYLES: Record<AgentStatus, string> = {
   idle: "bg-slate-700 text-slate-200",
@@ -92,10 +81,19 @@ export default function MissionControl() {
   const [targetAgent, setTargetAgent] = useState<RequestedAgent>("auto");
   const [rightTab, setRightTab] = useState<RightTab>("commands");
   const [centerTab, setCenterTab] = useState<CenterTab>("output");
-  const [view, setView] = useState<View>(() => (VIEWS.includes(location.hash.slice(1) as View) ? (location.hash.slice(1) as View) : "console"));
+  // Home is the start page (no #); the other pages have their own address
+  const [view, setView] = useState<View>(() => (VIEWS.includes(location.hash.slice(1) as View) ? (location.hash.slice(1) as View) : "home"));
   useEffect(() => {
-    if (location.hash.slice(1) !== (view === "console" ? "" : view)) history.pushState(null, "", view === "console" ? location.pathname : `#${view}`);
+    if (location.hash.slice(1) !== (view === "home" ? "" : view)) history.pushState(null, "", view === "home" ? location.pathname : `#${view}`);
   }, [view]);
+  // The phone tab bar's mic: Home does the recording
+  const [micSignal, setMicSignal] = useState(0);
+  const pressMic = () => {
+    if (view !== "home") {
+      setView("home");
+      setTimeout(() => setMicSignal((n) => n + 1), 80);
+    } else setMicSignal((n) => n + 1);
+  };
   // Follow the address bar (back/forward, or a pasted #board / #team link)
   useEffect(() => {
     const onHash = () => {
@@ -108,7 +106,7 @@ export default function MissionControl() {
         history.replaceState(null, "", location.pathname);
         return;
       }
-      setView(VIEWS.includes(h as View) ? (h as View) : "console");
+      setView(VIEWS.includes(h as View) ? (h as View) : "home");
     };
     window.addEventListener("hashchange", onHash);
     window.addEventListener("popstate", onHash);
@@ -218,38 +216,36 @@ export default function MissionControl() {
     connection === "open" ? "bg-emerald-500 animate-pulse" : connection === "connecting" ? "bg-amber-500" : "bg-rose-500";
 
   return (
-    <div className="grid grid-cols-[260px_1fr_380px] grid-rows-[60px_1fr] gap-4 h-screen p-4 bg-slate-950 text-slate-100 font-sans">
+    <div className="flex h-dvh bg-slate-950 text-slate-100 font-sans">
+      <Rail view={view} onView={setView} connection={connection} />
+      <TabBar view={view} onView={setView} onMic={pressMic} />
+      {/* Actions waiting for the user's OK float over every page */}
+      <div className="fixed top-3 md:top-[84px] left-1/2 -translate-x-1/2 w-[min(1100px,96vw)] z-40 shadow-2xl shadow-black/70 rounded-lg bg-slate-950">
+        <ApprovalsBar />
+      </div>
+      {view === "home" && (
+        <HomePage
+          connection={connection}
+          tasks={tasks}
+          system={system}
+          onNavigate={setView}
+          onOpenTask={(id) => {
+            setSelectedId(id);
+            setView("console");
+          }}
+          micSignal={micSignal}
+        />
+      )}
+      {view !== "home" && (
+    <div className="flex-1 min-w-0 grid grid-cols-3 md:grid-cols-[260px_1fr_380px] grid-rows-[auto_1fr] md:grid-rows-[60px_1fr] gap-4 p-3 md:p-4 max-md:pb-20 max-md:overflow-y-auto">
       {/* HEADER TILE */}
-      <header className="col-span-3 bg-slate-900 border border-slate-800 rounded-xl px-6 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className={`h-3 w-3 rounded-full ${connectionDot}`} title={`Harness: ${connection}`} />
-          <h1 className="font-semibold text-lg tracking-wide whitespace-nowrap" title="Mission Control — Sandcastle & Jarvis">
-            Mission Control<span className="hidden 2xl:inline"> — Sandcastle & Jarvis</span>
-          </h1>
+      <header className="col-span-3 bg-slate-900 border border-slate-800 rounded-xl px-4 md:px-6 max-md:py-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className={`h-3 w-3 rounded-full shrink-0 ${connectionDot}`} title={`Harness: ${connection}`} />
+          <h1 className="font-semibold text-lg tracking-wide whitespace-nowrap capitalize">{view}</h1>
           <ProjectSwitcher onManage={() => setView("projects")} />
-          <nav className="ml-2 flex gap-1 text-xs">
-            {(
-              [
-                ["console", "Console"],
-                ["board", "Board"],
-                ["routines", "Routines"],
-                ["skills", "Skills"],
-                ["assets", "Assets"],
-                ["files", "Files"],
-                ["team", "Team"],
-              ] as [View, string][]
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setView(key)}
-                className={`px-3 py-1 rounded-md font-medium ${view === key ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200"}`}
-              >
-                {label}
-              </button>
-            ))}
-          </nav>
         </div>
-        <div className="flex items-center gap-3 text-sm font-mono whitespace-nowrap min-w-0">
+        <div className="hidden md:flex items-center gap-3 text-sm font-mono whitespace-nowrap min-w-0">
           <NoticesBar />
           <span className="text-cyan-400 truncate max-w-[22rem]">
             State: {connection !== "open" ? `Harness ${connection}` : selected ? `${selected.agent} [${selected.status}]` : "Online / Ready"}
@@ -275,11 +271,6 @@ export default function MissionControl() {
         </div>
       </header>
 
-      {/* Actions waiting for the user's OK float over every page */}
-      <div className="fixed top-[84px] left-1/2 -translate-x-1/2 w-[min(1100px,96vw)] z-40 shadow-2xl shadow-black/70 rounded-lg bg-slate-950">
-        <ApprovalsBar />
-      </div>
-
       {view === "board" && <Board />}
       {view === "team" && <TeamPage />}
       {view === "routines" && <RoutinesPage />}
@@ -289,7 +280,7 @@ export default function MissionControl() {
       {view === "files" && <FilesPage />}
       {view === "console" && (<>
       {/* LEFT: TASK HISTORY */}
-      <aside className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-4 min-h-0">
+      <aside className="max-md:col-span-3 max-md:max-h-[45vh] bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-4 min-h-0">
         <div className="flex-1 min-h-0 flex flex-col">
           <h2 className="text-xs uppercase tracking-wider text-slate-500 mb-3 font-semibold">
             Tasks {system && system.queued > 0 && <span className="normal-case text-slate-400">· {system.queued} queued</span>}
@@ -342,7 +333,7 @@ export default function MissionControl() {
       </aside>
 
       {/* CENTER: OUTPUT */}
-      <main className="bg-slate-900 border border-slate-800 rounded-xl flex flex-col overflow-hidden min-h-0">
+      <main className="max-md:col-span-3 max-md:h-[75vh] bg-slate-900 border border-slate-800 rounded-xl flex flex-col overflow-hidden min-h-0">
         <div className="flex items-center justify-between border-b border-slate-800 bg-slate-950/40 px-4 py-2 text-xs">
           <div className="flex gap-1">
             {(
@@ -395,7 +386,7 @@ export default function MissionControl() {
       </main>
 
       {/* RIGHT: TELEMETRY + DISPATCH */}
-      <aside className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col min-h-0">
+      <aside className="max-md:col-span-3 max-md:h-[75vh] bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col min-h-0">
         <div className="flex gap-1 mb-2 text-xs">
           {(
             [
@@ -527,6 +518,8 @@ export default function MissionControl() {
         </div>
       </aside>
       </>)}
+    </div>
+      )}
     </div>
   );
 }

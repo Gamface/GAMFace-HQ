@@ -29,6 +29,8 @@ services:
       BROWSER_MAX_STEPS: ${BROWSER_MAX_STEPS:-10}
       # Videos: the Remotion service below
       VIDEO_RENDER_URL: http://video:3020
+      # Your graphics card's memory in GB, for the dashboard's VRAM bar
+      GPU_VRAM_GB: ${GPU_VRAM_GB:-16}
       # Voiceovers and word-timed captions: the voice service below
       VOICE_URL: http://voice:3030
       # Folders the Coder and File agents may edit (one per project; data/workspaces by

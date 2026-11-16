@@ -155,6 +155,26 @@ into an MP4 that appears on the card (🎬): play it there or download it.
 API: `POST /api/tasks/:id/video` renders the scene in a finished card's answer. The video
 service itself: `POST /render`, `GET /jobs/:id`, `GET /jobs/:id/video`, `GET /health`.
 
+## Home and the new look
+
+The dashboard opens on **Home**: a greeting (click your name to set it), the **Jarvis**
+orb (press the mic to say a task, press again to send; it's transcribed on your PC; or
+type one and press Run), **System** (VRAM in use from Ollama against `GPU_VRAM_GB`, the
+speed of the last answer, running and queued cards, loaded models), **Brain** (memories,
+vault notes and when the vault last changed, which services are on), **Team** (each
+agent's model and what it's doing), **Board** (counts, the running card with Open and
+Cancel, what's up next), **Hive mind**, **Routines** and **Memory**.
+
+Pages are on an icon rail down the left (Home, Console, Board, Routines, Skills, Assets,
+Files, Team; Projects at the bottom). On a phone there's a tab bar instead: Home, Board,
+a mic button, Console and a menu with every page. Home and the Board are laid out for
+phones; the other pages are built for desktop and stack or scroll on a small screen.
+The mic needs https or localhost (browsers block it on plain http addresses).
+
+The whole dashboard is near-black with a red accent. The colours are set once in
+`ui/src/index.css` (`@theme`): change the `slate` and `cyan` scales there to restyle
+every page.
+
 ## Annotate (point at things in the browser)
 
 In the Console's **Browser** tab, press **📌 Annotate** and click things on the live page:
