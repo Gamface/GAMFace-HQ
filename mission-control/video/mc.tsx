@@ -489,7 +489,10 @@ export const Section: React.FC<{ from: number; durationInFrames: number; childre
 const Fade: React.FC<{ frames: number; children: React.ReactNode }> = ({ frames, children }) => {
   const frame = useCurrentFrame();
   const { durationInFrames } = useVideoConfig();
-  const o = Math.min(interpolate(frame, [0, frames], [0, 1], clamp), interpolate(frame, [durationInFrames - frames, durationInFrames], [1, 0], clamp));
+  // fade={0} means no fade; otherwise at most half the section, and at least one frame,
+  // so interpolate()'s input ranges always increase (Remotion throws on [0, 0])
+  const f = Number.isFinite(frames) && frames > 0 ? Math.max(1, Math.min(Math.round(frames), Math.floor(durationInFrames / 2))) : 0;
+  const o = f === 0 ? 1 : Math.min(interpolate(frame, [0, f], [0, 1], clamp), interpolate(frame, [durationInFrames - f, durationInFrames], [1, 0], clamp));
   return <AbsoluteFill style={{ opacity: o }}>{children}</AbsoluteFill>;
 };
 
