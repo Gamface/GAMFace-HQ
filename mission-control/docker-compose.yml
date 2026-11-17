@@ -1,6 +1,7 @@
-# Mission Control: harness + UI. Inference runs on native Windows Ollama
-# (GPU, port 11435), reached from containers via host.docker.internal.
+# Mission Control: harness + UI + brain database. Inference runs on native
+# Windows Ollama (GPU, port 11435), reached from containers via host.docker.internal.
 #   docker compose up -d     then open http://localhost:5173
+#   docker compose --profile viewer up -d   also starts NocoDB (http://localhost:8081)
 name: mission-control
 
 services:
@@ -37,6 +38,12 @@ services:
       # default). To let them work on your own repos, mount the folder that holds them
       # (the volume line below) and uncomment this:
       # WORKSPACES_DIR: /workspaces
+      # Brain: shared memory + canon in Postgres, served to outside clients at /mcp
+      DATABASE_URL: postgres://agentos:${BRAIN_DB_PASSWORD:?Set BRAIN_DB_PASSWORD in .env (openssl rand -hex 32)}@brain-db:5432/agent_brain
+      BRAIN_PUBLIC_URL: http://localhost:3010/mcp
+    depends_on:
+      brain-db:
+        condition: service_healthy
     volumes:
       - .:/app
       # - /mnt/c/Users/aldra/Documents/ObsidianVault:/vault
@@ -51,6 +58,47 @@ services:
       timeout: 5s
       start_period: 60s
       retries: 3
+    restart: unless-stopped
+
+  # The brain's database (Postgres + pgvector). Not published: only the harness
+  # (and NocoDB, if started) can reach it. brain/db/schema.sql loads on first start;
+  # later changes come from brain/db/migrations, applied when the harness starts.
+  brain-db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: agentos
+      POSTGRES_PASSWORD: ${BRAIN_DB_PASSWORD:?Set BRAIN_DB_PASSWORD in .env (openssl rand -hex 32)}
+      POSTGRES_DB: agent_brain
+      NOCODB_META_PASSWORD: ${NOCODB_META_PASSWORD:-}
+      NOCODB_RO_PASSWORD: ${NOCODB_RO_PASSWORD:-}
+    volumes:
+      - brain_pgdata:/var/lib/postgresql/data
+      - ./brain/db/00-init-roles.sh:/docker-entrypoint-initdb.d/00-init-roles.sh:ro
+      - ./brain/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentos -d agent_brain"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # Optional read-only viewer for the brain (docker compose --profile viewer up -d).
+  # After the first login, add a PostgreSQL data source: host brain-db, database
+  # agent_brain, user nocodb_ro, password NOCODB_RO_PASSWORD.
+  nocodb:
+    profiles: ["viewer"]
+    image: nocodb/nocodb:2026.08.0
+    environment:
+      NC_DB: "pg://brain-db:5432?u=nocodb_meta&p=${NOCODB_META_PASSWORD:-}&d=nocodb_meta"
+      NC_AUTH_JWT_SECRET: ${NC_AUTH_JWT_SECRET:-}
+      NC_DISABLE_TELE: "true"
+    ports:
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - nocodb_data:/usr/app/data
+    depends_on:
+      brain-db:
+        condition: service_healthy
     restart: unless-stopped
 
   # Headless Chrome for the browser agent. Not published to your machine: only
@@ -114,3 +162,7 @@ networks:
   # Private: the harness, the video service and the voice service only, no internet
   render:
     internal: true
+
+volumes:
+  brain_pgdata:
+  nocodb_data:

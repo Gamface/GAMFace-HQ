@@ -82,25 +82,31 @@ test("the project's instructions and vault note go in the prompt", () => {
 
 test("memories: a project sees its own and General ones; nothing leaks between projects", async () => {
   const mem = new Memory(":memory:", async () => ({}), "m");
-  mem.add("The user lives in New York and likes espresso", "shared", 0.6);
-  mem.add("Gamface launches with three game modes and espresso branding", "shared", 0.6, false, "gamface-aaaa");
-  mem.add("The side gig client wants espresso invoices monthly", "shared", 0.6, false, "side-bbbb");
-  const inGamface = mem.recall("espresso", "planner", 6, "gamface-aaaa");
+  await mem.add("The user lives in New York and likes espresso", "shared", 0.6);
+  await mem.add("Gamface launches with three game modes and espresso branding", "shared", 0.6, false, true, "gamface-aaaa");
+  await mem.add("The side gig client wants espresso invoices monthly", "shared", 0.6, false, true, "side-bbbb");
+  const inGamface = await mem.recall("espresso", "planner", 6, "gamface-aaaa");
   assert.equal(inGamface.length, 2);
   assert.ok(inGamface.some((t) => t.includes("New York")));
   assert.ok(!inGamface.some((t) => t.includes("side gig")));
-  const inGeneral = mem.recall("espresso", "planner", 6, null);
+  const inGeneral = await mem.recall("espresso", "planner", 6, null);
   assert.deepEqual(inGeneral, ["The user lives in New York and likes espresso"]);
   // The same fact in two projects isn't merged across them
-  mem.add("Gamface launches with three game modes and espresso branding", "shared", 0.6, false, "side-bbbb");
-  assert.equal(mem.list().length, 4);
-  mem.maintain();
-  assert.equal(mem.list().length, 4);
-  assert.equal(mem.removeProject("side-bbbb"), 2);
-  assert.equal(mem.list().length, 2);
+  await mem.add("Gamface launches with three game modes and espresso branding", "shared", 0.6, false, true, "side-bbbb");
+  assert.equal((await mem.list()).length, 4);
+  await mem.maintain();
+  assert.equal((await mem.list()).length, 4);
+  assert.equal(await mem.removeProject("side-bbbb"), 2);
+  assert.equal((await mem.list()).length, 2);
+  // Moving a memory to General and back
+  const fact = (await mem.list()).find((m) => m.project === "gamface-aaaa")!;
+  assert.equal(await mem.setProject(fact.id, null), true);
+  assert.equal((await mem.list()).find((m) => m.id === fact.id)!.project, undefined);
+  await mem.setProject(fact.id, "gamface-aaaa");
+  assert.equal((await mem.list()).find((m) => m.id === fact.id)!.project, "gamface-aaaa");
 });
 
-test("memory extraction keeps project facts in the project (all of them for a project kept on this PC)", async () => {
+test("memory extraction keeps project facts in the project (all of them, privately, for a project kept on this PC)", async () => {
   let system = "";
   const reply = {
     memories: [
@@ -112,14 +118,18 @@ test("memory extraction keeps project facts in the project (all of them for a pr
   const mem = new Memory(":memory:", async (_m, msgs) => ((system = String(msgs[0].content)), reply), "m");
   await mem.extract("planner", "q", "a", false, { id: "gamface-aaaa", name: "Gamface", keepAll: false });
   assert.match(system, /project "Gamface"/);
-  const where = Object.fromEntries(mem.list().map((m) => [m.text.slice(0, 20), m.project ?? null]));
+  const where = Object.fromEntries((await mem.list()).map((m) => [m.text.slice(0, 20), m.project ?? null]));
   assert.equal(where["Gamface's mascot is "], "gamface-aaaa");
   assert.equal(where["The user prefers sho"], null);
   // Unsure → the project's
   assert.equal(where["The user wants weekl"], "gamface-aaaa");
+  // Nothing private went in, so these may be shared with cloud models
+  assert.ok((await mem.list()).every((m) => m.private === false));
   const local = new Memory(":memory:", async () => reply, "m");
   await local.extract("planner", "q", "a", false, { id: "side-bbbb", name: "Side", keepAll: true });
-  assert.ok(local.list().every((m) => m.project === "side-bbbb"));
+  const kept = await local.list();
+  assert.ok(kept.every((m) => m.project === "side-bbbb"));
+  assert.ok(kept.every((m) => m.private), "a local-only project's memories never go to the cloud");
 });
 
 test("the activity log shows a project only its own cards and team-wide events", () => {

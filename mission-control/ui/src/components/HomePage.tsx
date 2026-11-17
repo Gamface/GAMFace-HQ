@@ -39,12 +39,14 @@ interface HiveEntry {
   taskId?: string;
 }
 interface MemoryItem {
-  id: number;
+  id: string;
   agent: string;
   text: string;
   pinned: boolean;
   hits: number;
   project?: string;
+  /** missing or true: never sent to a cloud model */
+  private?: boolean;
 }
 interface Routine {
   id: string;
@@ -195,6 +197,17 @@ export default function HomePage({
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
   }, [proj.query]);
+
+  // Share lets cloud models (and Claude Code over the brain) see a memory; Make private hides it again
+  const toggleShare = async (m: MemoryItem) => {
+    const shared = m.private === false;
+    setMemories((all) => all.map((x) => (x.id === m.id ? { ...x, private: shared } : x)));
+    try {
+      await send("POST", `/api/memories/${encodeURIComponent(m.id)}/${shared ? "private" : "share"}`);
+    } catch {
+      setMemories((all) => all.map((x) => (x.id === m.id ? { ...x, private: m.private } : x)));
+    }
+  };
 
   const run = async (text: string, audio: string[] = []) => {
     setError(null);
@@ -578,15 +591,25 @@ export default function HomePage({
               .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.hits - a.hits)
               .slice(0, 4)
               .map((m) => (
-                <li key={m.id} className="min-w-0">
-                  <div className="text-xs text-slate-100 truncate" title={m.text}>
-                    {m.text}
+                <li key={m.id} className="min-w-0 flex gap-2 items-start">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs text-slate-100 truncate" title={m.text}>
+                      {m.text}
+                    </div>
+                    <div className="text-[10px] font-mono text-slate-500">
+                      {m.project ? (proj.byId(m.project)?.name ?? "project") : "General"}
+                      {m.pinned ? " · pinned" : ""}
+                      {m.hits ? ` · used ${m.hits}×` : ""}
+                      {m.private === false ? " · ☁ shared" : " · 🔒 private"}
+                    </div>
                   </div>
-                  <div className="text-[10px] font-mono text-slate-500">
-                    {m.project ? (proj.byId(m.project)?.name ?? "project") : "General"}
-                    {m.pinned ? " · pinned" : ""}
-                    {m.hits ? ` · used ${m.hits}×` : ""}
-                  </div>
+                  <button
+                    onClick={() => void toggleShare(m)}
+                    className="shrink-0 text-[10px] text-slate-400 hover:text-slate-100"
+                    title={m.private === false ? "Hide from cloud models again" : "Let cloud models and Claude Code see this memory"}
+                  >
+                    {m.private === false ? "Make private" : "Share"}
+                  </button>
                 </li>
               ))}
           </ul>

@@ -19,6 +19,8 @@ import { runBrowserAgent } from "./hq/browser-agent";
 import { StreamGuard, redact } from "./hq/guard";
 import { Hive } from "./hq/hive";
 import { Memory } from "./hq/memory";
+import { startBrain, type Brain } from "./brain";
+import { brainEnabled } from "./brain/db";
 import { ModelGateway } from "./hq/gateway";
 import type { CallOptions } from "./hq/gateway";
 import { deliveryText, hiveSummary, isRoutine, routineFields, routinePatchError, saveRoutineNote } from "./hq/routine";
@@ -505,7 +507,11 @@ function roleJson(role: ModelRole, opts: CallOptions = {}): JsonChat {
   };
 }
 
+// Memory starts in data/memories.json; when the brain is configured (DATABASE_URL) it
+// moves to the shared Postgres store at startup, before any task runs.
 const memory = new Memory(DATA_DIR, roleJson("memory"), "memory");
+let brain: Brain | null = null;
+const CANON_SYNC_MIN = Number(process.env.CANON_SYNC_MIN) || 5;
 
 /** The model a queued task will run on, for grouping same-model work (null when auto-routed). */
 function plannedModel(t: Task): string | null {
@@ -697,9 +703,16 @@ function systemPrompt(task: Task, agent: AgentTarget, opts: { team: boolean; del
 }
 
 // The parts that change on every call ride along with the request
-function userMessage(agent: AgentTarget, text: string, recallFor: string, team: boolean, project: string | null) {
+async function userMessage(agent: AgentTarget, text: string, recallFor: string, team: boolean, project: string | null): Promise<string> {
   if (!team) return text;
-  return withLiveContext(text, { hive: hive.promptText(15, project), hivePublic: hive.publicText(15, project), memories: memory.recall(recallFor, agent, 6, project) });
+  let memories: string[] = [];
+  try {
+    memories = await memory.recall(recallFor, agent, 6, project);
+  } catch (error) {
+    // A memory outage shouldn't stop the task; the run goes ahead without recalled memories
+    hive.log("memory", "error", `recall failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return withLiveContext(text, { hive: hive.promptText(15, project), hivePublic: hive.publicText(15, project), memories });
 }
 
 const browsingEnabled = (task: Task) => Boolean(BROWSER_CDP_URL) && task.source !== "eval";
@@ -1192,7 +1205,7 @@ async function runTask(task: Task) {
         ...history,
         {
           role: "user",
-          content: userMessage(lead, request, ask, useTeam, projects.idOf(task.project)),
+          content: await userMessage(lead, request, ask, useTeam, projects.idOf(task.project)),
           ...(lead === "vision" && images.length ? { images } : {}),
         },
       ],
@@ -1239,7 +1252,7 @@ async function runTask(task: Task) {
             { role: "system", content: systemPrompt(task, h.agent, { team: true, delegate: false }) },
             {
               role: "user",
-              content: userMessage(h.agent, mateTask, h.task, true, projects.idOf(task.project)),
+              content: await userMessage(h.agent, mateTask, h.task, true, projects.idOf(task.project)),
               // A handoff to Vision brings the card's pictures with it
               ...(h.agent === "vision" && images.length ? { images } : {}),
             },
@@ -1271,7 +1284,7 @@ async function runTask(task: Task) {
         [
           { role: "system", content: systemPrompt(task, lead, { team: true, delegate: false }) },
           ...history,
-          { role: "user", content: userMessage(lead, synthesisPrompt(ask, results) + pdfNote, ask, true, projects.idOf(task.project)) },
+          { role: "user", content: await userMessage(lead, synthesisPrompt(ask, results) + pdfNote, ask, true, projects.idOf(task.project)) },
         ],
         controller.signal,
         push,
@@ -1323,7 +1336,7 @@ async function runTask(task: Task) {
           lead,
           [
             { role: "system", content: systemPrompt(task, lead, { team: useTeam, delegate: false }) },
-            { role: "user", content: userMessage(lead, request, ask, useTeam, projects.idOf(task.project)) },
+            { role: "user", content: await userMessage(lead, request, ask, useTeam, projects.idOf(task.project)) },
             { role: "assistant", content: current },
             {
               role: "user",
@@ -1438,8 +1451,12 @@ async function runBackgroundJob() {
 }
 
 setInterval(() => {
-  const stats = memory.maintain();
-  if (stats.decayed || stats.forgotten || stats.merged) hive.log("memory", "maintenance", JSON.stringify(stats));
+  memory
+    .maintain()
+    .then((stats) => {
+      if (stats.decayed || stats.forgotten || stats.merged) hive.log("memory", "maintenance", JSON.stringify(stats));
+    })
+    .catch((error) => hive.log("memory", "error", `maintenance failed: ${error instanceof Error ? error.message : String(error)}`));
 }, MEMORY_INTERVAL_MIN * 60 * 1000);
 
 // --- Creating and changing cards ---------------------------------------------
@@ -2098,7 +2115,8 @@ app.get("/api/system", async (_req: Request, res: Response) => {
     browser: Boolean(BROWSER_CDP_URL),
     video: Boolean(video),
     voice: Boolean(voice),
-    memories: memory.list().length,
+    memories: await memory.count().catch(() => 0),
+    memoryStore: memory.storeKind,
     lastModel: lastModelRef,
     notices: notices.list().length,
     speed: gateway.lastSpeed,
@@ -2413,14 +2431,25 @@ app.get("/api/workspace/file", (req, res) => {
 
 // --- Projects ---------------------------------------------------------------
 
-function projectView(p: ReturnType<Projects["list"]>[number]) {
+/** Memories per project; empty if the memory store is unreachable (the counts are only shown) */
+async function memoryCounts(): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  try {
+    for (const m of await memory.list()) if (m.project) counts.set(m.project, (counts.get(m.project) ?? 0) + 1);
+  } catch {
+    // shown as 0
+  }
+  return counts;
+}
+
+function projectView(p: ReturnType<Projects["list"]>[number], memCounts: Map<string, number>) {
   const cards = [...tasks.values()].filter((t) => !t.parentId && t.project === p.id);
   return {
     ...p,
     counts: {
       cards: cards.length,
       open: cards.filter((t) => !TERMINAL_STATUSES.includes(t.status)).length,
-      memories: memory.list().filter((m) => m.project === p.id).length,
+      memories: memCounts.get(p.id) ?? 0,
       skills: skills.list().filter((s) => s.project === p.id).length,
       assets: assets.countIn(p.id),
       routines: scheduler.list().filter((r) => r.project === p.id).length,
@@ -2429,19 +2458,20 @@ function projectView(p: ReturnType<Projects["list"]>[number]) {
   };
 }
 
-app.get("/api/projects", (_req, res) => {
-  res.json({ projects: projects.list().map(projectView) });
+app.get("/api/projects", async (_req, res) => {
+  const counts = await memoryCounts();
+  res.json({ projects: projects.list().map((p) => projectView(p, counts)) });
 });
-app.post("/api/projects", requireToken, (req, res) => {
+app.post("/api/projects", requireToken, async (req, res) => {
   const bad = (req.body?.profiles ?? []).find?.((n: unknown) => typeof n === "string" && !profiles.exists(n));
   if (bad) return res.status(400).json({ error: `There's no browser profile called “${bad}”` });
   if (typeof req.body?.preset === "string" && !models.preset(req.body.preset)) return res.status(400).json({ error: "Unknown model preset" });
   const out = projects.create(req.body);
   if ("error" in out) return res.status(400).json(out);
   hive.log("projects", "created", out.name);
-  res.status(201).json(projectView(out));
+  res.status(201).json(projectView(out, await memoryCounts()));
 });
-app.patch("/api/projects/:id", requireToken, (req, res) => {
+app.patch("/api/projects/:id", requireToken, async (req, res) => {
   const bad = (req.body?.profiles ?? []).find?.((n: unknown) => typeof n === "string" && !profiles.exists(n));
   if (bad) return res.status(400).json({ error: `There's no browser profile called “${bad}”` });
   if (typeof req.body?.preset === "string" && !models.preset(req.body.preset)) return res.status(400).json({ error: "Unknown model preset" });
@@ -2449,14 +2479,14 @@ app.patch("/api/projects/:id", requireToken, (req, res) => {
   const out = projects.update(String(req.params.id), req.body);
   if ("error" in out) return res.status(out.error === "Project not found" ? 404 : 400).json(out);
   if (before && JSON.stringify(req.body?.profiles ?? null) !== "null") hive.log("projects", "updated", `${out.name}: sign-ins ${out.profiles.join(", ") || "none"}`);
-  res.json(projectView(out));
+  res.json(projectView(out, await memoryCounts()));
 });
 // Deleting needs an empty project (move or remove its cards, assets, skills and routines first,
 // or archive it instead). Its memories and own brand go with it.
-app.delete("/api/projects/:id", requireToken, (req, res) => {
+app.delete("/api/projects/:id", requireToken, async (req, res) => {
   const p = projects.get(String(req.params.id));
   if (!p) return res.status(404).json({ error: "Project not found" });
-  const v = projectView(p);
+  const v = projectView(p, await memoryCounts());
   const left = [
     v.counts.cards && `${v.counts.cards} card${v.counts.cards > 1 ? "s" : ""}`,
     v.counts.assets && `${v.counts.assets} asset${v.counts.assets > 1 ? "s" : ""}`,
@@ -2464,7 +2494,12 @@ app.delete("/api/projects/:id", requireToken, (req, res) => {
     v.counts.routines && `${v.counts.routines} routine${v.counts.routines > 1 ? "s" : ""}`,
   ].filter(Boolean);
   if (left.length) return res.status(409).json({ error: `“${p.name}” still has ${left.join(", ")}. Move or delete them first, or archive the project.` });
-  const forgot = memory.removeProject(p.id);
+  let forgot = 0;
+  try {
+    forgot = await memory.removeProject(p.id);
+  } catch (e) {
+    return res.status(503).json({ error: `Couldn't remove the project's memories: ${e instanceof Error ? e.message : String(e)}` });
+  }
   changes.moveProject(p.id, null);
   assets.clearBrand(p.id);
   projects.remove(p.id);
@@ -2604,9 +2639,14 @@ function projectParam(q: unknown): string | null | undefined {
 app.get("/api/hive", (req, res) => {
   res.json(hive.recent(Math.min(Number(req.query.limit) || 100, 500), projectParam(req.query.project)));
 });
-app.get("/api/memories", (req, res) => {
+app.get("/api/memories", async (req, res) => {
   const p = projectParam(req.query.project);
-  res.json(p === undefined ? memory.list() : memory.list().filter((m) => visibleIn(m.project, p)));
+  try {
+    const all = await memory.list();
+    res.json(p === undefined ? all : all.filter((m) => visibleIn(m.project, p)));
+  } catch (e) {
+    res.status(503).json({ error: `Memory unavailable: ${e instanceof Error ? e.message : String(e)}` });
+  }
 });
 // Pictures for cards: upload as base64 (a data: URL is fine), then pass the id in "images"
 app.post("/api/uploads", requireToken, async (req, res) => {
@@ -2645,20 +2685,36 @@ app.get("/api/uploads/:id", (req, res) => {
   res.end(img.buf);
 });
 
-app.post("/api/memories", requireToken, (req, res) => {
+app.post("/api/memories", requireToken, async (req, res) => {
   const text = typeof req.body?.text === "string" ? req.body.text : "";
   const project = typeof req.body?.project === "string" ? projects.idOf(req.body.project) : null;
-  const id = memory.add(text, "shared", 0.7, req.body?.pinned !== false, project);
+  // Typed by you, so private unless you say otherwise ("private": false lets cloud models see it)
+  const id = await memory.add(text, "shared", 0.7, req.body?.pinned !== false, req.body?.private !== false, project);
   if (id === null) return res.status(400).json({ error: "Memory text is too short" });
   res.status(201).json({ id });
 });
-app.post("/api/memories/maintain", requireToken, (_req, res) => res.json(memory.maintain()));
-app.post("/api/memories/:id/:action", requireToken, (req, res) => {
-  const id = Number(req.params.id);
-  const action = String(req.params.action);
-  const ok =
-    action === "pin" ? memory.setPinned(id, true) : action === "unpin" ? memory.setPinned(id, false) : action === "delete" ? memory.remove(id) : null;
-  if (ok === null) return res.status(400).json({ error: "Unknown action" });
+app.post("/api/memories/maintain", requireToken, async (_req, res) => res.json(await memory.maintain()));
+app.post("/api/memories/:id/:action", requireToken, async (req, res) => {
+  const id = String(req.params.id);
+  const actions: Record<string, () => Promise<boolean>> = {
+    pin: () => memory.setPinned(id, true),
+    unpin: () => memory.setPinned(id, false),
+    // "share" lets cloud models (and cloud MCP clients such as Claude Code) see it; "private" hides it again
+    share: () => memory.setPrivate(id, false),
+    private: () => memory.setPrivate(id, true),
+    // "move" with {"project": "<id or name>"} or {"project": null} for General
+    move: () => {
+      const to = req.body?.project;
+      if (typeof to !== "string" || !to || to === "general") return memory.setProject(id, null);
+      const target = projects.idOf(to);
+      // An unknown project mustn't quietly move it to General
+      return target ? memory.setProject(id, target) : Promise.resolve(false);
+    },
+    delete: () => memory.remove(id),
+  };
+  const run = actions[String(req.params.action)];
+  if (!run) return res.status(400).json({ error: "Unknown action" });
+  const ok = await run();
   res.status(ok ? 200 : 404).json({ ok });
 });
 
@@ -3054,7 +3110,47 @@ app.get("/api/routines/:id/runs", (req, res) => {
   res.json(runs);
 });
 
-app.listen(PORT, HOST, () => {
+// --- Brain: shared memory and canon over MCP ---------------------------------
+if (brainEnabled()) {
+  // Loaded only when configured, so Mission Control still runs without Postgres
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { createMcpRouter } = require("./brain/mcp-server") as typeof import("./brain/mcp-server");
+  app.use("/mcp", createMcpRouter());
+}
+app.get("/api/brain", async (_req, res) => {
+  res.json({
+    enabled: Boolean(brain),
+    memoryStore: memory.storeKind,
+    memories: await memory.count().catch(() => null),
+    mcp: brain ? "/mcp" : null,
+    vaultCanon: Boolean(brain && OBSIDIAN_VAULT),
+  });
+});
+app.post("/api/brain/sync-canon", requireToken, async (_req, res) => {
+  if (!brain) return res.status(409).json({ error: "The brain isn't configured (DATABASE_URL)" });
+  if (!OBSIDIAN_VAULT) return res.status(409).json({ error: "No Obsidian vault is set up (OBSIDIAN_VAULT)" });
+  try {
+    res.json(await brain.syncCanon());
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+async function start() {
+  if (brainEnabled()) {
+    brain = await startBrain({
+      dataDir: DATA_DIR,
+      vault: OBSIDIAN_VAULT,
+      canonEveryMin: CANON_SYNC_MIN,
+      log: (s) => console.log(`[brain] ${s}`),
+    });
+    memory.useStore(brain.memory);
+    console.log(`[brain] shared memory on (${await memory.count()} memories); MCP at /mcp`);
+  }
+  app.listen(PORT, HOST, onListening);
+}
+
+function onListening() {
   console.log(`ts-harness listening on http://${HOST}:${PORT}`);
   console.log(`Ollama: ${OLLAMA_BASE_URL}  Jarvis: ${models.resolve("planner").ref}  router: ${models.resolve("router").ref}`);
   console.log(`Data: ${DATA_DIR}  Obsidian: ${OBSIDIAN_VAULT || "off"}  Telegram: ${telegram ? "on" : "off"}  Browser: ${BROWSER_CDP_URL || "off"}`);
@@ -3073,4 +3169,11 @@ app.listen(PORT, HOST, () => {
     void video.health().then((h) =>
       console.log(h?.ok ? `Videos: Remotion ${h.remotion} ready at ${VIDEO_RENDER_URL}` : `Videos: the video service at ${VIDEO_RENDER_URL} isn't answering yet (it may still be building)`),
     );
+}
+
+start().catch((err) => {
+  // Without its memory store Mission Control would silently lose memories, so it stops;
+  // Docker restarts it once the database is reachable
+  console.error(`[brain] startup failed: ${err instanceof Error ? err.message : err}`);
+  process.exit(1);
 });

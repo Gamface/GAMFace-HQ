@@ -78,6 +78,19 @@ Board API: `GET /api/board`, `POST /api/tasks` (`title`, `prompt`, `targetAgent`
 `dependsOn`, `needsReview`, `column`), `PATCH /api/tasks/:id`, `POST /api/tasks/:id/retry|accept|archive`.
 Models API: `GET /api/models`, `PUT /api/models`, `GET /api/models/available?provider=…`, `GET /api/models/check`.
 
+## Brain: shared memory with Claude Code
+
+Memory lives in the `brain-db` Postgres container, shared with outside agents over MCP
+at `http://localhost:3010/mcp`. On first start your old `data/memories.json` is imported
+once, and the vault's `HQ/` notes are copied into canon docs (kept in sync every few
+minutes). Set `BRAIN_DB_PASSWORD` in `.env` and `ollama pull nomic-embed-text` first.
+Connect Claude Code with `docker compose exec harness npm run brain:token -- claude-code`.
+Cloud clients only see memories and notes you've shared: **Share** in the Memory panel,
+or `cloud: true` in a note's frontmatter (on Home too). Projects carry over: a memory
+learned in a project is only recalled there (and General ones everywhere), and a project
+kept on this PC keeps all its memories private. Move one with
+`POST /api/memories/:id/move {"project": "<id>" | null}`. Details: [brain/README.md](brain/README.md).
+
 ## Privacy, spend caps and read-only runs
 
 Every model request, including routing, memory, browser steps, delegation,

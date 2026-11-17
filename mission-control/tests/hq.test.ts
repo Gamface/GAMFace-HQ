@@ -98,17 +98,19 @@ test("hive keeps a rolling log", () => {
 test("memory extracts, recalls, merges and decays", async () => {
   const mem = new Memory(":memory:", fakeChat({ memories: [{ text: "User runs qwen3:14b on an RX 9060 XT", importance: 0.8, shared: true }] }), "m");
   assert.deepEqual(await mem.extract("planner", "what gpu", "RX 9060 XT"), ["User runs qwen3:14b on an RX 9060 XT"]);
-  assert.deepEqual(mem.recall("which qwen3 model on my gpu", "coder"), ["User runs qwen3:14b on an RX 9060 XT"]);
+  assert.deepEqual(await mem.recall("which qwen3 model on my gpu", "coder"), ["User runs qwen3:14b on an RX 9060 XT"]);
+  // Facts from an exchange that used no private material may go to the cloud
+  assert.equal((await mem.list())[0].private, false);
 
-  const a = mem.add("The user prefers Python for scripts");
-  assert.equal(mem.add("The user prefers Python for scripts."), a);
+  const a = await mem.add("The user prefers Python for scripts");
+  assert.equal(await mem.add("The user prefers Python for scripts."), a);
   assert.ok(similarity("abc def", "abc def") === 1);
 
-  mem.add("Old trivia about a cafe menu", "shared", 0.3);
-  mem.add("Home lab is Proxmox at 192.168.4.90", "shared", 0.3, true);
-  const stats = mem.maintain(Date.now() + 60 * 86_400_000);
+  await mem.add("Old trivia about a cafe menu", "shared", 0.3);
+  await mem.add("Home lab is Proxmox at 192.168.4.90", "shared", 0.3, true);
+  const stats = await mem.maintain(Date.now() + 60 * 86_400_000);
   assert.ok(stats.forgotten >= 1);
-  const texts = mem.list().map((m) => m.text);
+  const texts = (await mem.list()).map((m) => m.text);
   assert.ok(texts.includes("Home lab is Proxmox at 192.168.4.90"));
   assert.ok(!texts.includes("Old trivia about a cafe menu"));
 });
