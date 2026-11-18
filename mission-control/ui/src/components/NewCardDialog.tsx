@@ -116,7 +116,7 @@ export function CardForm({
         <label className="block">
           <span className="text-xs text-slate-400">Agent</span>
           <select className={input} value={f.targetAgent} onChange={(e) => set("targetAgent", e.target.value)}>
-            {["auto", "planner", "coder", "browser", "file", "security_audit", "vision"].map((k) => (
+            {["auto", "planner", "coder", "browser", "file", "security_audit", "vision", "tools"].map((k) => (
               <option key={k} value={k}>
                 {AGENT_LABELS[k]}
                 {k === "planner" ? " (can delegate)" : ""}

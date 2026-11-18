@@ -13,7 +13,8 @@
 import crypto from "node:crypto";
 import { z } from "zod";
 
-export const ActionKindSchema = z.enum(["type", "submit", "click", "search"]);
+// "tool": a call to an outside tool whose instructions may carry private material
+export const ActionKindSchema = z.enum(["type", "submit", "click", "search", "tool"]);
 export type ActionKind = z.infer<typeof ActionKindSchema>;
 const Mode = z.enum(["ask", "allow", "block"]);
 export type ApprovalMode = z.infer<typeof Mode>;
@@ -24,6 +25,8 @@ export const ApprovalPolicySchema = z.object({
   click: Mode.default("ask"),
   // Typing into a search box and searching (a GET form): low risk, allowed by default
   search: Mode.default("allow"),
+  // A tool call whose instructions came from a lead that saw your private notes or memories
+  tool: Mode.default("ask"),
   // How long a request waits for an answer before it counts as denied
   timeoutMinutes: z.number().int().min(1).max(240).default(15),
 });

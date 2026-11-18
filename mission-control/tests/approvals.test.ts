@@ -180,3 +180,19 @@ test("Telegram: buttons and /approve only work from allowed chats", async () => 
     globalThis.fetch = realFetch;
   }
 });
+
+test("tool calls from private context ask by default, and the tool setting can allow or block them", async () => {
+  const { c, requests } = center();
+  const toolReq = req({ kind: "tool", target: "demo.echo", text: '{"text":"hi"}', url: "tool:demo.echo", site: "demo" });
+  const asked = c.check(toolReq, ctx());
+  await new Promise((r) => setImmediate(r));
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].kind, "tool");
+  c.decide(requests[0].id, false, "you");
+  assert.notEqual(await asked, null);
+  c.policy = ApprovalPolicySchema.parse({ tool: "allow" });
+  assert.equal(await c.check(toolReq, ctx()), null);
+  c.policy = ApprovalPolicySchema.parse({ tool: "block" });
+  assert.equal(await c.check(toolReq, ctx()), "blocked by your approval settings");
+  assert.equal(ApprovalPolicySchema.parse({}).tool, "ask");
+});

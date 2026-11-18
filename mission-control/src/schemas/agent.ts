@@ -3,7 +3,7 @@ import { z } from "zod";
 // Shared by the harness (src/ui.ts) and the Mission Control UI (ui/), so this
 // file is the single source of truth for task and event shapes.
 
-export const AgentTargetSchema = z.enum(["planner", "browser", "coder", "file", "security_audit", "vision"]);
+export const AgentTargetSchema = z.enum(["planner", "browser", "coder", "file", "security_audit", "vision", "tools"]);
 // An attached audio clip (WAV), by its upload id
 export const ProfileNameSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/, "Profile names are lowercase letters, numbers and dashes");
 // A project, by id (see hq/projects.ts); null or missing means General
@@ -12,7 +12,7 @@ export const ProjectIdSchema = z.string().regex(PROJECT_ID);
 export const DocIdSchema = z.string().regex(/^[a-f0-9]{64}\.pdf$/);
 export const AudioIdSchema = z.string().regex(/^[a-f0-9]{64}\.wav$/);
 // What a client may ask for: a specific agent, or "auto" to let the router pick
-export const RequestedAgentSchema = z.enum(["auto", "planner", "browser", "coder", "file", "security_audit", "vision"]);
+export const RequestedAgentSchema = z.enum(["auto", "planner", "browser", "coder", "file", "security_audit", "vision", "tools"]);
 // An attached picture, by its upload id (see hq/uploads.ts)
 export const ImageIdSchema = z.string().regex(/^[a-f0-9]{64}\.(png|jpg|gif|webp)$/);
 

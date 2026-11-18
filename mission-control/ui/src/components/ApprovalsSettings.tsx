@@ -9,6 +9,7 @@ interface Policy {
   submit: Mode;
   click: Mode;
   search: Mode;
+  tool: Mode;
   timeoutMinutes: number;
 }
 interface Decided {
@@ -29,6 +30,7 @@ const ROWS: { key: keyof Omit<Policy, "timeoutMinutes">; label: string; hint: st
   { key: "submit", label: "Submitting a form", hint: "Pressing Enter or a submit button: sends what was typed" },
   { key: "click", label: "Clicking a button", hint: "Buttons, menus and script links (plain links never ask)" },
   { key: "search", label: "Searching a site", hint: "Typing into a search box and searching" },
+  { key: "tool", label: "Tool calls from private context", hint: "Sending a request to an outside tool when Jarvis wrote it after seeing your notes or memories" },
 ];
 const STATUS: Record<string, string> = {
   approved: "text-emerald-300",

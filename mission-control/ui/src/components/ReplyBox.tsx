@@ -7,7 +7,7 @@ import ImageAttach, { imageFiles, useImageUploads } from "./ImageAttach";
 // Reply to a finished card. The same agent picks the conversation back up with the
 // earlier turns as history (or pick another agent, or let the router choose).
 
-const TARGETS = ["same", "auto", "planner", "coder", "browser", "file", "security_audit", "vision"] as const;
+const TARGETS = ["same", "auto", "planner", "coder", "browser", "file", "security_audit", "vision", "tools"] as const;
 
 export default function ReplyBox({ taskId, agent, onSent, compact }: { taskId: string; agent?: string; onSent?: () => void; compact?: boolean }) {
   const [text, setText] = useState("");

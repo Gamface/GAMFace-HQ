@@ -24,7 +24,7 @@ interface Skill {
 }
 type Fields = Pick<Skill, "name" | "description" | "agents" | "steps" | "project">;
 
-const AGENTS = ["planner", "coder", "browser", "file", "security_audit", "vision"];
+const AGENTS = ["planner", "coder", "browser", "file", "security_audit", "vision", "tools"];
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e)).replace(/^\d+ /, "").replace(/^\{"error":"(.*)"\}$/, "$1");
 const input = "w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500";
 

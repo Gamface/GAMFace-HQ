@@ -43,7 +43,7 @@ export interface Prepared {
   notes: string[];
 }
 
-const LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", vision: "Vision", router: "Router", memory: "Memory", audio: "Transcriber" };
+const LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", vision: "Vision", tools: "Tools", router: "Router", memory: "Memory", audio: "Transcriber" };
 const MARKERS = /[⟦⟧]/;
 
 /** Dollars, with enough decimals to be useful for small caps. */

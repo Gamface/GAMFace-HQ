@@ -6,7 +6,7 @@ import type { TaskStore } from "./taskstore";
 // Which model each agent uses. Settings live in the database (edited on the
 // Team page or with "switch <agent> to <model>"), with defaults from .env.
 
-export const MODEL_ROLES = ["planner", "coder", "browser", "file", "security_audit", "vision", "router", "memory", "audio"] as const;
+export const MODEL_ROLES = ["planner", "coder", "browser", "file", "security_audit", "vision", "tools", "router", "memory", "audio"] as const;
 export type ModelRole = (typeof MODEL_ROLES)[number];
 
 export interface RoleSettings {
@@ -401,6 +401,8 @@ const ROLE_NAMES: Record<string, ModelRole> = {
   auditor: "security_audit",
   vision: "vision",
   eyes: "vision",
+  tools: "tools",
+  toolbox: "tools",
   audio: "audio",
   transcriber: "audio",
   ears: "audio",

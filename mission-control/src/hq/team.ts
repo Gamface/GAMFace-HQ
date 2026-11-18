@@ -6,7 +6,7 @@ import { privateBlock, sanitize } from "./privacy";
 // The agent team: who is on it, how tasks get routed, and how the lead hands
 // work to teammates. Keys match AgentTargetSchema in ../schemas/agent.ts.
 
-export type AgentKey = "planner" | "coder" | "browser" | "file" | "security_audit" | "vision";
+export type AgentKey = "planner" | "coder" | "browser" | "file" | "security_audit" | "vision" | "tools";
 
 export interface TeamMember {
   key: AgentKey;
@@ -58,13 +58,37 @@ export const TEAM: Record<AgentKey, TeamMember> = {
     prompt:
       "You are Jarvis Vision. Look carefully at the attached pictures and answer about what they actually show: read text exactly, describe layouts, errors, diagrams and details. Say plainly when something is unclear or not visible.",
   },
+  tools: {
+    key: "tools",
+    name: "Jarvis Tools",
+    role: "answers with the installed tools (MCP servers)",
+    prompt:
+      "You are Jarvis Tools. You answer by calling the installed tools and reporting what they returned. You can't call tools in this turn, so say which tool would answer it and what you would ask it.",
+  },
 };
 
 export const AGENT_KEYS = Object.keys(TEAM) as AgentKey[];
 
+// What the installed tools can do (read-only ones), or null when there are none. The Tools
+// teammate is offered to the router and the lead only while this is set.
+let toolsSummary: string | null = null;
+
+/** Sets what the installed tools do ("demo: echo (Repeats…), time (…)"); null hides the Tools teammate. */
+export function setToolsSummary(summary: string | null) {
+  toolsSummary = summary?.trim() ? summary.trim().slice(0, 1500) : null;
+}
+
+export const toolsAvailable = () => toolsSummary !== null;
+
+/** The teammates that can take work now (Tools only while tools are installed). */
+export function activeAgents(): AgentKey[] {
+  return AGENT_KEYS.filter((k) => k !== "tools" || toolsSummary !== null);
+}
+
 export function rosterText(exclude?: AgentKey): string {
-  return AGENT_KEYS.filter((k) => k !== exclude)
-    .map((k) => `- ${k}: ${TEAM[k].name}, ${TEAM[k].role}`)
+  return activeAgents()
+    .filter((k) => k !== exclude)
+    .map((k) => `- ${k}: ${TEAM[k].name}, ${TEAM[k].role}${k === "tools" ? `. Installed: ${toolsSummary}` : ""}`)
     .join("\n");
 }
 
@@ -101,6 +125,7 @@ export async function routeTask(chat: JsonChat, model: string, prompt: string): 
           "\nPick planner for chit-chat, vague requests, or anything that needs several specialists. " +
           "Writing a document, report or PDF goes to planner, or to browser when it needs current facts or real pictures from the web; " +
           "file is only for reading or organizing the user's own notes. " +
+          (toolsSummary ? "Pick tools when one of its installed tools clearly answers the request. " : "") +
           'Reply with JSON only: {"agent": "<key>", "reason": "<a few words>"}',
       },
       { role: "user", content: prompt.slice(0, 2000) },
@@ -109,6 +134,7 @@ export async function routeTask(chat: JsonChat, model: string, prompt: string): 
     // Small routing models send greetings and one-word replies to the browser; it then
     // has nothing to look up. Without any sign of needing the web, Jarvis answers.
     if (key === "browser" && !needsWeb(prompt)) return { agent: "planner", reason: "doesn't need the web" };
+    if (key === "tools" && !toolsSummary) return { agent: "planner", reason: "no tools installed" };
     if (AGENT_KEYS.includes(key)) return { agent: key, reason: String(data.reason ?? "").slice(0, 120) };
   } catch {
     // fall through to keywords
@@ -117,15 +143,22 @@ export async function routeTask(chat: JsonChat, model: string, prompt: string): 
 }
 
 // --- Delegation ---------------------------------------------------------------
-export const DELEGATION_RULES =
-  "\n\nYOU LEAD A TEAM. If the request needs specialist work, write one short sentence about your plan, " +
-  "then one line per handoff in exactly this form and nothing after them:\n" +
-  "@coder: <complete, self-contained instructions>\n" +
-  "Teammates cannot see this conversation, so give each one everything it needs. Their results come back " +
-  "to you to combine into the final answer. Delegate only when it clearly helps; if you can answer alone, " +
-  "just answer and write no @ lines. Valid teammates: " +
-  AGENT_KEYS.filter((k) => k !== "planner").join(", ") +
-  ".";
+/** The lead's handoff rules, naming the teammates that can take work now. */
+export function delegationRules(): string {
+  return (
+    "\n\nYOU LEAD A TEAM. If the request needs specialist work, write one short sentence about your plan, " +
+    "then one line per handoff in exactly this form and nothing after them:\n" +
+    "@coder: <complete, self-contained instructions>\n" +
+    "Teammates cannot see this conversation, so give each one everything it needs. Their results come back " +
+    "to you to combine into the final answer. Delegate only when it clearly helps; if you can answer alone, " +
+    "just answer and write no @ lines. Valid teammates: " +
+    activeAgents()
+      .filter((k) => k !== "planner")
+      .join(", ") +
+    "." +
+    (toolsSummary ? ` The tools teammate can use: ${toolsSummary}.` : "")
+  );
+}
 
 export interface Delegation {
   agent: AgentKey;
@@ -137,7 +170,7 @@ export function parseDelegations(text: string, max = 4): Delegation[] {
   const re = /^[ \t]*(?:[-*]\s*)?@(\w+)\s*:\s*(.+)$/gm;
   for (const m of text.matchAll(re)) {
     const agent = m[1].toLowerCase() as AgentKey;
-    if (agent !== "planner" && AGENT_KEYS.includes(agent) && m[2].trim().length > 3) {
+    if (agent !== "planner" && activeAgents().includes(agent) && m[2].trim().length > 3) {
       out.push({ agent, task: m[2].trim() });
     }
     if (out.length >= max) break;

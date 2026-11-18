@@ -17,7 +17,7 @@ export const SkillInputSchema = z.object({
   name: z.string().trim().min(3).max(60),
   description: z.string().trim().min(5).max(300),
   // Which agents may use it; empty means any
-  agents: z.array(z.enum(["planner", "coder", "browser", "file", "security_audit", "vision"])).max(6).default([]),
+  agents: z.array(z.enum(["planner", "coder", "browser", "file", "security_audit", "vision", "tools"])).max(7).default([]),
   steps: z.string().trim().min(10).max(4000),
   // The project it belongs to; null or missing: every project (General)
   project: z

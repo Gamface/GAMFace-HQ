@@ -16,6 +16,7 @@ import {
 } from "./schemas/agent";
 import { BrowserSession, Frame, SEARCH_SITES } from "./hq/browser";
 import { runBrowserAgent } from "./hq/browser-agent";
+import { runToolAgent } from "./hq/tool-agent";
 import { StreamGuard, redact } from "./hq/guard";
 import { Hive } from "./hq/hive";
 import { Memory } from "./hq/memory";
@@ -31,7 +32,8 @@ import { checkProvider, listModels } from "./hq/providers";
 import { RUNNING_STATUSES, Task, TaskStore, pickNext, waitingOn } from "./hq/taskstore";
 import {
   AGENT_KEYS,
-  DELEGATION_RULES,
+  delegationRules,
+  setToolsSummary,
   NOTE_RULES,
   TEAM,
   parseDelegations,
@@ -120,6 +122,8 @@ const TELEGRAM_ALLOWED = new Set(
 // Real browsing: a Chrome DevTools endpoint, e.g. http://browser:9222 (docker-compose.yml)
 const BROWSER_CDP_URL = process.env.BROWSER_CDP_URL || "";
 const BROWSER_MAX_STEPS = Number(process.env.BROWSER_MAX_STEPS) || 10;
+// Tool calls the Tools agent may make on one card
+const TOOLS_MAX_STEPS = Number(process.env.TOOLS_MAX_STEPS) || 6;
 // Only for testing against pages on your own machine; keep false otherwise
 const BROWSER_ALLOW_PRIVATE = process.env.BROWSER_ALLOW_PRIVATE === "true";
 
@@ -200,6 +204,8 @@ function describeAction(a: Pick<Approval, "kind" | "target" | "text" | "site">):
       return `type ${text} into “${a.target}” on ${a.site}`;
     case "submit":
       return text ? `type ${text} into “${a.target}” and submit it on ${a.site}` : `submit “${a.target}” on ${a.site}`;
+    case "tool":
+      return `send ${text || "a request"} to the tool ${a.target} (its instructions came from your private notes or memories)`;
     default:
       return `click “${a.target}” on ${a.site}`;
   }
@@ -704,7 +710,7 @@ const READ_ONLY_RULES =
 function systemPrompt(task: Task, agent: AgentTarget, opts: { team: boolean; delegate: boolean }) {
   let system = TEAM[agent].prompt;
   if (task.source === "voice") system += ` ${VOICE_STYLE}`;
-  if (opts.delegate) system += DELEGATION_RULES;
+  if (opts.delegate) system += delegationRules();
   if (task.readOnly) system += READ_ONLY_RULES;
   if (agent === "file" && OBSIDIAN_VAULT && task.source !== "voice" && !task.readOnly) system += NOTE_RULES;
   if (opts.team) system += teamContext(agent, vaultNotes(OBSIDIAN_VAULT, agent));
@@ -845,6 +851,60 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
   }
 }
 
+/** What the installed read-only tools do, for the router and the lead ("demo: echo (Repeats…)"). */
+async function refreshToolsSummary(fresh = false) {
+  if (!tools) return setToolsSummary(null);
+  try {
+    const servers = await tools.list(fresh);
+    const parts = servers
+      .filter((s) => s.ok)
+      .map((s) => {
+        const ro = s.tools.filter((t) => t.readOnly);
+        return ro.length ? `${s.name}: ${ro.map((t) => `${t.name} (${t.description.replace(/\s+/g, " ").slice(0, 60)})`).join(", ")}` : "";
+      })
+      .filter(Boolean);
+    setToolsSummary(parts.length ? parts.join("; ") : null);
+  } catch {
+    setToolsSummary(null);
+  }
+}
+
+/** A Tools turn: the agent calls the installed read-only tools step by step, then answers. */
+async function useTools(task: Task, request: string, signal: AbortSignal, push: (text: string) => void, privateTask = false): Promise<TurnResult> {
+  if (!tools) throw new Error("No tools service is set up (TOOLS_URL)");
+  const servers = await tools.list();
+  const available = servers.flatMap((s) => (s.ok ? s.tools.filter((t) => t.readOnly) : []));
+  if (!available.length) throw new Error("no read-only tools are installed");
+  emit(task, "executing_tool");
+  let calls = 0;
+  const answer = await runToolAgent({
+    task: request,
+    tools: available,
+    call: async (server, tool, args) => {
+      calls++;
+      // Instructions written after seeing private notes or memories may carry them: ask first,
+      // showing exactly what would be sent (a declined call tells the agent, which then answers)
+      if (privateTask) {
+        const shown = JSON.stringify(args);
+        const refusal = await askApproval(task, "tools", { kind: "tool", target: `${server}.${tool}`, text: shown, url: `tool:${server}.${tool}`, site: server }, signal);
+        if (refusal) return { text: `Not sent: ${refusal}. Don't try this call again; answer with what you have.`, isError: true, ms: 0 };
+      }
+      return tools.call(server, tool, args);
+    },
+    chat: roleJson("tools", { privateTask, override: task.targetAgent === "tools" ? task.modelOverride : undefined }),
+    model: "tools",
+    maxSteps: TOOLS_MAX_STEPS,
+    signal,
+    log: (line, kind) => {
+      push(kind === "action" ? `🔧 ${line}\n` : `   ${line}\n`);
+      if (kind === "action") hive.log("tools", "call", line.slice(0, 160), task.id);
+    },
+  });
+  if (!calls) push("[No tool call was needed.]\n");
+  push(`\n${redact(answer).text}`);
+  return { text: answer, sawPrivate: privateTask };
+}
+
 /** One agent's turn: the real browser for the browser agent when enabled, otherwise a model call. */
 async function agentTurn(
   task: Task,
@@ -865,6 +925,17 @@ async function agentTurn(
       const msg = error instanceof Error ? error.message : String(error);
       push(`\n[Browser unavailable (${msg}); answering without it.]\n\n`);
       hive.log("browser", "error", msg, task.id);
+    }
+  }
+  if (agent === "tools" && tools && task.source !== "eval") {
+    try {
+      // Instructions written from private notes or memories: each call asks first (see useTools)
+      return await useTools(task, request, signal, push, privateTask);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      const msg = error instanceof Error ? error.message : String(error);
+      push(`\n[Tools unavailable (${msg}); answering without them.]\n\n`);
+      hive.log("tools", "error", msg, task.id);
     }
   }
   return streamTurn(task, agent, messages, signal, push, override, privateTask);
@@ -1484,7 +1555,7 @@ setInterval(() => {
 }, MEMORY_INTERVAL_MIN * 60 * 1000);
 
 // --- Creating and changing cards ---------------------------------------------
-const ROLE_LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", vision: "Vision", router: "Router", memory: "Memory", audio: "Transcriber" };
+const ROLE_LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", vision: "Vision", tools: "Tools", router: "Router", memory: "Memory", audio: "Transcriber" };
 
 /** "switch coder to claude" and friends change models without running a task. */
 function handleSwitch(text: string): string | null {
@@ -2535,7 +2606,9 @@ app.delete("/api/projects/:id", requireToken, async (req, res) => {
 app.get("/api/tools", async (req, res) => {
   if (!tools) return res.json({ enabled: false, servers: [] });
   try {
-    res.json({ enabled: true, servers: await tools.list(req.query.fresh === "1") });
+    const servers = await tools.list(req.query.fresh === "1");
+    if (req.query.fresh === "1") void refreshToolsSummary();
+    res.json({ enabled: true, servers });
   } catch (e) {
     res.json({ enabled: true, servers: [], error: e instanceof Error ? e.message : String(e) });
   }
@@ -3217,7 +3290,12 @@ function onListening() {
     void tools
       .list()
       .then((servers) => console.log(`Tools: ${servers.map((s) => `${s.name} (${s.ok ? `${s.tools.length} tools, ${s.tools.filter((t) => t.readOnly).length} read-only` : s.error})`).join(", ") || "no servers"} at ${TOOLS_URL}`))
-      .catch((e) => console.log(`Tools: ${e instanceof Error ? e.message : e}`));
+      .catch((e) => console.log(`Tools: ${e instanceof Error ? e.message : e}`))
+      .finally(() => {
+        // The router and the lead learn what the tools do; checked again every 5 minutes
+        void refreshToolsSummary();
+        setInterval(() => void refreshToolsSummary(true), 5 * 60_000).unref();
+      });
   console.log(`Assets: ${assets.list().length} in the dictionary${assets.branded() ? `, brand "${assets.brand().name || "set"}"` : ""}`);
   if (video)
     void video.health().then((h) =>

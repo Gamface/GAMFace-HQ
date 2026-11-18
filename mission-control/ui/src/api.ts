@@ -100,6 +100,7 @@ export const AGENT_LABELS: Record<string, string> = {
   file: "File",
   security_audit: "Security",
   vision: "Vision",
+  tools: "Tools",
   audio: "Transcriber",
   router: "Router",
   memory: "Memory",
@@ -112,6 +113,7 @@ export const AGENT_COLORS: Record<string, string> = {
   file: "bg-amber-800/70 text-amber-100",
   security_audit: "bg-rose-800/70 text-rose-100",
   vision: "bg-emerald-800/70 text-emerald-100",
+  tools: "bg-lime-800/70 text-lime-100",
 };
 
 export interface SubtaskCard {

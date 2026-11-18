@@ -294,11 +294,26 @@ API: `GET/POST /api/projects`, `PATCH/DELETE /api/projects/:id`; `project` on ca
 routines, skills, assets and memories; `?project=<id>|general` on `/api/hive`,
 `/api/memories`, `/api/search` and `/api/assets`; `PUT/DELETE /api/brand?project=<id>`.
 
-## Tools (MCP servers), step 1
+## Tools (MCP servers)
 
-Agents will be able to use outside tools: MCP servers such as the ones
+Agents can use outside tools: MCP servers such as the ones
 [CLI Printing Press](https://github.com/mvanhorn/cli-printing-press) prints for an API or
-website, or a search API. This first step adds the plumbing; no agent calls tools yet.
+website, or a search API.
+
+- **Jarvis Tools** is the teammate that uses them. It sees the installed read-only tools
+  (names, descriptions, parameters), calls one per step, reads the result and answers only
+  from what the tools returned. The card shows every call (`🔧 demo.time {}` and its result).
+  Loop guards: a failed call gets one retry, the same call right after it worked is skipped,
+  a tool that doesn't exist is skipped, and three skips force an answer (`TOOLS_MAX_STEPS`,
+  default 6). Its model is set on the Team page like the others.
+- **Routing and handoffs.** The router and Jarvis learn what the installed tools do (checked
+  again every 5 minutes); auto cards that a tool clearly answers go to Tools, and Jarvis can
+  hand work over with `@tools: …`. With no tools installed, the Tools teammate isn't offered.
+- **Private context asks first.** Jarvis always sees your hive log and memories, so a handoff
+  from Jarvis may carry private material. Each tool call from such a handoff waits for your
+  approval and shows exactly what would be sent ("send {"text":"hello team"} to the tool
+  demo.echo"). Set *Tool calls from private context* to allow or block on the Team page's
+  approvals section. A card sent straight to Tools carries only what you typed, so it doesn't ask.
 
 - **The tools service** (`tools/`, the `tools` container) starts the servers listed in
   `tools/tools.json` and lets the harness list and call their tools. It has internet for
@@ -308,7 +323,7 @@ website, or a search API. This first step adds the plumbing; no agent calls tool
 - **Adding a tool:** install its program in `tools/Dockerfile` with a fixed version, add it to
   `tools/tools.json`, put any API key it needs in `tools/.env` (named in that server's `env`),
   then `docker compose up -d --build tools`. Only the variables a server names reach it.
-- **Read-only only, for now.** A tool counts as read-only when its server is marked
+- **Read-only tools only, for now.** A tool counts as read-only when its server is marked
   `"readOnly": true`, when the tool says so itself (MCP `readOnlyHint`), or when
   `tools.<name>.readOnly` says so. Tools that change things are refused, by the harness and by
   the tools service, until approvals for tools exist.

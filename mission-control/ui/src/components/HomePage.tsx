@@ -58,7 +58,7 @@ interface Routine {
 }
 
 const NAME_KEY = "mc.name";
-const TEAM = ["planner", "browser", "coder", "file", "security_audit", "vision"];
+const TEAM = ["planner", "browser", "coder", "file", "security_audit", "vision", "tools"];
 const short = (ref?: string | null) => (ref ?? "—").replace(/^ollama\//, "");
 const isCloud = (ref?: string | null) => Boolean(ref) && !ref!.startsWith("ollama/");
 const clock = (t: number) => new Date(t).toLocaleTimeString("en-GB", { hour12: false });
