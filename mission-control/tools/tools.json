@@ -1,0 +1,11 @@
+{
+  "_help": "MCP servers the agents may use. Each runs inside the tools container, which has internet but none of your files or Mission Control's keys. env: only the variables named here reach that server; \"$NAME\" is read from tools/.env. readOnly: true marks every tool of the server as read-only; otherwise a tool is read-only only if it says so itself (readOnlyHint), and per-tool settings under tools override both. Tools that change things are refused until approvals for tools exist.",
+  "servers": {
+    "demo": {
+      "description": "A built-in test server: echo text back, tell the time, and a pretend note writer (it changes nothing, but says it would)",
+      "command": "node",
+      "args": ["demo-server.mjs"],
+      "enabled": true
+    }
+  }
+}

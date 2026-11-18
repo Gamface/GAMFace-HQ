@@ -59,6 +59,7 @@ import { HistoryIndex, SKILL_DRAFT_SYSTEM, Skills, skillDraftPrompt } from "./hq
 import type { Skill } from "./hq/skills";
 import { VIDEO_MAX_SECONDS, VideoClient, extractScene, videoInstructions, wantsVertical, wantsVideo } from "./hq/video";
 import type { SceneSpec } from "./hq/video";
+import { ToolsClient, refuseFromHost } from "./hq/tools";
 import { KNOWN_VOICES, VoiceClient, extractNarration, sceneVoice, wantsCaptions, wantsOwnAudio, wantsVoice } from "./hq/voice";
 import type { Word } from "./hq/voice";
 import { AssetPatchSchema, AssetUploadSchema, Assets, SYSTEM_FONTS, assetBlock, publicName } from "./hq/assets";
@@ -164,6 +165,9 @@ const VIDEO_FIX_ROUNDS = Number(process.env.VIDEO_FIX_ROUNDS ?? 2);
 // Voiceovers and word timings: the voice service (voice/, docker-compose.yml)
 const VOICE_URL = process.env.VOICE_URL || "";
 const voice = VOICE_URL ? new VoiceClient(VOICE_URL.replace(/\/+$/, "")) : null;
+// Tools (MCP servers) for the agents: the tools service (tools/, docker-compose.yml)
+const TOOLS_URL = process.env.TOOLS_URL || "";
+const tools = TOOLS_URL ? new ToolsClient(TOOLS_URL.replace(/\/+$/, "")) : null;
 // Logos, pictures, clips, music and fonts the Coder may use, and the brand
 const assets = new Assets(DATA_DIR);
 const docCache = new DocCache(path.join(DATA_DIR, "uploads"));
@@ -479,6 +483,8 @@ let backgroundBusy = false;
 let nextEventId = Math.max(Date.now(), store.maxEventId() + 1);
 
 const app = express();
+// The tools container may reach the harness's network, but never its API
+if (TOOLS_URL) app.use(refuseFromHost(new URL(TOOLS_URL).hostname));
 app.use(cors({ origin: CORS_ORIGINS }));
 // Room for a 25 MB PDF or audio clip (or a 10 MB picture) sent as base64; asset
 // uploads (clips up to 80 MB) get more
@@ -2525,6 +2531,31 @@ app.delete("/api/projects/:id", requireToken, async (req, res) => {
   res.json({ ok: true, memories: forgot });
 });
 
+// Tools: what the tools service offers, and a way to try one (read-only tools only for now)
+app.get("/api/tools", async (req, res) => {
+  if (!tools) return res.json({ enabled: false, servers: [] });
+  try {
+    res.json({ enabled: true, servers: await tools.list(req.query.fresh === "1") });
+  } catch (e) {
+    res.json({ enabled: true, servers: [], error: e instanceof Error ? e.message : String(e) });
+  }
+});
+app.post("/api/tools/call", requireToken, async (req, res) => {
+  if (!tools) return res.status(400).json({ error: "No tools service is set up (TOOLS_URL)" });
+  const server = typeof req.body?.server === "string" ? req.body.server : "";
+  const tool = typeof req.body?.tool === "string" ? req.body.tool : "";
+  const args = req.body?.args && typeof req.body.args === "object" && !Array.isArray(req.body.args) ? (req.body.args as Record<string, unknown>) : {};
+  if (!server || !tool) return res.status(400).json({ error: "server and tool are required" });
+  try {
+    const out = await tools.call(server, tool, args);
+    hive.log("tools", "call", `${server}.${tool} (tried from the dashboard)${out.isError ? ": failed" : ""}`);
+    res.json(out);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    res.status(/changes things/.test(msg) ? 403 : /^No tool /.test(msg) ? 404 : 502).json({ error: msg });
+  }
+});
+
 // Try a voice: speaks a short line and returns the WAV
 app.post("/api/voice/preview", requireToken, async (req, res) => {
   if (!voice) return res.status(400).json({ error: "No voice service is set up (VOICE_URL)" });
@@ -3182,6 +3213,11 @@ function onListening() {
     void voice.health().then((h) =>
       console.log(h?.ok ? `Voice: ${h.voices.length} voices, Whisper ${h.whisper ?? "off"}${h.error ? ` (${h.error})` : ""} at ${VOICE_URL}` : `Voice: the voice service at ${VOICE_URL} isn't answering yet (it may still be building)`),
     );
+  if (tools)
+    void tools
+      .list()
+      .then((servers) => console.log(`Tools: ${servers.map((s) => `${s.name} (${s.ok ? `${s.tools.length} tools, ${s.tools.filter((t) => t.readOnly).length} read-only` : s.error})`).join(", ") || "no servers"} at ${TOOLS_URL}`))
+      .catch((e) => console.log(`Tools: ${e instanceof Error ? e.message : e}`));
   console.log(`Assets: ${assets.list().length} in the dictionary${assets.branded() ? `, brand "${assets.brand().name || "set"}"` : ""}`);
   if (video)
     void video.health().then((h) =>

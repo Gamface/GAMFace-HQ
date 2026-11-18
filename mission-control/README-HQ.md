@@ -294,6 +294,32 @@ API: `GET/POST /api/projects`, `PATCH/DELETE /api/projects/:id`; `project` on ca
 routines, skills, assets and memories; `?project=<id>|general` on `/api/hive`,
 `/api/memories`, `/api/search` and `/api/assets`; `PUT/DELETE /api/brand?project=<id>`.
 
+## Tools (MCP servers), step 1
+
+Agents will be able to use outside tools: MCP servers such as the ones
+[CLI Printing Press](https://github.com/mvanhorn/cli-printing-press) prints for an API or
+website, or a search API. This first step adds the plumbing; no agent calls tools yet.
+
+- **The tools service** (`tools/`, the `tools` container) starts the servers listed in
+  `tools/tools.json` and lets the harness list and call their tools. It has internet for
+  the tools but sees none of your files and none of Mission Control's keys. Only the harness
+  can reach it, and the harness refuses any request that comes from it, so a tool can't call
+  back into Mission Control.
+- **Adding a tool:** install its program in `tools/Dockerfile` with a fixed version, add it to
+  `tools/tools.json`, put any API key it needs in `tools/.env` (named in that server's `env`),
+  then `docker compose up -d --build tools`. Only the variables a server names reach it.
+- **Read-only only, for now.** A tool counts as read-only when its server is marked
+  `"readOnly": true`, when the tool says so itself (MCP `readOnlyHint`), or when
+  `tools.<name>.readOnly` says so. Tools that change things are refused, by the harness and by
+  the tools service, until approvals for tools exist.
+- Tool output is treated like a web page: untrusted, and cleaned of private-context markers
+  and secrets before anything sees it.
+- A built-in `demo` server (echo, time, and a pretend note writer) is there to try things.
+
+API: `GET /api/tools` (servers and tools; `?fresh=1` skips the one-minute cache),
+`POST /api/tools/call { server, tool, args }`. The tools service: `GET /tools`, `POST /call`,
+`GET /health`.
+
 ## Voiceovers, captions, assets and templates
 
 Videos can now talk, show captions in sync, use your real logos, pictures, clips and

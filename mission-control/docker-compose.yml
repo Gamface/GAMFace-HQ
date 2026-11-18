@@ -36,6 +36,8 @@ services:
       VOICE_URL: http://voice:3030
       # Recordings are transcribed by Whisper in the voice service; "model" uses the Transcriber
       TRANSCRIBE_WITH: ${TRANSCRIBE_WITH:-whisper}
+      # Tools (MCP servers) the agents may use: the tools service below
+      TOOLS_URL: http://tools:3040
       # Folders the Coder and File agents may edit (one per project; data/workspaces by
       # default). To let them work on your own repos, mount the folder that holds them
       # (the volume line below) and uncomment this:
@@ -53,7 +55,7 @@ services:
     # Published on localhost only; port 3008 is taken by jarvis-harness
     ports:
       - "127.0.0.1:3010:3008"
-    networks: [default, render]
+    networks: [default, render, tools]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3008/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
@@ -141,6 +143,19 @@ services:
     networks: [render]
     restart: unless-stopped
 
+  # Tools for the agents: the MCP servers listed in tools/tools.json. Its own networks:
+  # one to the harness only, one out to the internet for the tools. It sees none of
+  # your files and none of Mission Control's keys; tool API keys go in tools/.env.
+  tools:
+    build: ./tools
+    volumes:
+      - ./tools/tools.json:/app/tools.json:ro
+    env_file:
+      - path: ./tools/.env
+        required: false
+    networks: [tools, tools-out]
+    restart: unless-stopped
+
   ui:
     image: node:22-bookworm-slim
     working_dir: /app/ui
@@ -164,6 +179,11 @@ networks:
   # Private: the harness, the video service and the voice service only, no internet
   render:
     internal: true
+  # Private: the harness and the tools service only
+  tools:
+    internal: true
+  # The tools service's way out to the internet (nothing else is on it)
+  tools-out: {}
 
 volumes:
   brain_pgdata:
