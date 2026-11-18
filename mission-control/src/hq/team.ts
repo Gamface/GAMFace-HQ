@@ -77,6 +77,14 @@ const KEYWORDS: [AgentKey, RegExp][] = [
   ["browser", /\b(search|look up|latest|news|website|web|price of)\b/i],
 ];
 
+const WEB_SIGNS =
+  /\b(search|google|look(ing)? up|find|research|browse|online|internet|web|website|site|url|link|page|news|latest|current(ly)?|recent|today|tonight|yesterday|tomorrow|this (week|month|year)|right now|weather|forecast|price|prices|cost|buy|deals?|stock|score|who won|release[ds]?|reviews?|compare|sources?|open|go to|visit|youtube|reddit|amazon|wikipedia|20\d\d)\b|https?:\/\/|www\.|\.(com|org|net|io|dev|ai)\b/i;
+
+/** Whether a request shows any sign of needing the web. Exported for tests. */
+export function needsWeb(prompt: string): boolean {
+  return WEB_SIGNS.test(prompt);
+}
+
 export function keywordRoute(prompt: string): AgentKey {
   for (const [key, pattern] of KEYWORDS) if (pattern.test(prompt)) return key;
   return "planner";
@@ -98,6 +106,9 @@ export async function routeTask(chat: JsonChat, model: string, prompt: string): 
       { role: "user", content: prompt.slice(0, 2000) },
     ]);
     const key = String(data.agent ?? "").trim().toLowerCase() as AgentKey;
+    // Small routing models send greetings and one-word replies to the browser; it then
+    // has nothing to look up. Without any sign of needing the web, Jarvis answers.
+    if (key === "browser" && !needsWeb(prompt)) return { agent: "planner", reason: "doesn't need the web" };
     if (AGENT_KEYS.includes(key)) return { agent: key, reason: String(data.reason ?? "").slice(0, 120) };
   } catch {
     // fall through to keywords

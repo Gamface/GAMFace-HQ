@@ -275,7 +275,9 @@ const FIELD_INFO = `(() => {
 
 const READ_PAGE = `(() => {
   const text = (document.body?.innerText || "").replace(/\\n{3,}/g, "\\n\\n").slice(0, 6000);
+  // Skip links ("Jump to content") and anchors on the same page lead nowhere new
   const links = [...document.querySelectorAll("a[href]")].filter((a) => a.innerText.trim() && a.getBoundingClientRect().width > 0)
+    .filter((a) => !/^(skip|jump) to\\b/i.test(a.innerText.trim()) && !(a.hash && a.host === location.host && a.pathname === location.pathname))
     .slice(0, 40).map((a) => ({ text: a.innerText.replace(/\\s+/g, " ").trim().slice(0, 80), href: a.href }));
   const fields = [...document.querySelectorAll('input:not([type=hidden]):not([type=submit]), textarea, select')]
     .filter((e) => e.getBoundingClientRect().width > 0).slice(0, 15)
@@ -296,18 +298,43 @@ function siteOf(url: string): string {
 
 /**
  * Search results link through the search engine's redirect page
- * (duckduckgo.com/l/?uddg=<real address>). Returns the real address, or null
- * when the link is not such a redirect.
+ * (duckduckgo.com/l/?uddg=<real address>, bing.com/ck/a?u=a1<base64 address>).
+ * Returns the real address, or null when the link is not such a redirect.
  */
 export function searchResultTarget(href: string): string | null {
   try {
     const u = new URL(href);
-    if (!/(^|\.)duckduckgo\.com$/i.test(u.hostname) || u.pathname !== "/l/") return null;
-    const dest = u.searchParams.get("uddg");
+    let dest: string | null = null;
+    if (/(^|\.)duckduckgo\.com$/i.test(u.hostname) && u.pathname === "/l/") dest = u.searchParams.get("uddg");
+    else if (/(^|\.)bing\.com$/i.test(u.hostname) && u.pathname === "/ck/a") {
+      const enc = u.searchParams.get("u") ?? "";
+      if (enc.startsWith("a1")) dest = Buffer.from(enc.slice(2).replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+    }
     return dest && /^https?:\/\//i.test(dest) ? dest : null;
   } catch {
     return null;
   }
+}
+
+/** The search engines the browser agent uses: DuckDuckGo first, Bing when DuckDuckGo blocks or fails. */
+export const SEARCH_SITES = ["html.duckduckgo.com", "www.bing.com"];
+
+/** The Bing search for a DuckDuckGo search address, or null when it isn't one. */
+export function fallbackSearch(url: string): string | null {
+  try {
+    const u = new URL(url);
+    const q = u.searchParams.get("q");
+    if (!/(^|\.)duckduckgo\.com$/i.test(u.hostname) || !q) return null;
+    return `https://www.bing.com/search?q=${encodeURIComponent(q)}`;
+  } catch {
+    return null;
+  }
+}
+
+/** DuckDuckGo's "are you a bot" page, or a results page with no results. */
+export function searchBlocked(p: { url: string; text: string; links: unknown[] }): boolean {
+  if (!/duckduckgo\.com/i.test(p.url)) return false;
+  return /bots use DuckDuckGo|anomaly|confirm this search was made by a human|select all squares/i.test(p.text) || p.links.length === 0;
 }
 
 export interface ReadOnlyOptions {

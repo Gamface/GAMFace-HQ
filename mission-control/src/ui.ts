@@ -14,7 +14,7 @@ import {
   TERMINAL_STATUSES,
   boardColumn,
 } from "./schemas/agent";
-import { BrowserSession, Frame } from "./hq/browser";
+import { BrowserSession, Frame, SEARCH_SITES } from "./hq/browser";
 import { runBrowserAgent } from "./hq/browser-agent";
 import { StreamGuard, redact } from "./hq/guard";
 import { Hive } from "./hq/hive";
@@ -84,6 +84,10 @@ const OLLAMA_FAST_MODEL = process.env.OLLAMA_FAST_MODEL || OLLAMA_MODEL;
 const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL || "qwen3.5:latest";
 // Default for transcribing audio; it must have the audio capability (gemma4:12b) or be a Whisper server
 const OLLAMA_AUDIO_MODEL = process.env.OLLAMA_AUDIO_MODEL || "gemma4:12b";
+// Who turns recordings into text: "whisper" (the voice service's faster-whisper on the
+// CPU, like Jarvis's wake word; the default when VOICE_URL is set) or "model" (the
+// Transcriber on the Team page). If Whisper fails, the Transcriber is used instead.
+const TRANSCRIBE_WITH = (process.env.TRANSCRIBE_WITH || "whisper").toLowerCase() === "model" ? "model" : "whisper";
 const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX) || 8192;
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || "30m";
 const OLLAMA_THINK = process.env.OLLAMA_THINK === "true";
@@ -722,7 +726,7 @@ function readOnlySites(task: Task): string[] {
   const named = task.allowedSites?.length
     ? task.allowedSites
     : [...`${task.prompt} ${task.reply ?? ""}`.matchAll(/https?:\/\/([a-z0-9.-]+)/gi)].map((m) => m[1].toLowerCase().replace(/^www\./, ""));
-  return [...new Set([...named, "html.duckduckgo.com"])];
+  return [...new Set([...named, ...SEARCH_SITES])];
 }
 
 /** Drives the real browser for one request and returns the agent's answer. */
@@ -755,7 +759,7 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
     // Runs that may act ask before typing, submitting or clicking a button
     gate: task.readOnly ? undefined : (req) => askApproval(task, "browser", req, signal),
     // A routine that may act still stays on its own sites
-    sites: !task.readOnly && isRoutine(task) && task.allowedSites?.length ? [...task.allowedSites, "html.duckduckgo.com"] : undefined,
+    sites: !task.readOnly && isRoutine(task) && task.allowedSites?.length ? [...task.allowedSites, ...SEARCH_SITES] : undefined,
     onFrame: (f: Frame) => broadcastBrowser({ type: "frame", taskId: task.id, ...f }),
     onBlocked: (url, reason) => {
       broadcastBrowser({ type: "blocked", taskId: task.id, url, reason });
@@ -789,7 +793,8 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
     const answer = await runBrowserAgent({
       task: request,
       session,
-      chat: roleJson("browser", { privateTask }),
+      // A model picked for a Browser card drives its steps too (not a lead's model when Jarvis delegates)
+      chat: roleJson("browser", { privateTask, override: task.targetAgent === "browser" ? task.modelOverride : undefined }),
       model: "browser",
       maxSteps: BROWSER_MAX_STEPS,
       signal,
@@ -975,10 +980,23 @@ async function runTask(task: Task) {
     let heardPrivate = false;
     const clips = (task.audio ?? []).map((id) => uploads.bytes(id)).filter((b): b is Buffer => Boolean(b));
     if (clips.length) {
-      emit(task, "executing_tool", `── Transcribing ${clips.length} audio clip${clips.length > 1 ? "s" : ""} (${models.resolve("audio").ref}) ──\n\n`);
+      const useWhisper = TRANSCRIBE_WITH === "whisper" && voice !== null;
+      emit(task, "executing_tool", `── Transcribing ${clips.length} audio clip${clips.length > 1 ? "s" : ""} (${useWhisper ? "Whisper, voice service" : models.resolve("audio").ref}) ──\n\n`);
       const parts: string[] = [];
       for (const [i, clip] of clips.entries()) {
         const texts: string[] = [];
+        // Whisper first (on the CPU, on this PC); the Transcriber model if it fails
+        if (useWhisper && voice) {
+          const heard = await voice.transcribe(clip, spellingHint(), controller.signal);
+          if (!("error" in heard)) {
+            const text = heard.text.replace(/\s+/g, " ").trim();
+            parts.push(clips.length > 1 ? `Clip ${i + 1}: ${text || "(no speech found)"}` : text || "(no speech found)");
+            continue;
+          }
+          const note = `Whisper couldn't transcribe this (${heard.error.slice(0, 120)}); using ${models.resolve("audio").ref} instead.`;
+          push(`[${note}]\n`);
+          hive.log("audio", "policy", note, task.id);
+        }
         // Audio models take short clips (Gemma 4: 30 s), so long recordings go in pieces
         for (const piece of splitWav(clip)) {
           const out = await gateway.transcribe(

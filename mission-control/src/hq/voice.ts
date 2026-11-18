@@ -130,6 +130,11 @@ export class VoiceClient {
     return this.post("/words", { audio: audio.toString("base64"), text }, 10 * 60_000, signal);
   }
 
+  /** Speech to text with Whisper. `prompt` lists names to spell right. */
+  async transcribe(audio: Buffer, prompt?: string, signal?: AbortSignal): Promise<{ text: string; seconds: number; model: string } | { error: string }> {
+    return this.post("/transcribe", { audio: audio.toString("base64"), prompt: prompt?.slice(0, 600) }, 5 * 60_000, signal);
+  }
+
   /** The tempo and beat times of a music track. */
   async beats(audio: Buffer): Promise<{ tempo: number | null; beats: number[]; seconds: number } | { error: string }> {
     return this.post("/beats", { audio: audio.toString("base64") }, 5 * 60_000);

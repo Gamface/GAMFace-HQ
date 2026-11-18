@@ -551,6 +551,10 @@ Up to 4 clips per card, 25 MB each after conversion (about 13 minutes).
   shows in the output and goes to the agent with your request (and to the router, so
   "summarise this voice memo" routes on what was said). You can leave the task box empty:
   it becomes "Listen to the attached audio and respond."
+- **Whisper first.** Recordings (the Home mic and attached audio) are turned into text by
+  the voice service's faster-whisper on the CPU, the same way the "Hey Jarvis" wake word
+  does it, so the GPU stays free for the agents. If Whisper isn't available or fails, the
+  Transcriber below is used instead. Set `TRANSCRIBE_WITH=model` to always use the Transcriber.
 - The Transcriber defaults to `ollama/gemma4:12b` (set `OLLAMA_AUDIO_MODEL` to change it)
   and is **local only** out of the box. You can also point it at a local Whisper server
   (any OpenAI-style `/v1/audio/transcriptions`, such as faster-whisper-server) by adding it

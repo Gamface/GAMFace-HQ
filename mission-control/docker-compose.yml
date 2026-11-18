@@ -34,6 +34,8 @@ services:
       GPU_VRAM_GB: ${GPU_VRAM_GB:-16}
       # Voiceovers and word-timed captions: the voice service below
       VOICE_URL: http://voice:3030
+      # Recordings are transcribed by Whisper in the voice service; "model" uses the Transcriber
+      TRANSCRIBE_WITH: ${TRANSCRIBE_WITH:-whisper}
       # Folders the Coder and File agents may edit (one per project; data/workspaces by
       # default). To let them work on your own repos, mount the folder that holds them
       # (the volume line below) and uncomment this:

@@ -3,6 +3,7 @@
   GET  /health                         -> { ok, ready, voices, whisper, error? }
   POST /speak  { text, voice?, speed? } -> { audio (WAV, base64), seconds, words, voice }
   POST /words  { audio (base64), text? } -> { words, seconds, text }
+  POST /transcribe { audio (base64), prompt? } -> { text, seconds, model }
   POST /beats  { audio (base64) }        -> { tempo, beats, seconds }
 
 Words are [{ text, start, end }] in seconds. For /speak, Whisper listens to the
@@ -13,12 +14,14 @@ written. Runs on the CPU, with no internet (the models are baked into the image)
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import tempfile
 import threading
 import time
 import traceback
+import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
@@ -120,6 +123,17 @@ def decode(b64: str) -> np.ndarray:
     raw = base64.b64decode(b64)
     if len(raw) > MAX_AUDIO:
         raise ValueError("The audio is too large")
+    # 16-bit PCM WAV (what the dashboard sends) is read directly; PyAV is only for other formats
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WAVE":
+        try:
+            with wave.open(io.BytesIO(raw), "rb") as w:
+                if w.getsampwidth() == 2:
+                    pcm = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float32) / 32768.0
+                    if w.getnchannels() > 1:
+                        pcm = pcm.reshape(-1, w.getnchannels()).mean(axis=1)
+                    return resample(pcm, w.getframerate(), 16000)
+        except wave.Error:
+            pass
     try:
         from faster_whisper.audio import decode_audio
     except ImportError:  # older layout
@@ -179,6 +193,14 @@ class Handler(BaseHTTPRequestHandler):
                 heard, text = hear(samples, prompt=prompt)
                 words = align(script_words(prompt), heard, seconds) if prompt else [{"text": w, "start": round(s, 3), "end": round(e, 3)} for w, s, e in heard]
                 out = {"words": words, "seconds": round(seconds, 3), "text": prompt or text}
+            elif self.path == "/transcribe":
+                # Speech to text for spoken requests (the dashboard mic and voice notes)
+                if state["whisper"] is None:
+                    return self.send(503, {"error": state["error"] or "Whisper isn't loaded"})
+                samples = decode(str(body.get("audio") or ""))
+                prompt = str(body.get("prompt") or "").strip() or None
+                _, text = hear(samples, prompt=prompt)
+                out = {"text": text, "seconds": round(len(samples) / 16000, 3), "model": WHISPER_MODEL}
             elif self.path == "/beats":
                 samples = decode(str(body.get("audio") or ""))
                 out = {**find_beats(samples, 16000), "seconds": round(len(samples) / 16000, 3)}

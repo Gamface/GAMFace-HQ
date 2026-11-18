@@ -32,6 +32,8 @@ export interface CallOptions {
    * private context to the cloud, the call is kept on a local model.
    */
   privateTask?: boolean;
+  /** A model chosen for this card (JSON calls); like a streamed turn's override, it has no fallback */
+  override?: string;
 }
 
 export interface Prepared {
@@ -245,11 +247,11 @@ export class ModelGateway {
         throw error;
       }
     };
-    const primary = this.models.resolve(role);
+    const primary = this.models.resolve(role, opts.override);
     try {
       return await attempt(primary);
     } catch (error) {
-      const fb = this.models.resolveFallback(role);
+      const fb = opts.override ? null : this.models.resolveFallback(role);
       if (!fb || fb.ref === primary.ref) throw error;
       onNote(`${primary.ref} failed (${error instanceof Error ? error.message : error}); used ${fb.ref}.`);
       return attempt(fb);
