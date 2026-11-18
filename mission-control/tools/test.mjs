@@ -1,6 +1,47 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createServer, isReadOnly, parseConfig, resultText, serverEnv } from "./server.mjs";
+import { callArgs, createServer, isReadOnly, parseConfig, resultText, serverEnv, visibleSchema } from "./server.mjs";
+import { apiUrl, plain } from "./wikipedia-server.mjs";
+import { formatResults, searchUrl } from "./brave-server.mjs";
+
+test("only: an allowlist of a server's tools", async () => {
+  assert.throws(() => parseConfig('{"servers":{"a":{"command":"x","only":"echo"}}}'), /only must be a list/);
+  const servers = parseConfig(JSON.stringify({ servers: { demo: { command: process.execPath, args: [new URL("./demo-server.mjs", import.meta.url).pathname], only: ["echo"] } } }));
+  const srv = createServer(servers).listen(0);
+  try {
+    const list = await (await fetch(`http://127.0.0.1:${srv.address().port}/tools`)).json();
+    assert.deepEqual(list.servers[0].tools.map((t) => t.name), ["echo"]);
+    const r = await fetch(`http://127.0.0.1:${srv.address().port}/call`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server: "demo", tool: "time" }) });
+    assert.equal(r.status, 404, "a tool left out of the allowlist can't be called");
+  } finally {
+    srv.close();
+  }
+});
+
+test("hideParams and defaults: plumbing hidden from agents, defaults only where a tool has them", () => {
+  const s = parseConfig(JSON.stringify({ servers: { espn: { command: "x", hideParams: ["agent", "yes"], defaults: { agent: true } } } })).espn;
+  const schema = { type: "object", properties: { agent: { type: "boolean" }, yes: { type: "boolean" }, league: { type: "string" } }, required: ["league", "yes"] };
+  assert.deepEqual(visibleSchema(s, schema), { type: "object", properties: { league: { type: "string" } }, required: ["league"] });
+  // A hidden parameter the agent sends anyway is dropped; the default is added
+  assert.deepEqual(callArgs(s, schema, { league: "nba", yes: true }), { league: "nba", agent: true });
+  // A tool without that parameter doesn't get the default
+  assert.deepEqual(callArgs(s, { properties: { league: {} } }, { league: "nba" }), { league: "nba" });
+  assert.throws(() => parseConfig('{"servers":{"a":{"command":"x","defaults":[1]}}}'), /defaults must be an object/);
+});
+
+test("wikipedia: only wikipedia.org, plain-text snippets", () => {
+  assert.match(apiUrl("en", { action: "query", srsearch: "a b" }), /^https:\/\/en\.wikipedia\.org\/w\/api\.php\?format=json&formatversion=2&utf8=1&action=query&srsearch=a\+b$/);
+  assert.throws(() => apiUrl("evil.example/x?", {}), /language code/);
+  assert.equal(plain('The <span class="searchmatch">Eiffel</span> Tower &amp; &quot;more&quot;'), 'The Eiffel Tower & "more"');
+});
+
+test("brave: only api.search.brave.com, numbered results", () => {
+  assert.equal(searchUrl("web", { query: "node lts", count: 5, freshness: "pw" }), "https://api.search.brave.com/res/v1/web/search?q=node+lts&count=5&freshness=pw");
+  assert.equal(
+    formatResults([{ title: "<strong>Node</strong> 24", url: "https://nodejs.org", description: "LTS <strong>release</strong>", age: "2 days ago" }]),
+    "1. Node 24 (2 days ago)\n   https://nodejs.org\n   LTS release",
+  );
+});
 
 test("config: names, commands and args are checked", () => {
   assert.throws(() => parseConfig('{"servers":{"Bad Name":{"command":"x"}}}'), /lowercase/);

@@ -1,11 +1,40 @@
 {
-  "_help": "MCP servers the agents may use. Each runs inside the tools container, which has internet but none of your files or Mission Control's keys. env: only the variables named here reach that server; \"$NAME\" is read from tools/.env. readOnly: true marks every tool of the server as read-only; otherwise a tool is read-only only if it says so itself (readOnlyHint), and per-tool settings under tools override both. Tools that change things are refused until approvals for tools exist.",
+  "_help": "MCP servers the agents may use. Each runs inside the tools container, which has internet but none of your files or Mission Control's keys. env: only the variables named here reach that server; \"$NAME\" is read from tools/.env. readOnly: true marks every tool of the server as read-only; otherwise a tool is read-only only if it says so itself (readOnlyHint), and per-tool settings under tools override both (readOnly, enabled). Tools that change things ask the user before every call.",
   "servers": {
+    "wikipedia": {
+      "description": "Search Wikipedia and read articles (no key needed)",
+      "command": "node",
+      "args": ["wikipedia-server.mjs"],
+      "readOnly": true
+    },
+    "brave": {
+      "description": "Web and news search with the Brave Search API (needs BRAVE_API_KEY in tools/.env)",
+      "command": "node",
+      "args": ["brave-server.mjs"],
+      "env": { "BRAVE_API_KEY": "$BRAVE_API_KEY" },
+      "readOnly": true
+    },
+    "espn": {
+      "description": "Live scores, schedules, standings, box scores and rankings for NFL, NBA, MLB, NHL, college, MLS, EPL and WNBA (no key needed)",
+      "command": "espn-pp-mcp",
+      "args": [],
+      "_only": "Lookups that return usable results (checked 2026-11-18). Left out: standings, leaders, injuries, scoreboard_get and rankings_get (their results are 0.2-2.4 MB and ignore select, so they always exceed the size limit), h2h, rivals and streak (need a local sync first), watch (polls forever), duplicates, import/export and the learnings/teach/playbook tools that edit its local knowledge base.",
+      "only": [
+        "today", "scores", "odds", "trending", "compare", "transactions", "boxscore", "recap",
+        "news_list", "teams_list", "teams_get", "teams_schedule"
+      ],
+      "_hideParams": "Command-line plumbing the agents don't need; agent mode (compact JSON, no prompts) is always on.",
+      "hideParams": [
+        "agent", "json", "csv", "plain", "human-friendly", "no-color", "no-input", "no-cache", "no-learn",
+        "quiet", "yes", "dry-run", "data-source", "max-age", "rate-limit", "timeout", "db"
+      ],
+      "defaults": { "agent": true }
+    },
     "demo": {
       "description": "A built-in test server: echo text back, tell the time, and a pretend note writer (it changes nothing, but says it would)",
       "command": "node",
       "args": ["demo-server.mjs"],
-      "enabled": true
+      "enabled": false
     }
   }
 }

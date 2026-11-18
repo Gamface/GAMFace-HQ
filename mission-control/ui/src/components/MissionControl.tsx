@@ -17,6 +17,7 @@ import TeamPage from "./TeamPage";
 import RoutinesPage from "./RoutinesPage";
 import SkillsPage from "./SkillsPage";
 import AssetsPage from "./AssetsPage";
+import ToolsPage from "./ToolsPage";
 import ProjectsPage from "./ProjectsPage";
 import FilesPage from "./FilesPage";
 import ProjectSwitcher from "./ProjectSwitcher";
@@ -276,6 +277,7 @@ export default function MissionControl() {
       {view === "team" && <TeamPage />}
       {view === "routines" && <RoutinesPage />}
       {view === "skills" && <SkillsPage />}
+      {view === "tools" && <ToolsPage />}
       {view === "assets" && <AssetsPage />}
       {view === "projects" && <ProjectsPage />}
       {view === "files" && <FilesPage />}

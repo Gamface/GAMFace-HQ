@@ -34,6 +34,9 @@ export function parseConfig(text) {
     if (!NAME.test(name)) throw new Error(`Server name "${name}" must be lowercase letters, digits, - or _`);
     if (!s || typeof s.command !== "string" || !s.command) throw new Error(`Server "${name}" needs a command`);
     if (s.args !== undefined && (!Array.isArray(s.args) || s.args.some((a) => typeof a !== "string"))) throw new Error(`Server "${name}": args must be a list of strings`);
+    if (s.only !== undefined && (!Array.isArray(s.only) || s.only.some((a) => typeof a !== "string"))) throw new Error(`Server "${name}": only must be a list of tool names`);
+    if (s.hideParams !== undefined && (!Array.isArray(s.hideParams) || s.hideParams.some((a) => typeof a !== "string"))) throw new Error(`Server "${name}": hideParams must be a list of names`);
+    if (s.defaults !== undefined && (typeof s.defaults !== "object" || Array.isArray(s.defaults) || s.defaults === null)) throw new Error(`Server "${name}": defaults must be an object`);
     out[name] = {
       name,
       description: typeof s.description === "string" ? s.description : "",
@@ -43,6 +46,11 @@ export function parseConfig(text) {
       enabled: s.enabled !== false,
       readOnly: s.readOnly === true,
       tools: s.tools && typeof s.tools === "object" ? s.tools : {},
+      // When set, only these of the server's tools are offered (an allowlist)
+      only: s.only ? new Set(s.only) : null,
+      // Parameters the agents never see or set (plumbing flags), and values sent on every call
+      hideParams: new Set(s.hideParams ?? []),
+      defaults: s.defaults ?? {},
     };
   }
   return out;
@@ -64,6 +72,22 @@ export function isReadOnly(server, tool) {
   if (own && typeof own.readOnly === "boolean") return own.readOnly;
   if (server.readOnly) return true;
   return tool.annotations?.readOnlyHint === true && tool.annotations?.destructiveHint !== true;
+}
+
+/** A tool's parameters as the agents see them: hidden ones left out. Exported for tests. */
+export function visibleSchema(server, schema) {
+  if (!schema || !server.hideParams.size) return schema;
+  const props = Object.fromEntries(Object.entries(schema.properties ?? {}).filter(([k]) => !server.hideParams.has(k)));
+  const required = (schema.required ?? []).filter((k) => !server.hideParams.has(k));
+  return { ...schema, properties: props, ...(schema.required ? { required } : {}) };
+}
+
+/** The arguments actually sent: hidden ones dropped, then the server's defaults for parameters this tool has. Exported for tests. */
+export function callArgs(server, schema, args) {
+  const has = new Set(Object.keys(schema?.properties ?? {}));
+  const out = Object.fromEntries(Object.entries(args).filter(([k]) => !server.hideParams.has(k)));
+  for (const [k, v] of Object.entries(server.defaults)) if (has.has(k)) out[k] = v;
+  return out;
 }
 
 /** A tool result as text: text parts joined, other parts named, capped. */
@@ -122,19 +146,21 @@ async function connect(server) {
 
 async function listTools(server) {
   const c = await connect(server);
-  if (Date.now() - c.listedAt < LIST_CACHE_MS) return c.tools;
-  const all = [];
-  let cursor;
-  do {
-    const page = await c.client.listTools(cursor ? { cursor } : undefined);
-    all.push(...page.tools);
-    cursor = page.nextCursor;
-  } while (cursor && all.length < 500);
-  c.tools = all
-    .filter((t) => server.tools[t.name]?.enabled !== false)
-    .map((t) => ({ name: t.name, description: t.description ?? "", inputSchema: t.inputSchema, readOnly: isReadOnly(server, t), annotations: t.annotations ?? {} }));
-  c.listedAt = Date.now();
-  return c.tools;
+  if (Date.now() - c.listedAt >= LIST_CACHE_MS) {
+    const all = [];
+    let cursor;
+    do {
+      const page = await c.client.listTools(cursor ? { cursor } : undefined);
+      all.push(...page.tools);
+      cursor = page.nextCursor;
+    } while (cursor && all.length < 500);
+    // The server's own list is cached; the settings are applied on every read
+    c.tools = all;
+    c.listedAt = Date.now();
+  }
+  return c.tools
+    .filter((t) => server.tools[t.name]?.enabled !== false && (!server.only || server.only.has(t.name)))
+    .map((t) => ({ name: t.name, description: t.description ?? "", inputSchema: visibleSchema(server, t.inputSchema), readOnly: isReadOnly(server, t), annotations: t.annotations ?? {} }));
 }
 
 // --- HTTP -------------------------------------------------------------------------------
@@ -183,9 +209,12 @@ export function createServer(servers) {
         const tool = tools.find((t) => t.name === body.tool);
         if (!tool) return send(res, 404, { error: `${server.name} has no tool "${body.tool}"` });
         if (!tool.readOnly && body.allowChange !== true) return send(res, 403, { error: `${server.name}.${tool.name} changes things, so it needs approval` });
-        const args = body.args && typeof body.args === "object" && !Array.isArray(body.args) ? body.args : {};
+        const given = body.args && typeof body.args === "object" && !Array.isArray(body.args) ? body.args : {};
         const timeout = Math.min(300000, Math.max(1000, Number(body.timeoutMs) || 60000));
         const c = await connect(server);
+        // The full schema (with hidden parameters) decides which defaults apply
+        const raw = c.tools.find((t) => t.name === tool.name);
+        const args = callArgs(server, raw?.inputSchema, given);
         const started = Date.now();
         try {
           const out = await c.client.callTool({ name: tool.name, arguments: args }, undefined, { timeout });

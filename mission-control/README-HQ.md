@@ -298,7 +298,20 @@ routines, skills, assets and memories; `?project=<id>|general` on `/api/hive`,
 
 Agents can use outside tools: MCP servers such as the ones
 [CLI Printing Press](https://github.com/mvanhorn/cli-printing-press) prints for an API or
-website, or a search API.
+website, or a search API. The **Tools** page (wrench icon) lists them, shows which are
+read-only and which change things, and lets you try any read-only tool.
+
+Installed:
+
+| Server | Tools | Key |
+|---|---|---|
+| `wikipedia` | `search`, `article` (written for Mission Control) | none |
+| `brave` | `web_search`, `news_search` through the Brave Search API, so agents can search without search-engine pages and their bot checks (written for Mission Control) | `BRAVE_API_KEY` in `tools/.env`: get a free key at api-dashboard.search.brave.com, then `docker compose up -d tools`. Without it the tools say how to set it up |
+| `espn` | `today`, `scores`, `odds`, `trending`, `compare`, `transactions`, `boxscore`, `recap`, `news_list`, `teams_list`, `teams_get`, `teams_schedule` ([Printing Press library](https://github.com/mvanhorn/printing-press-library), built from a reviewed, pinned commit) | none |
+
+ESPN's `standings`, `leaders`, `injuries`, `scoreboard_get` and `rankings_get` are left out:
+their results are 0.2–2.4 MB and ignore `select`, so they always exceed the size limit.
+The `demo` server is still there, switched off (`"enabled": false`).
 
 - **Jarvis Tools** is the teammate that uses them. It sees the installed read-only tools
   (names, descriptions, parameters), calls one per step, reads the result and answers only
@@ -337,7 +350,12 @@ website, or a search API.
   approve a routine's call, and read-only means read-only. The card says what was left out.
 - Tool output is treated like a web page: untrusted, and cleaned of private-context markers
   and secrets before anything sees it.
-- A built-in `demo` server (echo, time, and a pretend note writer) is there to try things.
+- **Per-server settings in `tools.json`:** `only` (an allowlist of the server's tools),
+  `tools.<name>.enabled` / `.readOnly`, `hideParams` (parameters the agents never see or set,
+  like a CLI's `--no-color`), and `defaults` (sent on every call to tools that have them, like
+  ESPN's `agent: true`).
+- After changing `tools/Dockerfile` or `tools/tools.json`, use `docker compose up -d --build tools`
+  (or `--force-recreate`); a plain `restart` once left the harness unable to find the container.
 
 API: `GET /api/tools` (servers and tools; `?fresh=1` skips the one-minute cache),
 `POST /api/tools/call { server, tool, args }`. The tools service: `GET /tools`, `POST /call`,
