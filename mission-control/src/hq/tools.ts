@@ -4,10 +4,11 @@ import { redact } from "./guard";
 import { sanitize } from "./privacy";
 
 // Tools for the agents: MCP servers run by the tools service (tools/, its own container).
-// The harness lists their tools and calls them over HTTP. Step 1 of tool support:
-// only read-only tools can be called; tools that change things wait for approvals.
-// Tool output comes from outside services, so it's treated like a web page: untrusted,
-// cleaned of private-context markers and secrets before any model or log sees it.
+// The harness lists their tools and calls them over HTTP. Read-only tools just run.
+// A tool that changes things runs only after the user approves that exact call, and
+// never in routines or read-only runs. Tool output comes from outside services, so it's
+// treated like a web page: untrusted, cleaned of private-context markers and secrets
+// before any model or log sees it.
 
 export interface ToolInfo {
   server: string;
@@ -15,6 +16,25 @@ export interface ToolInfo {
   description: string;
   inputSchema?: Record<string, unknown>;
   readOnly: boolean;
+  /** The tool's own MCP hints (readOnlyHint, destructiveHint, …) */
+  annotations?: { destructiveHint?: boolean; readOnlyHint?: boolean; [k: string]: unknown };
+}
+
+/**
+ * Whether a tool that changes things may also destroy or overwrite something. MCP says
+ * a tool is destructive unless it says otherwise, so only destructiveHint: false is not.
+ */
+export function isDestructive(t: ToolInfo): boolean {
+  return !t.readOnly && t.annotations?.destructiveHint !== false;
+}
+
+/**
+ * The tools a card may use: read-only tools always; tools that change things only on
+ * cards you started that aren't read-only (never routines: nobody is there to approve).
+ */
+export function toolsFor(task: { readOnly?: boolean; routine: boolean }, servers: ToolServer[]): ToolInfo[] {
+  const mayChange = !task.readOnly && !task.routine;
+  return servers.flatMap((s) => (s.ok ? s.tools.filter((t) => t.readOnly || mayChange) : []));
 }
 
 export interface ToolServer {
@@ -111,16 +131,18 @@ export class ToolsClient {
   }
 
   /**
-   * Calls a read-only tool. Tools that change things are refused here (and by the
-   * tools service) until approvals for tools exist.
+   * Calls a tool. A tool that changes things runs only with `approved: true`, which the
+   * caller passes after the user approved this exact call; the tools service checks too.
    */
-  async call(server: string, tool: string, args: Record<string, unknown>, timeoutMs = 60_000): Promise<ToolResult> {
+  async call(server: string, tool: string, args: Record<string, unknown>, opts: { approved?: boolean; timeoutMs?: number } = {}): Promise<ToolResult> {
+    const timeoutMs = opts.timeoutMs ?? 60_000;
     const info = await this.find(server, tool);
     if (!info) throw new Error(`No tool ${server}.${tool}`);
-    if (!info.readOnly) throw new Error(`${server}.${tool} changes things, and tools that change things need approvals (not built yet)`);
+    const allowChange = !info.readOnly && opts.approved === true;
+    if (!info.readOnly && !allowChange) throw new Error(`${server}.${tool} changes things, so it needs your approval first`);
     const out = await this.request<ToolResult>(
       "/call",
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server, tool, args, timeoutMs }) },
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server, tool, args, timeoutMs, ...(allowChange ? { allowChange } : {}) }) },
       timeoutMs + 10_000,
     );
     return { ...out, text: cleanToolText(out.text ?? "") };

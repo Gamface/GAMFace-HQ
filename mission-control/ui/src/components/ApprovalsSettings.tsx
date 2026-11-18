@@ -10,6 +10,7 @@ interface Policy {
   click: Mode;
   search: Mode;
   tool: Mode;
+  change: Mode;
   timeoutMinutes: number;
 }
 interface Decided {
@@ -31,6 +32,11 @@ const ROWS: { key: keyof Omit<Policy, "timeoutMinutes">; label: string; hint: st
   { key: "click", label: "Clicking a button", hint: "Buttons, menus and script links (plain links never ask)" },
   { key: "search", label: "Searching a site", hint: "Typing into a search box and searching" },
   { key: "tool", label: "Tool calls from private context", hint: "Sending a request to an outside tool when Jarvis wrote it after seeing your notes or memories" },
+  {
+    key: "change",
+    label: "Tools that change things",
+    hint: "Saving, sending or creating something through a tool. Tools that may delete or overwrite always ask, and routines never get these tools",
+  },
 ];
 const STATUS: Record<string, string> = {
   approved: "text-emerald-300",

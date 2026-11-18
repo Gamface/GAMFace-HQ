@@ -61,7 +61,7 @@ import { HistoryIndex, SKILL_DRAFT_SYSTEM, Skills, skillDraftPrompt } from "./hq
 import type { Skill } from "./hq/skills";
 import { VIDEO_MAX_SECONDS, VideoClient, extractScene, videoInstructions, wantsVertical, wantsVideo } from "./hq/video";
 import type { SceneSpec } from "./hq/video";
-import { ToolsClient, refuseFromHost } from "./hq/tools";
+import { ToolsClient, isDestructive, refuseFromHost, toolsFor } from "./hq/tools";
 import { KNOWN_VOICES, VoiceClient, extractNarration, sceneVoice, wantsCaptions, wantsOwnAudio, wantsVoice } from "./hq/voice";
 import type { Word } from "./hq/voice";
 import { AssetPatchSchema, AssetUploadSchema, Assets, SYSTEM_FONTS, assetBlock, publicName } from "./hq/assets";
@@ -206,6 +206,8 @@ function describeAction(a: Pick<Approval, "kind" | "target" | "text" | "site">):
       return text ? `type ${text} into “${a.target}” and submit it on ${a.site}` : `submit “${a.target}” on ${a.site}`;
     case "tool":
       return `send ${text || "a request"} to the tool ${a.target} (its instructions came from your private notes or memories)`;
+    case "change":
+      return `use ${a.target}, which changes things, with ${text || "no arguments"}`;
     default:
       return `click “${a.target}” on ${a.site}`;
   }
@@ -851,7 +853,7 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
   }
 }
 
-/** What the installed read-only tools do, for the router and the lead ("demo: echo (Repeats…)"). */
+/** What the installed tools do, for the router and the lead ("demo: echo (Repeats…), add_note (asks first: …)"). */
 async function refreshToolsSummary(fresh = false) {
   if (!tools) return setToolsSummary(null);
   try {
@@ -859,8 +861,8 @@ async function refreshToolsSummary(fresh = false) {
     const parts = servers
       .filter((s) => s.ok)
       .map((s) => {
-        const ro = s.tools.filter((t) => t.readOnly);
-        return ro.length ? `${s.name}: ${ro.map((t) => `${t.name} (${t.description.replace(/\s+/g, " ").slice(0, 60)})`).join(", ")}` : "";
+        const desc = (t: { readOnly: boolean; description: string }) => `${t.readOnly ? "" : "asks first: "}${t.description.replace(/\s+/g, " ").slice(0, 60)}`;
+        return s.tools.length ? `${s.name}: ${s.tools.map((t) => `${t.name} (${desc(t)})`).join(", ")}` : "";
       })
       .filter(Boolean);
     setToolsSummary(parts.length ? parts.join("; ") : null);
@@ -869,12 +871,19 @@ async function refreshToolsSummary(fresh = false) {
   }
 }
 
-/** A Tools turn: the agent calls the installed read-only tools step by step, then answers. */
+/**
+ * A Tools turn: the agent calls the installed tools step by step, then answers.
+ * Read-only tools just run. A tool that changes things asks the user about that exact
+ * call first, and isn't offered at all in routines or read-only runs.
+ */
 async function useTools(task: Task, request: string, signal: AbortSignal, push: (text: string) => void, privateTask = false): Promise<TurnResult> {
   if (!tools) throw new Error("No tools service is set up (TOOLS_URL)");
   const servers = await tools.list();
-  const available = servers.flatMap((s) => (s.ok ? s.tools.filter((t) => t.readOnly) : []));
-  if (!available.length) throw new Error("no read-only tools are installed");
+  const available = toolsFor({ readOnly: task.readOnly, routine: isRoutine(task) }, servers);
+  if (!available.length) throw new Error("no tools are installed that this card may use");
+  const hidden = servers.flatMap((s) => (s.ok ? s.tools : [])).length - available.length;
+  if (hidden > 0) push(`[${hidden > 1 ? `${hidden} tools that change things aren't` : "1 tool that changes things isn't"} available: ${isRoutine(task) ? "routines" : "read-only runs"} only use read-only tools.]\n`);
+  const byName = new Map(available.map((t) => [`${t.server}.${t.name}`, t]));
   emit(task, "executing_tool");
   let calls = 0;
   const answer = await runToolAgent({
@@ -882,14 +891,19 @@ async function useTools(task: Task, request: string, signal: AbortSignal, push: 
     tools: available,
     call: async (server, tool, args) => {
       calls++;
-      // Instructions written after seeing private notes or memories may carry them: ask first,
-      // showing exactly what would be sent (a declined call tells the agent, which then answers)
-      if (privateTask) {
-        const shown = JSON.stringify(args);
-        const refusal = await askApproval(task, "tools", { kind: "tool", target: `${server}.${tool}`, text: shown, url: `tool:${server}.${tool}`, site: server }, signal);
-        if (refusal) return { text: `Not sent: ${refusal}. Don't try this call again; answer with what you have.`, isError: true, ms: 0 };
+      const info = byName.get(`${server}.${tool}`);
+      const shown = JSON.stringify(args);
+      const where = { target: `${server}.${tool}`, text: shown, url: `tool:${server}.${tool}`, site: server };
+      // A tool that changes things: the user approves this exact call (one that may destroy or
+      // overwrite something always asks, whatever the settings). This also covers private context.
+      // A read-only call from instructions written after seeing private notes or memories asks too.
+      const ask = info && !info.readOnly ? { kind: "change" as const, ...where, highRisk: isDestructive(info) } : privateTask ? { kind: "tool" as const, ...where } : null;
+      if (ask) {
+        const refusal = await askApproval(task, "tools", ask, signal);
+        if (refusal) return { text: `Not done: ${refusal}. Don't try this call again; answer with what you have.`, isError: true, ms: 0 };
+        hive.log("tools", "approved", `${server}.${tool} ${shown.slice(0, 120)}`, task.id);
       }
-      return tools.call(server, tool, args);
+      return tools.call(server, tool, args, { approved: Boolean(ask) });
     },
     chat: roleJson("tools", { privateTask, override: task.targetAgent === "tools" ? task.modelOverride : undefined }),
     model: "tools",

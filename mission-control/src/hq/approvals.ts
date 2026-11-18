@@ -13,8 +13,9 @@
 import crypto from "node:crypto";
 import { z } from "zod";
 
-// "tool": a call to an outside tool whose instructions may carry private material
-export const ActionKindSchema = z.enum(["type", "submit", "click", "search", "tool"]);
+// "tool": a read-only tool call whose instructions may carry private material
+// "change": a call to a tool that changes things (always the user's call, never a routine's)
+export const ActionKindSchema = z.enum(["type", "submit", "click", "search", "tool", "change"]);
 export type ActionKind = z.infer<typeof ActionKindSchema>;
 const Mode = z.enum(["ask", "allow", "block"]);
 export type ApprovalMode = z.infer<typeof Mode>;
@@ -27,6 +28,8 @@ export const ApprovalPolicySchema = z.object({
   search: Mode.default("allow"),
   // A tool call whose instructions came from a lead that saw your private notes or memories
   tool: Mode.default("ask"),
+  // A tool that changes things. Tools that may destroy or overwrite something always ask.
+  change: Mode.default("ask"),
   // How long a request waits for an answer before it counts as denied
   timeoutMinutes: z.number().int().min(1).max(240).default(15),
 });
@@ -43,6 +46,8 @@ export interface ActionRequest {
   site: string;
   /** JPEG screenshot (base64) with the target outlined */
   screenshot?: string;
+  /** Always ask, whatever the settings (a tool that may destroy or overwrite something) */
+  highRisk?: boolean;
 }
 
 export interface Approval {
@@ -116,7 +121,7 @@ export class ApprovalCenter {
     req: ActionRequest,
     ctx: { taskId: string; taskTitle: string; agent: string; unattended: boolean; signal?: AbortSignal },
   ): Promise<string | null> {
-    const risk = isHighRisk(req.kind, req.target) ? "high" : "normal";
+    const risk = req.highRisk || isHighRisk(req.kind, req.target) ? "high" : "normal";
     const mode = this.policy[req.kind];
     const base: Omit<Approval, "status"> = {
       id: crypto.randomUUID(),

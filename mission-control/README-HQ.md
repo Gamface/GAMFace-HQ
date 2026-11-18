@@ -323,10 +323,18 @@ website, or a search API.
 - **Adding a tool:** install its program in `tools/Dockerfile` with a fixed version, add it to
   `tools/tools.json`, put any API key it needs in `tools/.env` (named in that server's `env`),
   then `docker compose up -d --build tools`. Only the variables a server names reach it.
-- **Read-only tools only, for now.** A tool counts as read-only when its server is marked
+- **Read-only tools just run.** A tool counts as read-only when its server is marked
   `"readOnly": true`, when the tool says so itself (MCP `readOnlyHint`), or when
-  `tools.<name>.readOnly` says so. Tools that change things are refused, by the harness and by
-  the tools service, until approvals for tools exist.
+  `tools.<name>.readOnly` says so.
+- **Tools that change things ask first.** Each call waits for your approval on the dashboard
+  (or in Telegram) and shows exactly what would be sent ("use demo.add_note, which changes
+  things, with {"text":"buy milk"}"). A declined call isn't made, and the agent says so in its
+  answer. Set *Tools that change things* to allow or block in the Team page's approvals section.
+  A tool that may delete or overwrite something (MCP `destructiveHint`, which counts as true
+  unless the tool says `false`) is high risk: it always asks, and "approve for this card" doesn't
+  cover it. The tools service only runs a change when the harness says it was approved.
+- **Routines and read-only runs** never see tools that change things: nobody is there to
+  approve a routine's call, and read-only means read-only. The card says what was left out.
 - Tool output is treated like a web page: untrusted, and cleaned of private-context markers
   and secrets before anything sees it.
 - A built-in `demo` server (echo, time, and a pretend note writer) is there to try things.

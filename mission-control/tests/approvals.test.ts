@@ -196,3 +196,33 @@ test("tool calls from private context ask by default, and the tool setting can a
   assert.equal(await c.check(toolReq, ctx()), "blocked by your approval settings");
   assert.equal(ApprovalPolicySchema.parse({}).tool, "ask");
 });
+
+test("tools that change things: ask by default; a destructive one always asks, even on allow or a card grant", async () => {
+  const { c, requests } = center();
+  assert.equal(ApprovalPolicySchema.parse({}).change, "ask");
+  const note = req({ kind: "change", target: "demo.add_note", text: '{"text":"x"}', url: "tool:demo.add_note", site: "demo" });
+  const wipe = { ...note, target: "demo.wipe", url: "tool:demo.wipe", highRisk: true };
+
+  // Normal change, approved for the rest of the card: the next one on that server doesn't ask
+  const first = c.check(note, ctx());
+  await new Promise((r) => setImmediate(r));
+  assert.equal(requests[0].risk, "normal");
+  c.decide(requests[0].id, true, "you", "card");
+  assert.equal(await first, null);
+  assert.equal(await c.check(note, ctx()), null);
+  assert.equal(requests.length, 1);
+
+  // A destructive one asks anyway (the card grant doesn't cover it), and so does "allow"
+  c.policy = ApprovalPolicySchema.parse({ change: "allow" });
+  const destructive = c.check(wipe, ctx());
+  await new Promise((r) => setImmediate(r));
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].risk, "high");
+  c.decide(requests[1].id, false, "you");
+  assert.match((await destructive) ?? "", /declined/);
+
+  // "block" stops every change, destructive or not
+  c.policy = ApprovalPolicySchema.parse({ change: "block" });
+  assert.equal(await c.check(note, ctx()), "blocked by your approval settings");
+  assert.equal(await c.check(wipe, ctx()), "blocked by your approval settings");
+});

@@ -91,6 +91,8 @@ test("the tool list shows names, descriptions and parameters", () => {
   assert.equal(describeParams({ properties: { n: { type: "number" } } }), "n?: number");
   assert.equal(describeParams(undefined), "no parameters");
   assert.match(toolList(TOOLS), /- demo\.echo: Repeats the text back\n {2}parameters: text: string/);
+  const note: ToolInfo = { server: "demo", name: "add_note", description: "Saves a note", readOnly: false };
+  assert.match(toolList([note]), /- demo\.add_note \[CHANGES THINGS: the user approves each call\]: Saves a note/);
 });
 
 test("the Tools teammate is offered only while tools are installed", async () => {

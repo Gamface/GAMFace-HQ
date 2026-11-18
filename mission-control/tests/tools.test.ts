@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { ToolsClient, cleanToolText, refuseFromHost, splitToolName } from "../src/hq/tools";
+import { ToolsClient, cleanToolText, isDestructive, refuseFromHost, splitToolName, toolsFor } from "../src/hq/tools";
+import type { ToolServer } from "../src/hq/tools";
 
 /** A fake tools service: one server with a read-only tool and one that changes things. */
 async function fakeService(onCall: (body: Record<string, unknown>) => unknown) {
@@ -69,15 +70,43 @@ test("calls a read-only tool and cleans what comes back", async () => {
   }
 });
 
-test("a tool that changes things is refused before it reaches the service", async () => {
+test("a tool that changes things runs only once approved", async () => {
   const f = await fakeService(() => ({ text: "saved", isError: false, ms: 1 }));
   try {
-    await assert.rejects(f.client.call("demo", "add_note", { text: "x" }), /needs? approvals/);
+    await assert.rejects(f.client.call("demo", "add_note", { text: "x" }), /needs your approval/);
     await assert.rejects(f.client.call("demo", "nope", {}), /No tool demo\.nope/);
     assert.equal(f.calls.length, 0);
+    // After the user approved it, the call goes through and tells the service so
+    assert.equal((await f.client.call("demo", "add_note", { text: "x" }, { approved: true })).text, "saved");
+    assert.equal(f.calls[0].allowChange, true);
+    // A read-only call never carries allowChange, approved or not
+    await f.client.call("demo", "echo", { text: "y" }, { approved: true });
+    assert.equal(f.calls[1].allowChange, undefined);
   } finally {
     f.close();
   }
+});
+
+test("routines and read-only runs only get read-only tools; changes are destructive unless they say not", () => {
+  const servers: ToolServer[] = [
+    {
+      name: "demo",
+      description: "",
+      ok: true,
+      tools: [
+        { server: "demo", name: "echo", description: "", readOnly: true },
+        { server: "demo", name: "add_note", description: "", readOnly: false, annotations: { destructiveHint: false } },
+        { server: "demo", name: "wipe", description: "", readOnly: false },
+      ],
+    },
+    { name: "down", description: "", ok: false, tools: [{ server: "down", name: "x", description: "", readOnly: true }] },
+  ];
+  const names = (t: { readOnly?: boolean; routine: boolean }) => toolsFor(t, servers).map((x) => x.name);
+  assert.deepEqual(names({ routine: false }), ["echo", "add_note", "wipe"]);
+  assert.deepEqual(names({ routine: true }), ["echo"]);
+  assert.deepEqual(names({ readOnly: true, routine: false }), ["echo"]);
+  const [echo, note, wipe] = servers[0].tools;
+  assert.deepEqual([isDestructive(echo), isDestructive(note), isDestructive(wipe)], [false, false, true]);
 });
 
 test("a missing tools service gives a clear error", async () => {
