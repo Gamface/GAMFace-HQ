@@ -15,9 +15,10 @@
       "readOnly": true
     },
     "espn": {
-      "description": "Live scores, schedules, standings, box scores and rankings for NFL, NBA, MLB, NHL, college, MLS, EPL and WNBA (no key needed)",
+      "description": "Live scores, betting lines, box scores, recaps, team schedules, news and trending stories for NFL, NBA, MLB, NHL, college, MLS, EPL and WNBA (no key needed)",
       "command": "espn-pp-mcp",
       "args": [],
+      "notes": "sport and league go in pairs: basketball nba, basketball wnba, basketball mens-college-basketball, football nfl, football college-football, baseball mlb, hockey nhl, soccer eng.1 (Premier League), soccer usa.1 (MLS). today needs neither. Game ids for boxscore and recap come from scores.",
       "_only": "Lookups that return usable results (checked 2026-11-18). Left out: standings, leaders, injuries, scoreboard_get and rankings_get (their results are 0.2-2.4 MB and ignore select, so they always exceed the size limit), h2h, rivals and streak (need a local sync first), watch (polls forever), duplicates, import/export and the learnings/teach/playbook tools that edit its local knowledge base.",
       "only": [
         "today", "scores", "odds", "trending", "compare", "transactions", "boxscore", "recap",
@@ -29,6 +30,15 @@
         "quiet", "yes", "dry-run", "data-source", "max-age", "rate-limit", "timeout", "db"
       ],
       "defaults": { "agent": true }
+    },
+    "images": {
+      "description": "Make pictures from a description with the image model on this PC's graphics card (ComfyUI, about 1.5 minutes each)",
+      "command": "node",
+      "args": ["images-server.mjs"],
+      "env": { "COMFY_URL": "http://host.docker.internal:8188" },
+      "notes": "Write the prompt in English as a visual description (subject, setting, light, style). One call makes one picture; it is attached to the card by itself, so just say what you made.",
+      "timeoutMs": 600000,
+      "readOnly": true
     },
     "demo": {
       "description": "A built-in test server: echo text back, tell the time, and a pretend note writer (it changes nothing, but says it would)",

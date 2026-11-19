@@ -42,13 +42,16 @@ export function describeParams(schema: Record<string, unknown> | undefined): str
 
 /** The tool list as the model sees it. Exported for tests. */
 export function toolList(tools: ToolInfo[], max = 40): string {
+  const noted = new Set<string>();
   return sanitize(
     tools
       .slice(0, max)
-      .map(
-        (t) =>
-          `- ${t.server}.${t.name}${t.readOnly ? "" : " [CHANGES THINGS: the user approves each call]"}: ${t.description.replace(/\s+/g, " ").slice(0, 200)}\n  parameters: ${describeParams(t.inputSchema)}`,
-      )
+      .map((t) => {
+        // A server's notes once, before its first tool
+        const notes = t.notes && !noted.has(t.server) ? `NOTES FOR ${t.server}: ${t.notes.replace(/\s+/g, " ")}\n` : "";
+        noted.add(t.server);
+        return `${notes}- ${t.server}.${t.name}${t.readOnly ? "" : " [CHANGES THINGS: the user approves each call]"}: ${t.description.replace(/\s+/g, " ").slice(0, 200)}\n  parameters: ${describeParams(t.inputSchema)}`;
+      })
       .join("\n"),
   );
 }

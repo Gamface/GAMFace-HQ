@@ -18,6 +18,10 @@ export interface ToolInfo {
   readOnly: boolean;
   /** The tool's own MCP hints (readOnlyHint, destructiveHint, …) */
   annotations?: { destructiveHint?: boolean; readOnlyHint?: boolean; [k: string]: unknown };
+  /** Its server's tips from tools.json (valid values, how the tools fit together) */
+  notes?: string;
+  /** How long one call may take (its server's timeoutMs in tools.json) */
+  timeoutMs?: number;
 }
 
 /**
@@ -42,13 +46,34 @@ export interface ToolServer {
   description: string;
   ok: boolean;
   error?: string;
+  notes?: string;
+  timeoutMs?: number;
   tools: ToolInfo[];
+}
+
+/** A picture or video clip a tool made */
+export interface ToolMedia {
+  mimeType: "image/png" | "image/jpeg" | "image/webp" | "video/mp4";
+  /** base64 */
+  data: string;
 }
 
 export interface ToolResult {
   text: string;
   isError: boolean;
   ms: number;
+  /** Pictures and clips the tool made (saved on the card by the caller; never shown to a model) */
+  media?: ToolMedia[];
+}
+
+const MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "video/mp4"]);
+
+/** The pictures and clips in a tools-service reply that are well formed. Exported for tests. */
+export function toolMedia(raw: unknown): ToolMedia[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((i): i is ToolMedia => Boolean(i) && MEDIA_TYPES.has((i as ToolMedia).mimeType) && typeof (i as ToolMedia).data === "string" && /^[A-Za-z0-9+/]+=*$/.test((i as ToolMedia).data))
+    .slice(0, 4);
 }
 
 /** "demo.echo" → { server: "demo", tool: "echo" } */
@@ -120,7 +145,10 @@ export class ToolsClient {
   async list(fresh = false): Promise<ToolServer[]> {
     if (!fresh && this.cache && Date.now() - this.cache.at < 60_000) return this.cache.servers;
     const out = await this.request<{ servers: (Omit<ToolServer, "tools"> & { tools: Omit<ToolInfo, "server">[] })[] }>("/tools", {}, 45_000);
-    const servers = out.servers.map((s) => ({ ...s, tools: s.tools.map((t) => ({ ...t, server: s.name })) }));
+    const servers = out.servers.map((s) => ({
+      ...s,
+      tools: s.tools.map((t) => ({ ...t, server: s.name, ...(s.notes ? { notes: s.notes } : {}), ...(s.timeoutMs ? { timeoutMs: s.timeoutMs } : {}) })),
+    }));
     this.cache = { at: Date.now(), servers };
     return servers;
   }
@@ -135,16 +163,17 @@ export class ToolsClient {
    * caller passes after the user approved this exact call; the tools service checks too.
    */
   async call(server: string, tool: string, args: Record<string, unknown>, opts: { approved?: boolean; timeoutMs?: number } = {}): Promise<ToolResult> {
-    const timeoutMs = opts.timeoutMs ?? 60_000;
     const info = await this.find(server, tool);
     if (!info) throw new Error(`No tool ${server}.${tool}`);
+    const timeoutMs = opts.timeoutMs ?? info.timeoutMs ?? 60_000;
     const allowChange = !info.readOnly && opts.approved === true;
     if (!info.readOnly && !allowChange) throw new Error(`${server}.${tool} changes things, so it needs your approval first`);
-    const out = await this.request<ToolResult>(
+    const out = await this.request<Omit<ToolResult, "media"> & { media?: unknown }>(
       "/call",
       { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server, tool, args, timeoutMs, ...(allowChange ? { allowChange } : {}) }) },
       timeoutMs + 10_000,
     );
-    return { ...out, text: cleanToolText(out.text ?? "") };
+    const media = toolMedia(out.media);
+    return { text: cleanToolText(out.text ?? ""), isError: Boolean(out.isError), ms: out.ms, ...(media.length ? { media } : {}) };
   }
 }

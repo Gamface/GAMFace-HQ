@@ -25,7 +25,7 @@ RUN npm install --omit=dev --no-audit --no-fund
 
 COPY --from=espn /go/bin/espn-pp-mcp /go/bin/espn-pp-cli /usr/local/bin/
 
-COPY server.mjs demo-server.mjs wikipedia-server.mjs brave-server.mjs test.mjs ./
+COPY server.mjs demo-server.mjs wikipedia-server.mjs brave-server.mjs images-server.mjs test.mjs ./
 RUN useradd -m mctools && chown -R mctools /app
 USER mctools
 ENV PORT=3040 NODE_ENV=production

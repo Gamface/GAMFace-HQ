@@ -201,15 +201,22 @@ export async function printPdf(html: string, cdpBase: string): Promise<Buffer> {
   }
 }
 
-export const FILE_ID = /^[a-z0-9][a-z0-9-]{0,70}-[a-f0-9]{8}\.(pdf|mp4)$/;
+export const FILE_ID = /^[a-z0-9][a-z0-9-]{0,70}-[a-f0-9]{8}\.(pdf|mp4|png|jpg|webp)$/;
+export type FileExt = "pdf" | "mp4" | "png" | "jpg" | "webp";
 
-/** Saved PDF reports and rendered videos, in data/files. */
+/** The Content-Type a saved file is served with. */
+export function fileType(name: string): string {
+  const ext = name.slice(name.lastIndexOf(".") + 1);
+  return { mp4: "video/mp4", png: "image/png", jpg: "image/jpeg", webp: "image/webp" }[ext] ?? "application/pdf";
+}
+
+/** Saved PDF reports, rendered videos and pictures tools made, in data/files. */
 export class Files {
   constructor(private dir: string) {
     mkdirSync(dir, { recursive: true });
   }
 
-  save(title: string, pdf: Buffer, ext: "pdf" | "mp4" = "pdf"): { name: string; bytes: number } {
+  save(title: string, pdf: Buffer, ext: FileExt = "pdf"): { name: string; bytes: number } {
     const slug =
       title
         .toLowerCase()

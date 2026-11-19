@@ -93,6 +93,10 @@ test("the tool list shows names, descriptions and parameters", () => {
   assert.match(toolList(TOOLS), /- demo\.echo: Repeats the text back\n {2}parameters: text: string/);
   const note: ToolInfo = { server: "demo", name: "add_note", description: "Saves a note", readOnly: false };
   assert.match(toolList([note]), /- demo\.add_note \[CHANGES THINGS: the user approves each call\]: Saves a note/);
+  // A server's notes appear once, before its first tool
+  const withNotes = toolList(TOOLS.map((t) => ({ ...t, notes: "sport and league go in pairs" })));
+  assert.equal(withNotes.match(/NOTES FOR demo: sport and league go in pairs/g)?.length, 1);
+  assert.match(withNotes, /^NOTES FOR demo/);
 });
 
 test("the Tools teammate is offered only while tools are installed", async () => {

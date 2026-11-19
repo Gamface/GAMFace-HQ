@@ -21,7 +21,8 @@ export const TEAM: Record<AgentKey, TeamMember> = {
     name: "Jarvis",
     role: "lead and planner",
     prompt:
-      "You are Jarvis, a local AI engineering assistant running on WSL2. Break the request into clear, numbered steps and call out risks or missing information.",
+      "You are Jarvis, a local AI engineering assistant running on WSL2. Break the request into clear, numbered steps and call out risks or missing information. " +
+      "If neither you nor a teammate or installed tool can do what's asked (for example make a picture when no picture tool is installed), say so plainly in one sentence and say what would make it possible. Never invent a reason.",
   },
   coder: {
     key: "coder",
@@ -54,9 +55,10 @@ export const TEAM: Record<AgentKey, TeamMember> = {
   vision: {
     key: "vision",
     name: "Jarvis Vision",
-    role: "reads pictures: screenshots, photos, diagrams, documents",
+    role: "reads pictures the user attached: screenshots, photos, diagrams, documents (it can't make pictures)",
     prompt:
-      "You are Jarvis Vision. Look carefully at the attached pictures and answer about what they actually show: read text exactly, describe layouts, errors, diagrams and details. Say plainly when something is unclear or not visible.",
+      "You are Jarvis Vision. Look carefully at the attached pictures and answer about what they actually show: read text exactly, describe layouts, errors, diagrams and details. Say plainly when something is unclear or not visible. " +
+      "If no picture is attached, say only that no picture came with the request and that you read pictures but can't make them. Never guess at other attachments.",
   },
   tools: {
     key: "tools",
@@ -109,12 +111,28 @@ export function needsWeb(prompt: string): boolean {
   return WEB_SIGNS.test(prompt);
 }
 
+const MAKE_PICTURE =
+  // the verb, then (without passing code, an app or a page: "create a script that resizes images") the picture
+  /\b(make|create|draw|generate|paint|render|design|produce|imagine|sketch|illustrate)\b(?:(?!\b(?:scripts?|code|functions?|programs?|apps?|tools?|pages?|sites?|websites?|components?|class|folders?|galler(?:y|ies)|bots?|commands?)\b)[^.?!\n]){0,60}?\b(pictures?|photos?|photographs?|images?|drawings?|illustrations?|paintings?|portraits?|artwork|wallpapers?|logos?|posters?|icons?|sketch(es)?)\b/i;
+
+/** Whether the request asks for a new picture to be made (not one read). Exported for tests. */
+export function wantsPicture(prompt: string): boolean {
+  return MAKE_PICTURE.test(prompt);
+}
+
+/** Whether an installed tool makes pictures. */
+const canMakePictures = () => /\bgenerate_image\b/.test(toolsSummary ?? "");
+
 export function keywordRoute(prompt: string): AgentKey {
+  // "Make a photo of…" is for the picture tool (or Jarvis, to say there isn't one), never Vision
+  if (wantsPicture(prompt)) return canMakePictures() ? "tools" : "planner";
   for (const [key, pattern] of KEYWORDS) if (pattern.test(prompt)) return key;
   return "planner";
 }
 
 export async function routeTask(chat: JsonChat, model: string, prompt: string): Promise<{ agent: AgentKey; reason: string }> {
+  // Small routing models send "make a photo of…" to Vision, which only reads pictures
+  if (wantsPicture(prompt)) return canMakePictures() ? { agent: "tools", reason: "make a picture" } : { agent: "planner", reason: "no picture tool installed" };
   try {
     const data = await chat(model, [
       {

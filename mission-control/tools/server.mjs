@@ -4,7 +4,7 @@
 //   GET  /health                         -> { ok, servers: [{ name, ok, error? }] }
 //   GET  /tools                          -> { servers: [{ name, description, ok, error?, tools: [...] }] }
 //   POST /call { server, tool, args, timeoutMs?, allowChange? }
-//                                        -> { text, isError, ms } | { error }
+//                                        -> { text, isError, ms, media? } | { error }
 //
 // It runs in its own container: internet for the tools, but none of your files and
 // none of Mission Control's keys. Only the harness can reach it. A tool that isn't
@@ -19,6 +19,13 @@ import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotoc
 const PORT = Number(process.env.PORT || 3040);
 const CONFIG = process.env.TOOLS_CONFIG || new URL("./tools.json", import.meta.url).pathname;
 const MAX_TEXT = 20000;
+const MAX_CALL_MS = 600000;
+// Pictures (MCP image parts) and video clips (embedded MP4 resources) a tool returns are passed
+// on to the harness as `media`, which saves them on the card
+const MAX_MEDIA = 4;
+const MAX_MEDIA_BASE64 = 16 * 1024 * 1024;
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const VIDEO_TYPES = new Set(["video/mp4"]);
 const CONNECT_MS = 30000;
 const RETRY_MS = 30000;
 const LIST_CACHE_MS = 60000;
@@ -48,9 +55,13 @@ export function parseConfig(text) {
       tools: s.tools && typeof s.tools === "object" ? s.tools : {},
       // When set, only these of the server's tools are offered (an allowlist)
       only: s.only ? new Set(s.only) : null,
+      // Tips the agents see with this server's tools (valid values, how the tools fit together)
+      notes: typeof s.notes === "string" ? s.notes.slice(0, 800) : "",
       // Parameters the agents never see or set (plumbing flags), and values sent on every call
       hideParams: new Set(s.hideParams ?? []),
       defaults: s.defaults ?? {},
+      // How long one call may take (slow tools like picture making); the harness waits this long
+      timeoutMs: Number.isFinite(s.timeoutMs) ? Math.min(MAX_CALL_MS, Math.max(1000, s.timeoutMs)) : undefined,
     };
   }
   return out;
@@ -97,11 +108,28 @@ export function resultText(res) {
     if (c.type === "text") parts.push(c.text);
     else if (c.type === "resource" && typeof c.resource?.text === "string") parts.push(c.resource.text);
     else if (c.type === "resource_link") parts.push(`[link: ${c.name ?? ""} ${c.uri}]`);
+    else if (c.type === "image" && IMAGE_TYPES.has(c.mimeType)) continue; // passed on by resultMedia
+    else if (c.type === "resource" && VIDEO_TYPES.has(c.resource?.mimeType) && typeof c.resource?.blob === "string") continue; // likewise
     else parts.push(`[${c.type} omitted]`);
   }
   if (!parts.length && res?.structuredContent !== undefined) parts.push(JSON.stringify(res.structuredContent));
   const text = parts.join("\n").trim();
   return text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}\n[cut: ${text.length - MAX_TEXT} more characters]` : text;
+}
+
+/**
+ * The pictures (PNG, JPEG or WebP image parts) and video clips (MP4 resources with a blob) in a
+ * tool result, at most four, each capped. Exported for tests.
+ */
+export function resultMedia(res) {
+  const ok = (data) => typeof data === "string" && data.length > 0 && data.length <= MAX_MEDIA_BASE64;
+  return (res?.content ?? [])
+    .flatMap((c) => {
+      if (c.type === "image" && IMAGE_TYPES.has(c.mimeType) && ok(c.data)) return [{ mimeType: c.mimeType, data: c.data }];
+      if (c.type === "resource" && VIDEO_TYPES.has(c.resource?.mimeType) && ok(c.resource?.blob)) return [{ mimeType: c.resource.mimeType, data: c.resource.blob }];
+      return [];
+    })
+    .slice(0, MAX_MEDIA);
 }
 
 // --- Connections ----------------------------------------------------------------------
@@ -193,7 +221,7 @@ export function createServer(servers) {
         const out = await Promise.all(
           enabled().map(async (s) => {
             try {
-              return { name: s.name, description: s.description, ok: true, tools: await listTools(s) };
+              return { name: s.name, description: s.description, notes: s.notes || undefined, timeoutMs: s.timeoutMs, ok: true, tools: await listTools(s) };
             } catch (e) {
               return { name: s.name, description: s.description, ok: false, error: e instanceof Error ? e.message : String(e), tools: [] };
             }
@@ -210,7 +238,7 @@ export function createServer(servers) {
         if (!tool) return send(res, 404, { error: `${server.name} has no tool "${body.tool}"` });
         if (!tool.readOnly && body.allowChange !== true) return send(res, 403, { error: `${server.name}.${tool.name} changes things, so it needs approval` });
         const given = body.args && typeof body.args === "object" && !Array.isArray(body.args) ? body.args : {};
-        const timeout = Math.min(300000, Math.max(1000, Number(body.timeoutMs) || 60000));
+        const timeout = Math.min(server.timeoutMs ?? 300000, Math.max(1000, Number(body.timeoutMs) || 60000));
         const c = await connect(server);
         // The full schema (with hidden parameters) decides which defaults apply
         const raw = c.tools.find((t) => t.name === tool.name);
@@ -218,7 +246,8 @@ export function createServer(servers) {
         const started = Date.now();
         try {
           const out = await c.client.callTool({ name: tool.name, arguments: args }, undefined, { timeout });
-          return send(res, 200, { text: resultText(out), isError: Boolean(out.isError), ms: Date.now() - started });
+          const media = resultMedia(out);
+          return send(res, 200, { text: resultText(out), isError: Boolean(out.isError), ms: Date.now() - started, ...(media.length ? { media } : {}) });
         } catch (e) {
           return send(res, 200, { text: `The tool failed: ${e instanceof Error ? e.message : String(e)}`, isError: true, ms: Date.now() - started });
         }

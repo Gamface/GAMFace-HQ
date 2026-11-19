@@ -2,11 +2,12 @@ import { useEffect, useState } from "react";
 import { fileUrl, getJson, send } from "../api";
 import type { CardFile } from "../api";
 
-// A card's files: PDF reports and rendered videos. Buttons make a PDF from the
-// answer, or render (again) the Remotion scene in it. Agents make both on their own
-// when asked ("…as a PDF", "make a video…").
+// A card's files: PDF reports, rendered videos and pictures the Tools agent made. Buttons
+// make a PDF from the answer, or render (again) the Remotion scene in it. Agents make all
+// of them on their own when asked ("…as a PDF", "make a video…", "make a picture of…").
 
 const isVideo = (name: string) => name.endsWith(".mp4");
+const isPicture = (name: string) => /\.(png|jpg|webp)$/.test(name);
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e)).replace(/^\d+ /, "").replace(/^\{"error":"(.*)"\}$/, "$1");
 
 export default function FilesBar({
@@ -74,12 +75,22 @@ export default function FilesBar({
   };
 
   if (!files.length && !canMake) return null;
+  const pictures = files.filter((f) => isPicture(f.name));
   return (
     <div className="space-y-2">
+      {pictures.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {pictures.map((f) => (
+            <a key={f.name} href={fileUrl(f.name)} target="_blank" rel="noopener" title={`${f.name}: open full size`}>
+              <img src={fileUrl(f.name)} alt={f.name} loading="lazy" className="max-h-64 max-w-full rounded border border-slate-700 hover:border-cyan-500" />
+            </a>
+          ))}
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-2 text-xs">
         {files.map((f) => (
           <span key={f.name} className="flex items-center gap-1.5 bg-slate-950 border border-slate-700 rounded px-2 py-1">
-            <span>{isVideo(f.name) ? "🎬" : "📄"}</span>
+            <span>{isVideo(f.name) ? "🎬" : isPicture(f.name) ? "🖼" : "📄"}</span>
             {isVideo(f.name) ? (
               <button onClick={() => setPlaying(playing === f.name ? null : f.name)} className="text-cyan-300 hover:underline max-w-[220px] truncate" title={f.name}>
                 {f.name}
@@ -100,7 +111,7 @@ export default function FilesBar({
         ))}
         {canMake && (
           <button type="button" onClick={() => void makePdf()} disabled={busy !== null} className="text-slate-400 hover:text-cyan-300 disabled:opacity-50">
-            {busy === "pdf" ? "Making PDF…" : files.some((f) => !isVideo(f.name)) ? "📄 New PDF" : "📄 Save as PDF"}
+            {busy === "pdf" ? "Making PDF…" : files.some((f) => f.name.endsWith(".pdf")) ? "📄 New PDF" : "📄 Save as PDF"}
           </button>
         )}
         {canMake && hasScene && (

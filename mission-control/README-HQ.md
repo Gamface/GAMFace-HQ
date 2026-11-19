@@ -322,11 +322,17 @@ The `demo` server is still there, switched off (`"enabled": false`).
 - **Routing and handoffs.** The router and Jarvis learn what the installed tools do (checked
   again every 5 minutes); auto cards that a tool clearly answers go to Tools, and Jarvis can
   hand work over with `@tools: …`. With no tools installed, the Tools teammate isn't offered.
-- **Private context asks first.** Jarvis always sees your hive log and memories, so a handoff
-  from Jarvis may carry private material. Each tool call from such a handoff waits for your
-  approval and shows exactly what would be sent ("send {"text":"hello team"} to the tool
-  demo.echo"). Set *Tool calls from private context* to allow or block on the Team page's
-  approvals section. A card sent straight to Tools carries only what you typed, so it doesn't ask.
+- **Private context asks first.** Jarvis always sees your hive log and memories, so before a
+  handoff's tool calls go outside, Mission Control checks whether the handoff repeats anything
+  from them that isn't public (your own request, the instructions and the tool list are public):
+  names and other proper nouns, specific numbers and identifiers (3+ digits, emails, links,
+  codes), and five-word phrases copied from your memories, vault notes or private skills. If it
+  does, each call waits for your approval and says what it carries ("its instructions include
+  Patel, 48213 from your private notes…"). If not, read-only calls just run and the card says
+  so. A private skill attached to a Tools card also makes its calls ask. The check can't see a
+  paraphrase in plain words ("a peanut allergy" from "allergic to peanuts"); set *Tool calls from
+  private context* on the Team page to allow or block, as you prefer. The rule that a local lead's
+  teammates stay on local models is unchanged.
 
 - **The tools service** (`tools/`, the `tools` container) starts the servers listed in
   `tools/tools.json` and lets the harness list and call their tools. It has internet for
@@ -350,16 +356,54 @@ The `demo` server is still there, switched off (`"enabled": false`).
   approve a routine's call, and read-only means read-only. The card says what was left out.
 - Tool output is treated like a web page: untrusted, and cleaned of private-context markers
   and secrets before anything sees it.
-- **Per-server settings in `tools.json`:** `only` (an allowlist of the server's tools),
+- **Per-server settings in `tools.json`:** `notes` (tips the agent sees with that server's
+  tools, like ESPN's sport/league pairs), `only` (an allowlist of the server's tools),
   `tools.<name>.enabled` / `.readOnly`, `hideParams` (parameters the agents never see or set,
   like a CLI's `--no-color`), and `defaults` (sent on every call to tools that have them, like
-  ESPN's `agent: true`).
+  ESPN's `agent: true`), and `timeoutMs` (how long one call may take, up to 10 minutes; the
+  images server uses this).
 - After changing `tools/Dockerfile` or `tools/tools.json`, use `docker compose up -d --build tools`
   (or `--force-recreate`); a plain `restart` once left the harness unable to find the container.
 
 API: `GET /api/tools` (servers and tools; `?fresh=1` skips the one-minute cache),
 `POST /api/tools/call { server, tool, args }`. The tools service: `GET /tools`, `POST /call`,
 `GET /health`.
+
+### Pictures (images server, ComfyUI on your graphics card)
+
+"Make a picture of…", "create a photo of…", "draw a logo…" go to the Tools agent, which calls
+`images.generate_image`. The picture is saved as a file on the card (`data/files/*.png`) and shown
+there; the agent only says what it made. Asking about a picture you attached still goes to Vision.
+With no picture tool installed, Jarvis says plainly that it can't make pictures.
+
+AI video clips (LTX-Video in ComfyUI) were tried and taken out on 19 Nov 2026: on this PC (31 GB
+RAM, AMD card) a clip needs ~13–14 GB of free RAM because the AMD driver keeps much of the model
+in "shared GPU memory", and running out of RAM stalled WSL and damaged its disk once. Videos are
+made with Remotion only (see Videos). `%USERPROFILE%\.wslconfig` still caps WSL (and with it
+Docker) at 9 GB plus 8 GB of swap, so ComfyUI keeps room for pictures.
+
+- **What does the drawing:** ComfyUI from the Comfy Desktop install on Windows
+  (`%LOCALAPPDATA%\Comfy-Desktop\ComfyUI-Installs\GAMFace`, AMD ROCm build) with Z-Image Turbo
+  (`z_image_turbo_bf16.safetensors`, `qwen_3_4b.safetensors`, `ae.safetensors` in
+  `ComfyUI-Shared\models`). It listens on 127.0.0.1:8188 only; containers reach it as
+  `host.docker.internal:8188` through Docker Desktop.
+- **Starts with Windows:** the scheduled task *Mission Control ComfyUI* runs 30 seconds after
+  you log in. It runs a copy of `tools/comfyui/start-comfy.ps1` kept at
+  `%LOCALAPPDATA%\Comfy-Desktop\start-comfy-hq.ps1` (WSL may not be up yet at login), so after
+  editing the script here, copy it there again. Start it by hand with
+  `Start-ScheduledTask "Mission Control ComfyUI"`; turn auto-start off with
+  `Disable-ScheduledTask "Mission Control ComfyUI"`.
+  It runs hidden; logs go to `%LOCALAPPDATA%\Comfy-Desktop\hq-logs`. Starting it twice is safe.
+  Don't open the Comfy Desktop app at the same time (same port).
+- **Speed:** about 95 seconds for a 1024×1024 picture on the RX 9060 XT (the first one after
+  starting takes a little longer while the models load). Sizes: square, landscape, portrait,
+  wide, small (768×768, faster).
+- **Why it's slow (AMD bug):** with ROCm 7.14 / torch 2.12 on Windows, hipBLASLt crashes ComfyUI
+  (access violation) on every float32 matrix multiply and on small attention, which every text
+  encoder does. The start script switches it off (`ROCBLAS_USE_HIPBLASLT=0`,
+  `TORCH_BLAS_PREFER_HIPBLASLT=0`); everything then works, about 10x slower. Retest after a
+  Comfy Desktop update: start ComfyUI without those two settings and make one picture.
+- If ComfyUI isn't running, the card says so and how to start it.
 
 ## Voiceovers, captions, assets and templates
 

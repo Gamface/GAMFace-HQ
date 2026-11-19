@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { callArgs, createServer, isReadOnly, parseConfig, resultText, serverEnv, visibleSchema } from "./server.mjs";
+import { callArgs, createServer, isReadOnly, parseConfig, resultMedia, resultText, serverEnv, visibleSchema } from "./server.mjs";
+import { runError, workflow } from "./images-server.mjs";
 import { apiUrl, plain } from "./wikipedia-server.mjs";
 import { formatResults, searchUrl } from "./brave-server.mjs";
 
@@ -73,6 +74,36 @@ test("results: text joined, other parts named, long text cut", () => {
   assert.match(resultText({ content: [{ type: "text", text: "x".repeat(20010) }] }), /\[cut: 10 more characters\]$/);
 });
 
+test("pictures and clips: passed on beside the text, only known types, at most four", () => {
+  const png = { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" };
+  const mp4 = { type: "resource", resource: { uri: "comfyui://clip.mp4", mimeType: "video/mp4", blob: "AAAAIGZ0eXA=" } };
+  const res = { content: [{ type: "text", text: "Made it" }, png, { type: "image", mimeType: "image/svg+xml", data: "PHN2Zz4=" }, mp4] };
+  assert.equal(resultText(res), "Made it\n[image omitted]", "the PNG and MP4 travel separately; an SVG isn't passed on");
+  assert.deepEqual(resultMedia(res), [
+    { mimeType: "image/png", data: "iVBORw0KGgo=" },
+    { mimeType: "video/mp4", data: "AAAAIGZ0eXA=" },
+  ]);
+  assert.equal(resultMedia({ content: Array(6).fill(png) }).length, 4);
+  assert.deepEqual(resultMedia({ content: [{ type: "image", mimeType: "image/png", data: "" }] }), []);
+  assert.deepEqual(resultMedia({ content: [{ type: "resource", resource: { uri: "x", mimeType: "video/webm", blob: "AAAA" } }] }), [], "only MP4 clips");
+});
+
+test("timeoutMs: a slow server may run longer, within limits", () => {
+  const s = parseConfig(JSON.stringify({ servers: { a: { command: "x", timeoutMs: 600000 }, b: { command: "x", timeoutMs: 99999999 }, c: { command: "x" } } }));
+  assert.equal(s.a.timeoutMs, 600000);
+  assert.equal(s.b.timeoutMs, 600000);
+  assert.equal(s.c.timeoutMs, undefined);
+});
+
+test("images: a Z-Image Turbo workflow with the prompt, size and seed", () => {
+  const wf = workflow({ prompt: "a sunrise over the sea", size: "portrait", seed: 7 });
+  assert.equal(wf[5].inputs.text, "a sunrise over the sea");
+  assert.deepEqual([wf[7].inputs.width, wf[7].inputs.height], [832, 1216]);
+  assert.equal(wf[8].inputs.seed, 7);
+  assert.equal(wf[8].inputs.steps, 8);
+  assert.deepEqual([workflow({ prompt: "x", size: "nope", seed: 1 })[7].inputs.width], [1024]);
+  assert.equal(runError({ status: { status_str: "error", messages: [["execution_error", { node_type: "KSampler", exception_message: "out of memory\nmore" }]] } }), "KSampler failed: out of memory");
+});
 test("end to end with the demo server: list, call, and a change refused", async () => {
   const servers = parseConfig(JSON.stringify({ servers: { demo: { command: process.execPath, args: [new URL("./demo-server.mjs", import.meta.url).pathname] } } }));
   const srv = createServer(servers).listen(0);

@@ -48,6 +48,8 @@ export interface ActionRequest {
   screenshot?: string;
   /** Always ask, whatever the settings (a tool that may destroy or overwrite something) */
   highRisk?: boolean;
+  /** Why it asks, shown with the request (what private material a tool call carries) */
+  detail?: string;
 }
 
 export interface Approval {
@@ -61,6 +63,7 @@ export interface Approval {
   text?: string;
   url: string;
   site: string;
+  detail?: string;
   risk: "normal" | "high";
   unattended: boolean;
   status: "pending" | "approved" | "denied" | "expired" | "canceled";
@@ -134,6 +137,7 @@ export class ApprovalCenter {
       text: req.text?.slice(0, 500),
       url: req.url.slice(0, 500),
       site: req.site,
+      ...(req.detail ? { detail: req.detail.slice(0, 300) } : {}),
       risk,
       unattended: ctx.unattended,
       createdAt: this.now(),

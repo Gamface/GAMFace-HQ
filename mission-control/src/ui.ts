@@ -45,11 +45,11 @@ import {
   withLiveContext,
 } from "./hq/team";
 import { TelegramBot } from "./hq/telegram";
-import { privateBlock, sanitize } from "./hq/privacy";
+import { carriedPrivate, hasPrivate, privateBlock, sanitize, splitPrivate } from "./hq/privacy";
 import { Uploads } from "./hq/uploads";
 import { parseWav, splitWav } from "./hq/wav";
 import { closeRound, historyMessages } from "./hq/thread";
-import { FILE_ID, Files, buildReport, pdfInstructions, printPdf, wantsPdf } from "./hq/pdf";
+import { FILE_ID, Files, buildReport, fileType, pdfInstructions, printPdf, wantsPdf } from "./hq/pdf";
 import { DOC_ID, DocCache, cleanName, extractPdf, partsOf, withPageMarks } from "./hq/docs";
 import type { PdfText } from "./hq/docs";
 import { Scheduler } from "./hq/scheduler";
@@ -61,7 +61,7 @@ import { HistoryIndex, SKILL_DRAFT_SYSTEM, Skills, skillDraftPrompt } from "./hq
 import type { Skill } from "./hq/skills";
 import { VIDEO_MAX_SECONDS, VideoClient, extractScene, videoInstructions, wantsVertical, wantsVideo } from "./hq/video";
 import type { SceneSpec } from "./hq/video";
-import { ToolsClient, isDestructive, refuseFromHost, toolsFor } from "./hq/tools";
+import { ToolsClient, isDestructive, refuseFromHost, toolsFor, type ToolMedia } from "./hq/tools";
 import { KNOWN_VOICES, VoiceClient, extractNarration, sceneVoice, wantsCaptions, wantsOwnAudio, wantsVoice } from "./hq/voice";
 import type { Word } from "./hq/voice";
 import { AssetPatchSchema, AssetUploadSchema, Assets, SYSTEM_FONTS, assetBlock, publicName } from "./hq/assets";
@@ -195,7 +195,7 @@ const notices = new Notices(store);
 // Typing, submitting and button clicks wait for the user's answer (approvals.ts)
 
 /** One line saying what an agent wants to do. */
-function describeAction(a: Pick<Approval, "kind" | "target" | "text" | "site">): string {
+function describeAction(a: Pick<Approval, "kind" | "target" | "text" | "site" | "detail">): string {
   const text = a.text ? `“${a.text.length > 120 ? `${a.text.slice(0, 120)}…` : a.text}”` : "";
   switch (a.kind) {
     case "search":
@@ -205,9 +205,9 @@ function describeAction(a: Pick<Approval, "kind" | "target" | "text" | "site">):
     case "submit":
       return text ? `type ${text} into “${a.target}” and submit it on ${a.site}` : `submit “${a.target}” on ${a.site}`;
     case "tool":
-      return `send ${text || "a request"} to the tool ${a.target} (its instructions came from your private notes or memories)`;
+      return `send ${text || "a request"} to the tool ${a.target} (${a.detail ?? "its instructions came from your private notes or memories"})`;
     case "change":
-      return `use ${a.target}, which changes things, with ${text || "no arguments"}`;
+      return `use ${a.target}, which changes things, with ${text || "no arguments"}${a.detail ? ` (${a.detail})` : ""}`;
     default:
       return `click “${a.target}” on ${a.site}`;
   }
@@ -876,8 +876,27 @@ async function refreshToolsSummary(fresh = false) {
  * Read-only tools just run. A tool that changes things asks the user about that exact
  * call first, and isn't offered at all in routines or read-only runs.
  */
-async function useTools(task: Task, request: string, signal: AbortSignal, push: (text: string) => void, privateTask = false): Promise<TurnResult> {
+/**
+ * Saves pictures and clips a tool made as files on the card you see (the top card, and the
+ * delegated card too when there is one), so they show in its file bar. Returns the file names.
+ */
+function saveToolMedia(task: Task, title: string, media: ToolMedia[]): string[] {
+  const ext = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "video/mp4": "mp4" } as const;
+  const saved = media.map((m) => ({ ...files.save(title, Buffer.from(m.data, "base64"), ext[m.mimeType]), at: Date.now() }));
+  const cards = [task, ...(task.parentId ? [tasks.get(task.parentId)].filter((t): t is Task => Boolean(t)) : [])];
+  for (const card of cards) {
+    card.files = [...(card.files ?? []).filter((f) => !saved.some((s) => s.name === f.name)), ...saved];
+    store.save(card);
+  }
+  return saved.map((s) => s.name);
+}
+
+async function useTools(task: Task, request: string, signal: AbortSignal, push: (text: string) => void, privateTask = false, evidence?: string[]): Promise<TurnResult> {
   if (!tools) throw new Error("No tools service is set up (TOOLS_URL)");
+  // What private material the instructions carry: what the lead's handoff repeats (checked by
+  // the caller), else the whole handoff when it wasn't checked, plus any private skill attached
+  const carried = [...(evidence ?? (privateTask ? ["instructions written from your private notes or memories"] : [])), ...(hasPrivate(request) ? ["a private skill"] : [])];
+  if (privateTask && evidence && !evidence.length) push("[The instructions don't repeat anything from your private notes or memories, so read-only tool calls won't ask.]\n");
   const servers = await tools.list();
   const available = toolsFor({ readOnly: task.readOnly, routine: isRoutine(task) }, servers);
   if (!available.length) throw new Error("no tools are installed that this card may use");
@@ -896,14 +915,25 @@ async function useTools(task: Task, request: string, signal: AbortSignal, push: 
       const where = { target: `${server}.${tool}`, text: shown, url: `tool:${server}.${tool}`, site: server };
       // A tool that changes things: the user approves this exact call (one that may destroy or
       // overwrite something always asks, whatever the settings). This also covers private context.
-      // A read-only call from instructions written after seeing private notes or memories asks too.
-      const ask = info && !info.readOnly ? { kind: "change" as const, ...where, highRisk: isDestructive(info) } : privateTask ? { kind: "tool" as const, ...where } : null;
+      // A read-only call whose instructions carry private material asks too, naming what it carries.
+      const detail = carried.length ? `its instructions include ${carried.join(", ")} from your private notes, memories or skills` : undefined;
+      const ask = info && !info.readOnly ? { kind: "change" as const, ...where, highRisk: isDestructive(info), detail } : carried.length ? { kind: "tool" as const, ...where, detail } : null;
       if (ask) {
         const refusal = await askApproval(task, "tools", ask, signal);
         if (refusal) return { text: `Not done: ${refusal}. Don't try this call again; answer with what you have.`, isError: true, ms: 0 };
         hive.log("tools", "approved", `${server}.${tool} ${shown.slice(0, 120)}`, task.id);
       }
-      return tools.call(server, tool, args, { approved: Boolean(ask) });
+      const out = await tools.call(server, tool, args, { approved: Boolean(ask) });
+      if (out.media?.length) {
+        const names = saveToolMedia(task, `${server}-${typeof args.prompt === "string" ? args.prompt : tool}`, out.media);
+        const clip = out.media.some((m) => m.mimeType === "video/mp4");
+        const what = clip ? "clip" : "picture";
+        push(`${clip ? "🎬" : "🖼"} ${clip ? "Clip" : "Picture"}${names.length > 1 ? "s" : ""} saved on the card: ${names.join(", ")}\n`);
+        hive.log("tools", what, `${server}.${tool} → ${names.join(", ")}`, task.id);
+        // The model only hears that it worked: file names read badly aloud and the card shows it
+        return { ...out, media: undefined, text: `${out.text}\n(The ${what} is shown on the card. Say what it shows; don't give a file name.)` };
+      }
+      return out;
     },
     chat: roleJson("tools", { privateTask, override: task.targetAgent === "tools" ? task.modelOverride : undefined }),
     model: "tools",
@@ -930,6 +960,8 @@ async function agentTurn(
   override?: string,
   /** The request was written by a lead that had seen private material */
   privateTask = false,
+  /** For Tools: what private material the request repeats (when checked); empty means none */
+  privateEvidence?: string[],
 ): Promise<TurnResult> {
   if (agent === "browser" && browsingEnabled(task)) {
     try {
@@ -943,8 +975,8 @@ async function agentTurn(
   }
   if (agent === "tools" && tools && task.source !== "eval") {
     try {
-      // Instructions written from private notes or memories: each call asks first (see useTools)
-      return await useTools(task, request, signal, push, privateTask);
+      // Instructions that carry private material: each call asks first (see useTools)
+      return await useTools(task, request, signal, push, privateTask, privateEvidence);
     } catch (error) {
       if (signal.aborted) throw error;
       const msg = error instanceof Error ? error.message : String(error);
@@ -1306,18 +1338,19 @@ async function runTask(task: Task) {
       request += skillBlock(leadSkills);
     }
 
+    const leadMessages: ChatMessage[] = [
+      { role: "system", content: systemPrompt(task, lead, { team: useTeam, delegate }) },
+      ...history,
+      {
+        role: "user",
+        content: await userMessage(lead, request, ask, useTeam, projects.idOf(task.project)),
+        ...(lead === "vision" && images.length ? { images } : {}),
+      },
+    ];
     const firstTurn = await agentTurn(
       task,
       lead,
-      [
-        { role: "system", content: systemPrompt(task, lead, { team: useTeam, delegate }) },
-        ...history,
-        {
-          role: "user",
-          content: await userMessage(lead, request, ask, useTeam, projects.idOf(task.project)),
-          ...(lead === "vision" && images.length ? { images } : {}),
-        },
-      ],
+      leadMessages,
       // The browser agent works from this text alone, so a reply carries the original request
       (followUp ? `${ask}\n\n(This follows up on the earlier request: ${task.prompt.slice(0, 500)})` : ask) + pdfNote + skillBlock(leadSkills),
       controller.signal,
@@ -1339,6 +1372,10 @@ async function runTask(task: Task) {
     if (handoffs.length) {
       task.delegatedTo = [];
       const results: { agent: AgentTarget; task: string; output: string; private: boolean }[] = [];
+      // What the lead saw privately vs publicly (its own request counts as public), to tell
+      // whether a handoff repeats any private material before its tool calls go outside
+      const seen = splitPrivate(leadMessages.map((m) => m.content));
+      seen.public += `\n${ask}`;
       for (const h of handoffs) {
         flush();
         task.activeAgent = h.agent;
@@ -1373,6 +1410,8 @@ async function runTask(task: Task) {
           // The lead wrote these instructions after seeing private material, so they may
           // carry it: the teammate stays local unless it may send private context to the cloud
           firstTurn.sawPrivate,
+          // Outside tools ask first only when the instructions repeat something private
+          h.agent === "tools" && firstTurn.sawPrivate ? carriedPrivate(h.task, seen.private, seen.public, seen.personal) : undefined,
         );
         const output = turn.text;
         usedPrivate ||= turn.sawPrivate;
@@ -2669,7 +2708,7 @@ app.get("/api/files/:name", (req, res) => {
   const name = String(req.params.name);
   const file = FILE_ID.test(name) ? files.read(name) : null;
   if (!file) return res.status(404).json({ error: "File not found" });
-  res.setHeader("Content-Type", name.endsWith(".mp4") ? "video/mp4" : "application/pdf");
+  res.setHeader("Content-Type", fileType(name));
   res.setHeader("Content-Disposition", `${req.query.download ? "attachment" : "inline"}; filename="${name}"`);
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Accept-Ranges", "bytes");
