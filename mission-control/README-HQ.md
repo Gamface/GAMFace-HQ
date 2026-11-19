@@ -369,6 +369,30 @@ API: `GET /api/tools` (servers and tools; `?fresh=1` skips the one-minute cache)
 `POST /api/tools/call { server, tool, args }`. The tools service: `GET /tools`, `POST /call`,
 `GET /health`.
 
+### Its own code and GitHub (code and github servers)
+
+Questions about Mission Control's own code ("check your own code for TODOs", "how does routing
+work in your code?") and about GitHub ("any open pull requests?", "what did the last commits
+change?") go to the Tools agent when these servers are installed.
+
+- **code** (`tools/code-server.mjs`, read-only): lists, reads and searches the GAMFace-HQ
+  repository's files, and shows recent commits and their diffs. It reads through git from the
+  repository's `.git` folder, mounted read-only at `/code.git` in the tools container, so it
+  sees **committed** code only: uncommitted edits aren't there, and the git-ignored `.env`
+  files and `data/` (keys, notes, cards) can't be reached. Paths start at the repository root
+  (`mission-control/src/hq/team.ts`). Commit to let HQ see a change.
+- **github** (GitHub's own `github-mcp-server` v2.1.0, built into the tools image): read-only
+  (`--read-only`) repositories, files, branches, commits, issues, pull requests and Actions
+  runs. It needs a token: create a **fine-grained personal access token** at
+  github.com → Settings → Developer settings → Fine-grained tokens, limited to the repositories
+  HQ may see (e.g. only `Gamface/GAMFace-HQ`), with read-only permissions for Contents,
+  Metadata, Issues, Pull requests and Actions. Put it in `mission-control/tools/.env` as
+  `GITHUB_PERSONAL_ACCESS_TOKEN=…` (that file is git-ignored and only the tools container reads
+  it), then `docker compose up -d --force-recreate tools`. Without it, the Tools page shows the
+  server as not running ("authentication required"). To let HQ open issues or comment later,
+  drop `--read-only` in `tools/tools.json` and give the token write permissions; every
+  change then asks you first, like any tool that changes things.
+
 ### Pictures (images server, ComfyUI on your graphics card)
 
 "Make a picture of…", "create a photo of…", "draw a logo…" go to the Tools agent, which calls

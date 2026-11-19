@@ -865,7 +865,8 @@ async function refreshToolsSummary(fresh = false) {
         return s.tools.length ? `${s.name}: ${s.tools.map((t) => `${t.name} (${desc(t)})`).join(", ")}` : "";
       })
       .filter(Boolean);
-    setToolsSummary(parts.length ? parts.join("; ") : null);
+    const names = servers.filter((s) => s.ok).flatMap((s) => s.tools.map((t) => `${s.name}.${t.name}`));
+    setToolsSummary(parts.length ? parts.join("; ") : null, names);
   } catch {
     setToolsSummary(null);
   }

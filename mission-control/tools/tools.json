@@ -40,6 +40,22 @@
       "timeoutMs": 600000,
       "readOnly": true
     },
+    "code": {
+      "description": "Read Mission Control's own source code (the GAMFace-HQ repository as last committed): list, read and search files, recent commits and their diffs. Read-only.",
+      "command": "node",
+      "args": ["code-server.mjs"],
+      "env": { "CODE_GIT_DIR": "/code.git" },
+      "notes": "Paths start at the repository root: the app is under mission-control/ (src/hq for the agents, src/ui.ts for the server, ui/src for the dashboard, tools/ for the tools service, README-HQ.md for the docs). Search first, then read the files you need. It shows committed code only, not unsaved changes.",
+      "readOnly": true
+    },
+    "github": {
+      "description": "GitHub, read-only: repositories and their files, branches and commits, issues, pull requests and Actions runs (GitHub's own MCP server; needs GITHUB_PERSONAL_ACCESS_TOKEN in tools/.env)",
+      "command": "github-mcp-server",
+      "args": ["stdio", "--read-only", "--toolsets", "context,repos,issues,pull_requests,actions"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "$GITHUB_PERSONAL_ACCESS_TOKEN" },
+      "notes": "Mission Control's own repository is Gamface/GAMFace-HQ (owner Gamface, repo GAMFace-HQ, default branch main).",
+      "readOnly": true
+    },
     "demo": {
       "description": "A built-in test server: echo text back, tell the time, and a pretend note writer (it changes nothing, but says it would)",
       "command": "node",

@@ -136,6 +136,12 @@ export function resultMedia(res) {
 
 const conns = new Map(); // name -> { client, connecting, error, failedAt, listedAt, tools }
 
+/** The first error line a server printed while starting, without its "Error:" prefix. Exported for tests. */
+export function startupError(text) {
+  const line = text.split("\n").map((l) => l.trim()).find((l) => /^(error|fatal)\b[:\s]/i.test(l));
+  return line ? line.replace(/^(error|fatal)\s*:?\s*/i, "").slice(0, 300) : "";
+}
+
 async function connect(server) {
   let c = conns.get(server.name);
   if (c?.client) return c;
@@ -145,7 +151,11 @@ async function connect(server) {
   conns.set(server.name, c);
   c.connecting = (async () => {
     const transport = new StdioClientTransport({ command: server.command, args: server.args, env: serverEnv(server.env), stderr: "pipe" });
-    transport.stderr?.on("data", (d) => process.stderr.write(`[${server.name}] ${d}`));
+    let said = ""; // the server's own error line, if it exits while starting (e.g. a missing key)
+    transport.stderr?.on("data", (d) => {
+      process.stderr.write(`[${server.name}] ${d}`);
+      said ||= startupError(String(d));
+    });
     const client = new Client({ name: "mission-control-tools", version: "1.0.0" });
     client.onclose = () => {
       // The server exited: start it again on the next use
@@ -156,7 +166,8 @@ async function connect(server) {
       await Promise.race([client.connect(transport), timer]);
     } catch (e) {
       await transport.close().catch(() => {});
-      throw e;
+      // "Connection closed" says nothing; the server's stderr usually says why
+      throw said ? new Error(said) : e;
     }
     c.client = client;
     c.connecting = null;

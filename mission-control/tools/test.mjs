@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { callArgs, createServer, isReadOnly, parseConfig, resultMedia, resultText, serverEnv, visibleSchema } from "./server.mjs";
+import { callArgs, createServer, isReadOnly, parseConfig, resultMedia, resultText, serverEnv, startupError, visibleSchema } from "./server.mjs";
 import { runError, workflow } from "./images-server.mjs";
+import { cleanPath, cleanRef, listFiles, readFile, recentChanges, searchCode, showCommit } from "./code-server.mjs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { apiUrl, plain } from "./wikipedia-server.mjs";
 import { formatResults, searchUrl } from "./brave-server.mjs";
 
@@ -104,6 +109,41 @@ test("images: a Z-Image Turbo workflow with the prompt, size and seed", () => {
   assert.deepEqual([workflow({ prompt: "x", size: "nope", seed: 1 })[7].inputs.width], [1024]);
   assert.equal(runError({ status: { status_str: "error", messages: [["execution_error", { node_type: "KSampler", exception_message: "out of memory\nmore" }]] } }), "KSampler failed: out of memory");
 });
+test("a server that won't start reports its own error line", () => {
+  assert.equal(startupError("Error: authentication required: set GITHUB_PERSONAL_ACCESS_TOKEN\nUsage:\n  github-mcp-server"), "authentication required: set GITHUB_PERSONAL_ACCESS_TOKEN");
+  assert.equal(startupError("starting up\nlistening"), "");
+});
+
+test("code: paths and refs that could escape or inject are refused", () => {
+  assert.equal(cleanPath("./mission-control/src/"), "mission-control/src");
+  assert.equal(cleanPath(""), "");
+  for (const bad of ["../etc/passwd", "a/../../b", "--output=x", "a\nb"]) assert.throws(() => cleanPath(bad), /Not a usable path/, bad);
+  assert.equal(cleanRef(), "HEAD");
+  assert.equal(cleanRef("HEAD~2"), "HEAD~2");
+  for (const bad of ["--all", "a..b", "x;rm -rf", ""]) if (bad) assert.throws(() => cleanRef(bad), /Not a usable/, bad);
+});
+
+test("code: reads only what's committed, through git", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "code-"));
+  const g = (...a) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...a], { stdio: "pipe" });
+  g("init", "-q", "-b", "main");
+  mkdirSync(join(dir, "src"));
+  writeFileSync(join(dir, "src", "app.ts"), "export const answer = 42;\n// TODO: tidy\n");
+  writeFileSync(join(dir, ".gitignore"), ".env\n");
+  writeFileSync(join(dir, ".env"), "SECRET=hunter2\n");
+  g("add", ".");
+  g("commit", "-q", "-m", "First commit");
+  writeFileSync(join(dir, "src", "draft.ts"), "not committed\n");
+  const opts = { gitDir: join(dir, ".git") };
+  assert.deepEqual((await listFiles({}, opts)).split("\n"), [".gitignore", "src/app.ts"], "uncommitted and ignored files aren't there");
+  assert.match(await readFile({ path: "src/app.ts" }, opts), /1  export const answer = 42;/);
+  await assert.rejects(readFile({ path: ".env" }, opts), "the ignored .env can't be read");
+  assert.match(await searchCode({ pattern: "todo" }, opts), /^src\/app.ts:2:\/\/ TODO: tidy$/);
+  assert.match(await searchCode({ pattern: "nothing-like-this" }, opts), /No matches/);
+  assert.match(await recentChanges({ count: 5 }, opts), /First commit/);
+  assert.match(await showCommit({ ref: "HEAD" }, opts), /\+export const answer = 42;/);
+});
+
 test("end to end with the demo server: list, call, and a change refused", async () => {
   const servers = parseConfig(JSON.stringify({ servers: { demo: { command: process.execPath, args: [new URL("./demo-server.mjs", import.meta.url).pathname] } } }));
   const srv = createServer(servers).listen(0);

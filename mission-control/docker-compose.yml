@@ -150,6 +150,9 @@ services:
     build: ./tools
     volumes:
       - ./tools/tools.json:/app/tools.json:ro
+      # Mission Control's own committed code for the code tools (read-only; .env files and
+      # data/ are git-ignored, so they aren't in it)
+      - ../.git:/code.git:ro
     env_file:
       - path: ./tools/.env
         required: false

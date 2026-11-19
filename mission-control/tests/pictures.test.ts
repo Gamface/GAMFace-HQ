@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FILE_ID, fileType } from "../src/hq/pdf";
 import type { JsonChat } from "../src/hq/ollama";
-import { keywordRoute, routeTask, setToolsSummary, wantsPicture } from "../src/hq/team";
+import { keywordRoute, routeTask, setToolsSummary, wantsCodeOrGitHub, wantsPicture } from "../src/hq/team";
 import { toolMedia } from "../src/hq/tools";
 
 const never: JsonChat = async () => {
@@ -27,6 +27,22 @@ test("picture requests go to the picture tool, or to Jarvis when there isn't one
     assert.equal(keywordRoute("Create a photo of the sunrise"), "tools");
     assert.deepEqual(await routeTask(never, "m", "Create a photo of the sunrise"), { agent: "tools", reason: "make a picture" });
     assert.equal(keywordRoute("What's in this photo?"), "vision", "reading a picture still goes to Vision");
+  } finally {
+    setToolsSummary(null);
+  }
+});
+
+test("questions about HQ's own code or GitHub go to the Tools agent when those tools are installed", async () => {
+  for (const p of ["Check your own code for TODOs", "How does Mission Control's code route requests?", "any open pull requests on GitHub?", "what were the last commits?", "search your repository for the word privacy"])
+    assert.equal(wantsCodeOrGitHub(p), true, p);
+  for (const p of ["fix the bug in my code", "write a python script", "commit to the plan", "what's the weather"]) assert.equal(wantsCodeOrGitHub(p), false, p);
+  try {
+    setToolsSummary("wikipedia: search (Search Wikipedia)");
+    assert.equal(keywordRoute("Check your own code for TODOs"), "coder", "no code tools: the Coder, as before");
+    // Installed tool names count even when the summary was cut short
+    setToolsSummary("espn: scores (Scores)", ["espn.scores", "code.search_code", "github.list_pull_requests"]);
+    assert.equal(keywordRoute("Check your own code for TODOs"), "tools");
+    assert.deepEqual(await routeTask(never, "m", "any open pull requests on GitHub?"), { agent: "tools", reason: "Mission Control's code or GitHub" });
   } finally {
     setToolsSummary(null);
   }

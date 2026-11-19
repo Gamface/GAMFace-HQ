@@ -74,11 +74,24 @@ export const AGENT_KEYS = Object.keys(TEAM) as AgentKey[];
 // What the installed tools can do (read-only ones), or null when there are none. The Tools
 // teammate is offered to the router and the lead only while this is set.
 let toolsSummary: string | null = null;
+// Every installed tool as "server.tool" (the summary is cut to fit a prompt, so it can't be
+// searched for what's installed)
+let installedTools = new Set<string>();
 
-/** Sets what the installed tools do ("demo: echo (Repeats…), time (…)"); null hides the Tools teammate. */
-export function setToolsSummary(summary: string | null) {
+/**
+ * Sets what the installed tools do ("demo: echo (Repeats…), time (…)"); null hides the Tools
+ * teammate. `names` lists every tool as "server.tool"; without it they're read from the summary.
+ */
+export function setToolsSummary(summary: string | null, names?: string[]) {
   toolsSummary = summary?.trim() ? summary.trim().slice(0, 1500) : null;
+  const parsed = (summary ?? "").split(";").flatMap((part) => {
+    const m = /^\s*([a-z0-9_-]+):\s*(.*)$/i.exec(part);
+    return m ? [...m[2].matchAll(/(?:^|,\s*)([A-Za-z0-9_.-]+)\s*\(/g)].map((t) => `${m[1]}.${t[1]}`) : [];
+  });
+  installedTools = new Set(toolsSummary ? (names ?? parsed) : []);
 }
+
+const hasTool = (test: (name: string) => boolean) => [...installedTools].some(test);
 
 export const toolsAvailable = () => toolsSummary !== null;
 
@@ -121,9 +134,22 @@ export function wantsPicture(prompt: string): boolean {
 }
 
 /** Whether an installed tool makes pictures. */
-const canMakePictures = () => /\bgenerate_image\b/.test(toolsSummary ?? "");
+const canMakePictures = () => hasTool((n) => n.endsWith(".generate_image"));
+
+const OWN_CODE_OR_GITHUB =
+  /\b(your|its|hq'?s|mission control'?s|jarvis'?s)\s+(own\s+)?(source\s+)?(code|codebase|repo(sitory)?|source)\b|\b(your|its)\s+own\s+(code|source)\b|\bgithub\b|\bpull requests?\b|\bPRs?\b|\b(recent|latest|last)\s+commits?\b/i;
+
+/** Whether the request is about Mission Control's own code or about GitHub. Exported for tests. */
+export function wantsCodeOrGitHub(prompt: string): boolean {
+  return OWN_CODE_OR_GITHUB.test(prompt);
+}
+
+/** Whether the code or GitHub tools are installed. */
+const hasCodeTools = () => hasTool((n) => n.startsWith("code.") || n.startsWith("github."));
 
 export function keywordRoute(prompt: string): AgentKey {
+  // "Look at your own code", "any open pull requests?": the code and GitHub tools answer those
+  if (wantsCodeOrGitHub(prompt) && hasCodeTools()) return "tools";
   // "Make a photo of…" is for the picture tool (or Jarvis, to say there isn't one), never Vision
   if (wantsPicture(prompt)) return canMakePictures() ? "tools" : "planner";
   for (const [key, pattern] of KEYWORDS) if (pattern.test(prompt)) return key;
@@ -131,6 +157,7 @@ export function keywordRoute(prompt: string): AgentKey {
 }
 
 export async function routeTask(chat: JsonChat, model: string, prompt: string): Promise<{ agent: AgentKey; reason: string }> {
+  if (wantsCodeOrGitHub(prompt) && hasCodeTools()) return { agent: "tools", reason: "Mission Control's code or GitHub" };
   // Small routing models send "make a photo of…" to Vision, which only reads pictures
   if (wantsPicture(prompt)) return canMakePictures() ? { agent: "tools", reason: "make a picture" } : { agent: "planner", reason: "no picture tool installed" };
   try {
