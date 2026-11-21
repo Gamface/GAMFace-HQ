@@ -126,7 +126,7 @@ export function needsWeb(prompt: string): boolean {
 
 const MAKE_PICTURE =
   // the verb, then (without passing code, an app or a page: "create a script that resizes images") the picture
-  /\b(make|create|draw|generate|paint|render|design|produce|imagine|sketch|illustrate)\b(?:(?!\b(?:scripts?|code|functions?|programs?|apps?|tools?|pages?|sites?|websites?|components?|class|folders?|galler(?:y|ies)|bots?|commands?)\b)[^.?!\n]){0,60}?\b(pictures?|photos?|photographs?|images?|drawings?|illustrations?|paintings?|portraits?|artwork|wallpapers?|logos?|posters?|icons?|sketch(es)?)\b/i;
+  /\b(make|create|draw|generate|paint|render|design|produce|imagine|sketch|illustrate)\b(?:(?!\b(?:scripts?|code|functions?|programs?|apps?|tools?|pages?|sites?|websites?|components?|class|folders?|galler(?:y|ies)|bots?|commands?)\b)[^.?!\n]){0,60}?\b(pictures?|photos?|photographs?|images?|drawings?|illustrations?|paintings?|portraits?|artwork|wallpapers?|logos?|posters?|icons?|sketch(es)?|fl[yi]ers?|banners?|graphics?|thumbnails?|cover art|album covers?|book covers?|mascots?|stickers?|avatars?|infographics?)\b/i;
 
 /** Whether the request asks for a new picture to be made (not one read). Exported for tests. */
 export function wantsPicture(prompt: string): boolean {

@@ -14,6 +14,10 @@ test("asking for a new picture is told apart from asking about one", () => {
     assert.equal(wantsPicture(p), true, p);
   for (const p of ["What's in this photo?", "read the screenshot", "describe the image I attached", "make the code faster", "create a script that resizes images"])
     assert.equal(wantsPicture(p), false, p);
+  // Graphics count as pictures too
+  for (const p of ["create a flyer for the gamface brand", "design a banner for our YouTube channel", "make a thumbnail for the new video", "generate album cover art", "draw a mascot for the team", "make a sticker of a fox"])
+    assert.equal(wantsPicture(p), true, p);
+  for (const p of ["create a cover letter for the job", "write the text for a flyer", "make the background job faster", "create a component for the banner"]) assert.equal(wantsPicture(p), false, p);
 });
 
 test("picture requests go to the picture tool, or to Jarvis when there isn't one, never to Vision", async () => {
