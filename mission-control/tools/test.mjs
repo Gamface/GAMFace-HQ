@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { callArgs, createServer, isReadOnly, parseConfig, resultMedia, resultText, serverEnv, startupError, visibleSchema } from "./server.mjs";
+import { callArgs, createServer, isReadOnly, parseConfig, resultMedia, resultText, serverEnv, serverHeaders, startupError, visibleSchema } from "./server.mjs";
 import { runError, workflow } from "./images-server.mjs";
 import { cleanPath, cleanRef, listFiles, readFile, recentChanges, searchCode, showCommit } from "./code-server.mjs";
 import { execFileSync } from "node:child_process";
@@ -47,6 +47,18 @@ test("brave: only api.search.brave.com, numbered results", () => {
     formatResults([{ title: "<strong>Node</strong> 24", url: "https://nodejs.org", description: "LTS <strong>release</strong>", age: "2 days ago" }]),
     "1. Node 24 (2 days ago)\n   https://nodejs.org\n   LTS release",
   );
+});
+
+test("online servers: https url only, no credentials in it, headers read from tools/.env", () => {
+  const s = parseConfig('{"servers":{"inspo":{"url":"https://inspomcp.dev/api/mcp","headers":{"Authorization":"$INSPO_KEY"}}}}').inspo;
+  assert.deepEqual([s.url, s.command], ["https://inspomcp.dev/api/mcp", ""]);
+  assert.deepEqual(serverHeaders(s.headers, { INSPO_KEY: "Bearer k1", OTHER: "no" }), { Authorization: "Bearer k1" });
+  assert.deepEqual(serverHeaders({ "X-Key": "$MISSING", "X-Mode": "lite" }, {}), { "X-Mode": "lite" });
+  assert.throws(() => parseConfig('{"servers":{"a":{"url":"http://example.com/mcp"}}}'), /must start with https/);
+  assert.throws(() => parseConfig('{"servers":{"a":{"url":"https://u:p@example.com/mcp"}}}'), /not in the url/);
+  assert.throws(() => parseConfig('{"servers":{"a":{"url":"not a url"}}}'), /valid address/);
+  assert.throws(() => parseConfig('{"servers":{"a":{"url":"https://example.com","command":"x"}}}'), /not both/);
+  assert.throws(() => parseConfig('{"servers":{"a":{"url":"https://example.com","headers":{"X":1}}}}'), /headers must be/);
 });
 
 test("config: names, commands and args are checked", () => {

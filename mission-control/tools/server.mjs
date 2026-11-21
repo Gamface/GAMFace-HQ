@@ -1,5 +1,6 @@
 // Mission Control tools service. Starts the MCP servers listed in tools.json (each a
-// program speaking MCP over stdio) and lets the harness use them over HTTP:
+// program speaking MCP over stdio, or an online server reached at an https URL) and lets
+// the harness use them over HTTP:
 //
 //   GET  /health                         -> { ok, servers: [{ name, ok, error? }] }
 //   GET  /tools                          -> { servers: [{ name, description, ok, error?, tools: [...] }] }
@@ -15,6 +16,7 @@ import http from "node:http";
 import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const PORT = Number(process.env.PORT || 3040);
 const CONFIG = process.env.TOOLS_CONFIG || new URL("./tools.json", import.meta.url).pathname;
@@ -39,7 +41,23 @@ export function parseConfig(text) {
   const out = {};
   for (const [name, s] of Object.entries(raw.servers ?? {})) {
     if (!NAME.test(name)) throw new Error(`Server name "${name}" must be lowercase letters, digits, - or _`);
-    if (!s || typeof s.command !== "string" || !s.command) throw new Error(`Server "${name}" needs a command`);
+    if (!s || typeof s !== "object") throw new Error(`Server "${name}" needs a command or a url`);
+    // A program on this machine (command), or an online MCP server (url, https only)
+    const hasCommand = typeof s.command === "string" && s.command !== "";
+    const hasUrl = typeof s.url === "string" && s.url !== "";
+    if (hasCommand === hasUrl) throw new Error(`Server "${name}" needs a command or a url (not both)`);
+    if (hasUrl) {
+      let u;
+      try {
+        u = new URL(s.url);
+      } catch {
+        throw new Error(`Server "${name}": url isn't a valid address`);
+      }
+      if (u.protocol !== "https:") throw new Error(`Server "${name}": url must start with https://`);
+      if (u.username || u.password) throw new Error(`Server "${name}": put credentials in headers ("$NAME" from tools/.env), not in the url`);
+    }
+    if (s.headers !== undefined && (typeof s.headers !== "object" || Array.isArray(s.headers) || s.headers === null || Object.values(s.headers).some((v) => typeof v !== "string")))
+      throw new Error(`Server "${name}": headers must be an object of strings`);
     if (s.args !== undefined && (!Array.isArray(s.args) || s.args.some((a) => typeof a !== "string"))) throw new Error(`Server "${name}": args must be a list of strings`);
     if (s.only !== undefined && (!Array.isArray(s.only) || s.only.some((a) => typeof a !== "string"))) throw new Error(`Server "${name}": only must be a list of tool names`);
     if (s.hideParams !== undefined && (!Array.isArray(s.hideParams) || s.hideParams.some((a) => typeof a !== "string"))) throw new Error(`Server "${name}": hideParams must be a list of names`);
@@ -47,8 +65,11 @@ export function parseConfig(text) {
     out[name] = {
       name,
       description: typeof s.description === "string" ? s.description : "",
-      command: s.command,
+      command: hasCommand ? s.command : "",
       args: s.args ?? [],
+      url: hasUrl ? s.url : "",
+      // Sent with every request to an online server; "$NAME" values come from tools/.env
+      headers: s.headers ?? {},
       env: s.env && typeof s.env === "object" ? s.env : {},
       enabled: s.enabled !== false,
       readOnly: s.readOnly === true,
@@ -63,6 +84,16 @@ export function parseConfig(text) {
       // How long one call may take (slow tools like picture making); the harness waits this long
       timeoutMs: Number.isFinite(s.timeoutMs) ? Math.min(MAX_CALL_MS, Math.max(1000, s.timeoutMs)) : undefined,
     };
+  }
+  return out;
+}
+
+/** Headers for an online server: "$NAME" reads our environment; empty values are left out. Exported for tests. */
+export function serverHeaders(headers, source = process.env) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers ?? {})) {
+    const val = v.startsWith("$") ? source[v.slice(1)] : v;
+    if (typeof val === "string" && val) out[k] = val;
   }
   return out;
 }
@@ -150,7 +181,9 @@ async function connect(server) {
   c = { client: null, connecting: null, error: null, failedAt: 0, listedAt: 0, tools: [] };
   conns.set(server.name, c);
   c.connecting = (async () => {
-    const transport = new StdioClientTransport({ command: server.command, args: server.args, env: serverEnv(server.env), stderr: "pipe" });
+    const transport = server.url
+      ? new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: serverHeaders(server.headers) } })
+      : new StdioClientTransport({ command: server.command, args: server.args, env: serverEnv(server.env), stderr: "pipe" });
     let said = ""; // the server's own error line, if it exits while starting (e.g. a missing key)
     transport.stderr?.on("data", (d) => {
       process.stderr.write(`[${server.name}] ${d}`);

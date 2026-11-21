@@ -147,9 +147,22 @@ export function wantsCodeOrGitHub(prompt: string): boolean {
 /** Whether the code or GitHub tools are installed. */
 const hasCodeTools = () => hasTool((n) => n.startsWith("code.") || n.startsWith("github."));
 
+const DESIGN_REFERENCES =
+  /\b(design|ui|ux|layout|visual|style|landing[- ]page|web ?site|homepage|dashboard)\s+(references?|inspiration|inspo|examples?|mood ?boards?)\b|\b(references?|inspiration|inspo|mood ?boards?)\s+(for|from|on)\b[^.?!\n]{0,40}\b(design|ui|layout|look|site|website|page|landing|app|dashboard|brand)\b|\bwhat should (it|the (page|site|app|dashboard|landing page))\s+look like\b|\binspo\b/i;
+
+/** Whether the request asks for design references or inspiration (not for building). Exported for tests. */
+export function wantsDesignReferences(prompt: string): boolean {
+  return DESIGN_REFERENCES.test(prompt);
+}
+
+/** Whether a design reference tool (Inspo) is installed. */
+const hasDesignTools = () => hasTool((n) => n.startsWith("inspo."));
+
 export function keywordRoute(prompt: string): AgentKey {
   // "Look at your own code", "any open pull requests?": the code and GitHub tools answer those
   if (wantsCodeOrGitHub(prompt) && hasCodeTools()) return "tools";
+  // "Find design inspiration for…": Inspo's curated sites answer that faster than browsing
+  if (wantsDesignReferences(prompt) && hasDesignTools()) return "tools";
   // "Make a photo of…" is for the picture tool (or Jarvis, to say there isn't one), never Vision
   if (wantsPicture(prompt)) return canMakePictures() ? "tools" : "planner";
   for (const [key, pattern] of KEYWORDS) if (pattern.test(prompt)) return key;
@@ -158,6 +171,7 @@ export function keywordRoute(prompt: string): AgentKey {
 
 export async function routeTask(chat: JsonChat, model: string, prompt: string): Promise<{ agent: AgentKey; reason: string }> {
   if (wantsCodeOrGitHub(prompt) && hasCodeTools()) return { agent: "tools", reason: "Mission Control's code or GitHub" };
+  if (wantsDesignReferences(prompt) && hasDesignTools()) return { agent: "tools", reason: "design references" };
   // Small routing models send "make a photo of…" to Vision, which only reads pictures
   if (wantsPicture(prompt)) return canMakePictures() ? { agent: "tools", reason: "make a picture" } : { agent: "planner", reason: "no picture tool installed" };
   try {

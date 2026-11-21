@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FILE_ID, fileType } from "../src/hq/pdf";
 import type { JsonChat } from "../src/hq/ollama";
-import { keywordRoute, routeTask, setToolsSummary, wantsCodeOrGitHub, wantsPicture } from "../src/hq/team";
+import { keywordRoute, routeTask, setToolsSummary, wantsCodeOrGitHub, wantsDesignReferences, wantsPicture } from "../src/hq/team";
 import { toolMedia } from "../src/hq/tools";
 
 const never: JsonChat = async () => {
@@ -64,4 +64,19 @@ test("saved pictures are card files with the right type", () => {
   assert.equal(fileType("a-1a2b3c4d.jpg"), "image/jpeg");
   assert.equal(fileType("a-1a2b3c4d.mp4"), "video/mp4");
   assert.equal(fileType("a-1a2b3c4d.pdf"), "application/pdf");
+});
+
+test("design reference requests go to the Tools agent when Inspo is installed", async () => {
+  for (const p of ["Find design inspiration for a youth arts landing page", "show me UI references for a dark dashboard", "I need inspo for the homepage", "what should the landing page look like?", "landing page examples for a music school"])
+    assert.equal(wantsDesignReferences(p), true, p);
+  for (const p of ["build a landing page for the youth arts program", "make the code faster", "cite your references for that claim", "design a logo"]) assert.equal(wantsDesignReferences(p), false, p);
+  try {
+    setToolsSummary("wikipedia: search (Search Wikipedia)", ["wikipedia.search"]);
+    assert.notEqual(keywordRoute("Find design inspiration for a youth arts landing page"), "tools", "no Inspo: not the Tools agent");
+    setToolsSummary("inspo: recommend (…)", ["inspo.recommend", "inspo.get_screen"]);
+    assert.equal(keywordRoute("Find design inspiration for a youth arts landing page"), "tools");
+    assert.deepEqual(await routeTask(never, "m", "show me UI references for a dark dashboard"), { agent: "tools", reason: "design references" });
+  } finally {
+    setToolsSummary(null);
+  }
 });

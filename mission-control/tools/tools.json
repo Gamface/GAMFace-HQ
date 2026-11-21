@@ -56,6 +56,13 @@
       "notes": "Mission Control's own repository is Gamface/GAMFace-HQ (owner Gamface, repo GAMFace-HQ, default branch main).",
       "readOnly": true
     },
+    "inspo": {
+      "description": "Design references: screenshots, palettes, fonts, type scales, spacing and page structures from 832 curated real websites, plus reference components (Inspo, free hosted MCP server, no key)",
+      "url": "https://inspomcp.dev/api/mcp",
+      "only": ["recommend", "search_screens", "get_screen", "get_design_system", "find_similar", "find_by_color", "compare", "find_reference_components", "get_reference_jsx"],
+      "notes": "For a new page or redesign: start with recommend(brief) for 5 exemplar sites, a layout pattern and a palette; then get_design_system(slug) for exact fonts, colours and spacing, and get_screen(slug) for the screenshots. search_screens(query) finds pages by style ('editorial dark SaaS pricing'). Report site names, URLs and the exact tokens so the Coder can build from them. Not for projects that already have a design system.",
+      "readOnly": true
+    },
     "demo": {
       "description": "A built-in test server: echo text back, tell the time, and a pretend note writer (it changes nothing, but says it would)",
       "command": "node",
