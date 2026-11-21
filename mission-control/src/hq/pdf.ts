@@ -4,7 +4,7 @@
 // network requests at all: it runs in a throwaway profile with every request blocked.
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { Cdp, blockedReason, resolveCdpUrl } from "./browser";
 import { IMAGE_PATTERN, imageSources, renderMarkdown } from "./markdown";
@@ -239,5 +239,16 @@ export class Files {
   read(name: string): Buffer | null {
     const p = this.path(name);
     return p ? readFileSync(p) : null;
+  }
+
+  /** Every saved file, newest first. */
+  list(): { name: string; bytes: number; at: number }[] {
+    const out: { name: string; bytes: number; at: number }[] = [];
+    for (const name of readdirSync(this.dir)) {
+      if (!FILE_ID.test(name)) continue;
+      const st = statSync(path.join(this.dir, name));
+      if (st.isFile()) out.push({ name, bytes: st.size, at: st.mtimeMs });
+    }
+    return out.sort((a, b) => b.at - a.at);
   }
 }

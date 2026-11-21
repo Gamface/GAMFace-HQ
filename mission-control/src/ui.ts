@@ -64,7 +64,8 @@ import type { SceneSpec } from "./hq/video";
 import { ToolsClient, isDestructive, refuseFromHost, toolsFor, type ToolMedia } from "./hq/tools";
 import { KNOWN_VOICES, VoiceClient, extractNarration, sceneVoice, wantsCaptions, wantsOwnAudio, wantsVoice } from "./hq/voice";
 import type { Word } from "./hq/voice";
-import { AssetPatchSchema, AssetUploadSchema, Assets, SYSTEM_FONTS, assetBlock, publicName } from "./hq/assets";
+import { AssetInputSchema, AssetPatchSchema, AssetUploadSchema, Assets, SYSTEM_FONTS, assetBlock, publicName } from "./hq/assets";
+import { galleryItems, galleryKind } from "./hq/gallery";
 import { Projects, projectPrompt, projectScope, visibleIn } from "./hq/projects";
 import { Changes, rootLabel } from "./hq/changes";
 import type { Root } from "./hq/changes";
@@ -2478,6 +2479,25 @@ app.post("/api/assets", requireToken, (req, res) => {
   const out = assets.add(parsed.data);
   if ("error" in out) return res.status(400).json(out);
   if (out.role === "music" && voice) void findBeats(out.id).catch(() => {});
+  res.json(out);
+});
+
+// The Gallery: pictures and clips the cards made, and adding one to the asset dictionary
+app.get("/api/gallery", (req, res) => {
+  res.json({ items: galleryItems(files.list(), tasks.values(), assets.list(), projectParam(req.query.project)) });
+});
+
+app.post("/api/gallery/:name/asset", requireToken, (req, res) => {
+  const name = String(req.params.name);
+  if (!FILE_ID.test(name) || !galleryKind(name)) return res.status(404).json({ error: "That isn't a picture or clip in the gallery" });
+  const existing = assets.list().find((a) => a.source === name);
+  if (existing) return res.json(existing);
+  const parsed = AssetInputSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  const buf = files.read(name);
+  if (!buf) return res.status(404).json({ error: "File not found" });
+  const out = assets.add({ ...parsed.data, data: buf.toString("base64") }, name);
+  if ("error" in out) return res.status(400).json(out);
   res.json(out);
 });
 

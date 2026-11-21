@@ -17,6 +17,7 @@ import TeamPage from "./TeamPage";
 import RoutinesPage from "./RoutinesPage";
 import SkillsPage from "./SkillsPage";
 import AssetsPage from "./AssetsPage";
+import GalleryPage from "./GalleryPage";
 import ToolsPage from "./ToolsPage";
 import ProjectsPage from "./ProjectsPage";
 import FilesPage from "./FilesPage";
@@ -279,6 +280,7 @@ export default function MissionControl() {
       {view === "skills" && <SkillsPage />}
       {view === "tools" && <ToolsPage />}
       {view === "assets" && <AssetsPage />}
+      {view === "gallery" && <GalleryPage />}
       {view === "projects" && <ProjectsPage />}
       {view === "files" && <FilesPage />}
       {view === "console" && (<>

@@ -39,6 +39,8 @@ export interface Asset {
   updatedAt: number;
   // The project it belongs to; missing: every project (General)
   project?: string;
+  // The card file it was added from (Gallery → Add to Assets), e.g. images-a-fox-1a2b3c4d.png
+  source?: string;
 }
 
 export const MAX_ASSETS = 300;
@@ -208,7 +210,7 @@ export class Assets {
   }
 
   /** Adds an asset from base64 (a data: URL is fine). */
-  add(input: z.input<typeof AssetUploadSchema>): Asset | { error: string } {
+  add(input: z.input<typeof AssetUploadSchema>, source?: string): Asset | { error: string } {
     if (this.index.length >= MAX_ASSETS) return { error: `The asset dictionary is full (${MAX_ASSETS} assets). Delete some first.` };
     const b64 = input.data.replace(/^data:[^;,]*;base64,/, "");
     if (!/^[A-Za-z0-9+/=\s]+$/.test(b64)) return { error: "Send the file as base64" };
@@ -236,6 +238,7 @@ export class Assets {
       addedAt: now,
       updatedAt: now,
       ...(input.project ? { project: input.project } : {}),
+      ...(source ? { source } : {}),
     };
     this.index.push(asset);
     this.saveIndex();

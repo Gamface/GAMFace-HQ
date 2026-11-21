@@ -4,8 +4,8 @@ import type { ReactNode } from "react";
 // Navigation: an icon rail down the left on desktop, and a tab bar with a mic
 // button along the bottom on phones.
 
-export type View = "home" | "console" | "board" | "routines" | "skills" | "tools" | "assets" | "files" | "team" | "projects";
-export const VIEWS: View[] = ["home", "console", "board", "routines", "skills", "tools", "assets", "files", "team", "projects"];
+export type View = "home" | "console" | "board" | "routines" | "skills" | "tools" | "assets" | "gallery" | "files" | "team" | "projects";
+export const VIEWS: View[] = ["home", "console", "board", "routines", "skills", "tools", "assets", "gallery", "files", "team", "projects"];
 
 const icon = (d: ReactNode) => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5" aria-hidden>
@@ -21,6 +21,7 @@ const ITEMS: { view: View; label: string; icon: ReactNode }[] = [
   { view: "skills", label: "Skills", icon: icon(<path d="M12 3.5 14 10l6.5 2-6.5 2-2 6.5-2-6.5-6.5-2L10 10z" />) },
   { view: "tools", label: "Tools", icon: icon(<path d="M14.5 6.5a4 4 0 0 0-5.300 5.300L4 17v3h3l5.200-5.200a4 4 0 0 0 5.300-5.300l-2.500 2.500-2.300-.7-.7-2.300z" />) },
   { view: "assets", label: "Assets", icon: icon(<><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><circle cx="9" cy="10" r="1.6" /><path d="m4 17 5-4.5 4 3.5 3-2.5 4 3.5" /></>) },
+  { view: "gallery", label: "Gallery", icon: icon(<><rect x="3.5" y="3.5" width="7.5" height="7.5" rx="1.5" /><rect x="13" y="3.5" width="7.5" height="7.5" rx="1.5" /><rect x="3.5" y="13" width="7.5" height="7.5" rx="1.5" /><rect x="13" y="13" width="7.5" height="7.5" rx="1.5" /></>) },
   { view: "files", label: "Files", icon: icon(<path d="M3.5 7a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />) },
   { view: "team", label: "Team", icon: icon(<><circle cx="9" cy="9" r="3" /><path d="M3.5 19c.6-3 2.7-4.5 5.5-4.5s4.900 1.500 5.500 4.500M16 6.500a2.800 2.800 0 0 1 0 5.500M17.500 14.800c1.700.5 2.700 1.900 3 4.200" /></>) },
   { view: "projects", label: "Projects", icon: icon(<path d="m12 4 8.500 4.500L12 13 3.500 8.500zM3.500 12.500 12 17l8.500-4.500M3.500 16.500 12 21l8.500-4.500" />) },
