@@ -64,11 +64,13 @@ export async function runToolAgent(opts: {
   model: string;
   maxSteps: number;
   signal: AbortSignal;
+  /** More rules for the system prompt (the user's vault notes for this agent) */
+  extraRules?: string;
   log: (line: string, kind: "action" | "result" | "error") => void;
 }): Promise<string> {
   if (!opts.tools.length) return "No tools are installed that can answer this.";
   const today = new Date().toISOString().slice(0, 10);
-  const system = `${TOOLS_SYSTEM}\n- Today is ${today}.\n\nINSTALLED TOOLS:\n${toolList(opts.tools)}`;
+  const system = `${TOOLS_SYSTEM}\n- Today is ${today}.\n\nINSTALLED TOOLS:\n${toolList(opts.tools)}` + (opts.extraRules ? `\n\n${opts.extraRules}` : "");
   const byName = new Map(opts.tools.map((t) => [`${t.server}.${t.name}`, t]));
   const history: string[] = [];
   const done = new Map<string, { step: number; failed: boolean; tries: number; result: string }>();

@@ -117,3 +117,15 @@ test("the Tools teammate is offered only while tools are installed", async () =>
     setToolsSummary(null);
   }
 });
+
+test("the user's vault notes for Tools reach the tool agent's system prompt", async () => {
+  const seenSystem: string[] = [];
+  const chat: JsonChat = async (_m, messages) => {
+    seenSystem.push(messages[0].content);
+    return { action: "answer", answer: "ok" };
+  };
+  await runToolAgent({ ...base, task: "time", call: fakeCall({}).call, chat, extraRules: "NOTES FROM THE VAULT:\nUse brave for web search." });
+  assert.match(seenSystem[0], /INSTALLED TOOLS:[\s\S]*NOTES FROM THE VAULT:\nUse brave for web search\./);
+  await runToolAgent({ ...base, task: "time", call: fakeCall({}).call, chat });
+  assert.doesNotMatch(seenSystem[1], /NOTES FROM THE VAULT/);
+});

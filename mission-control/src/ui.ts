@@ -45,7 +45,7 @@ import {
   withLiveContext,
 } from "./hq/team";
 import { TelegramBot } from "./hq/telegram";
-import { carriedPrivate, hasPrivate, privateBlock, sanitize, splitPrivate } from "./hq/privacy";
+import { carriedPrivate, hasPrivate, privateBlock, resolvePrivate, sanitize, splitPrivate } from "./hq/privacy";
 import { Uploads } from "./hq/uploads";
 import { parseWav, splitWav } from "./hq/wav";
 import { closeRound, historyMessages } from "./hq/thread";
@@ -735,6 +735,17 @@ async function userMessage(agent: AgentTarget, text: string, recallFor: string, 
 
 const browsingEnabled = (task: Task) => Boolean(BROWSER_CDP_URL) && task.source !== "eval";
 
+/**
+ * An agent's vault notes (HQ/shared.md + HQ/agents/<agent>.md) for its live runs: the
+ * browser's steps and the tool agent's calls build their own prompts, so they'd miss them.
+ * Private like everywhere else: cloud models get nothing in their place.
+ */
+function liveVaultNotes(task: Task, agent: "browser" | "tools"): string {
+  if (task.source === "eval") return "";
+  const notes = vaultNotes(OBSIDIAN_VAULT, agent);
+  return notes ? privateBlock(`NOTES FROM THE VAULT (the user's standing rules for you; follow them, but the reply format and safety rules above come first):\n${notes}`) : "";
+}
+
 /** Sites a read-only run may open: the card's list, or the sites named in its prompt, plus web search. */
 function readOnlySites(task: Task): string[] {
   const named = task.allowedSites?.length
@@ -801,8 +812,10 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
     push(`[${msg}]\n\n`);
     notices.add("read-only", "read-only:no-sites", msg);
   }
-  broadcastBrowser({ type: "start", taskId: task.id, task: request });
+  // The dashboard is on this PC: it shows the request in full, without privacy markers
+  broadcastBrowser({ type: "start", taskId: task.id, task: resolvePrivate(request, true).text });
   emit(task, "executing_tool");
+  const vaultRules = liveVaultNotes(task, "browser");
   try {
     const answer = await runBrowserAgent({
       task: request,
@@ -820,6 +833,7 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
               "Never type passwords, payment details or ID numbers: tell the user to enter those themselves.",
           'The user may point at things on the page (pins #1, #2…). Use a pin as the target or field, e.g. {"action": "click", "target": "#1"}. Pins are lost when the page changes.',
           task.source === "voice" ? `When you answer: ${VOICE_STYLE}` : "",
+          vaultRules,
         ]
           .filter(Boolean)
           .join("\n") || undefined,
@@ -844,7 +858,8 @@ async function browse(task: Task, request: string, signal: AbortSignal, push: (t
           },
     });
     push(`\n${redact(answer).text}`);
-    return { text: answer, sawPrivate: privateTask };
+    // Written after reading the vault notes, so private like any other agent's answer that saw them
+    return { text: answer, sawPrivate: privateTask || Boolean(vaultRules) };
   } finally {
     liveBrowsers.delete(task.id);
     lb.control.handBack();
@@ -904,6 +919,12 @@ async function useTools(task: Task, request: string, signal: AbortSignal, push: 
   const hidden = servers.flatMap((s) => (s.ok ? s.tools : [])).length - available.length;
   if (hidden > 0) push(`[${hidden > 1 ? `${hidden} tools that change things aren't` : "1 tool that changes things isn't"} available: ${isRoutine(task) ? "routines" : "read-only runs"} only use read-only tools.]\n`);
   const byName = new Map(available.map((t) => [`${t.server}.${t.name}`, t]));
+  // The user's vault notes for Tools go in its prompt. They're private, so a call whose
+  // arguments repeat something from them (a name, a number, a copied phrase) asks first;
+  // words the tool list or the request already contain don't count.
+  const vaultRules = liveVaultNotes(task, "tools");
+  const vaultText = vaultRules ? splitPrivate([vaultRules]).private : "";
+  const seenPublic = `${resolvePrivate(request, false).text}\n${available.map((t) => `${t.server} ${t.name} ${t.server}.${t.name} ${t.description}`).join("\n")}`;
   emit(task, "executing_tool");
   let calls = 0;
   const answer = await runToolAgent({
@@ -917,8 +938,13 @@ async function useTools(task: Task, request: string, signal: AbortSignal, push: 
       // A tool that changes things: the user approves this exact call (one that may destroy or
       // overwrite something always asks, whatever the settings). This also covers private context.
       // A read-only call whose instructions carry private material asks too, naming what it carries.
-      const detail = carried.length ? `its instructions include ${carried.join(", ")} from your private notes, memories or skills` : undefined;
-      const ask = info && !info.readOnly ? { kind: "change" as const, ...where, highRisk: isDestructive(info), detail } : carried.length ? { kind: "tool" as const, ...where, detail } : null;
+      const fromVault = vaultText ? carriedPrivate(shown, vaultText, seenPublic) : [];
+      const details = [
+        carried.length ? `its instructions include ${carried.join(", ")} from your private notes, memories or skills` : "",
+        fromVault.length ? `it repeats ${fromVault.join(", ")} from your vault notes` : "",
+      ].filter(Boolean);
+      const detail = details.length ? details.join("; ") : undefined;
+      const ask = info && !info.readOnly ? { kind: "change" as const, ...where, highRisk: isDestructive(info), detail } : details.length ? { kind: "tool" as const, ...where, detail } : null;
       if (ask) {
         const refusal = await askApproval(task, "tools", ask, signal);
         if (refusal) return { text: `Not done: ${refusal}. Don't try this call again; answer with what you have.`, isError: true, ms: 0 };
@@ -940,6 +966,7 @@ async function useTools(task: Task, request: string, signal: AbortSignal, push: 
     model: "tools",
     maxSteps: TOOLS_MAX_STEPS,
     signal,
+    extraRules: vaultRules || undefined,
     log: (line, kind) => {
       push(kind === "action" ? `🔧 ${line}\n` : `   ${line}\n`);
       if (kind === "action") hive.log("tools", "call", line.slice(0, 160), task.id);
@@ -947,7 +974,8 @@ async function useTools(task: Task, request: string, signal: AbortSignal, push: 
   });
   if (!calls) push("[No tool call was needed.]\n");
   push(`\n${redact(answer).text}`);
-  return { text: answer, sawPrivate: privateTask };
+  // Written after reading the vault notes, so private like any other agent's answer that saw them
+  return { text: answer, sawPrivate: privateTask || Boolean(vaultRules) };
 }
 
 /** One agent's turn: the real browser for the browser agent when enabled, otherwise a model call. */
@@ -1155,11 +1183,16 @@ async function runTask(task: Task) {
       }
       transcriptBlock = privateBlock(
         spoken
-          ? `THE USER SPOKE THIS REQUEST (transcribed from their recording; treat it exactly like a typed request, and don't mention audio):\n${transcript}`
+          ? `THE USER'S REQUEST:\n${transcript}`
           : `TRANSCRIPT OF THE ATTACHED AUDIO:\n${transcript}`,
         "(The attached audio and its transcript stay on the user's PC and are withheld from cloud models.)",
       );
     }
+    // A spoken request: the transcript replaces the stand-in prompt ("Listen to the attached audio…")
+    // everywhere. `asked` is for local work (recall, skills, files); `askedForModel` keeps it private
+    // from cloud models, which see the stand-in as before.
+    const asked = spokenNow ? transcript : ask;
+    const askedForModel = spokenNow ? privateBlock(transcript, ask) : ask;
     const pdfNote = makePdf ? pdfInstructions(task.images ?? []) : "";
 
     // Attached PDFs: short ones go to the agent whole; long ones are read in parts by
@@ -1205,7 +1238,7 @@ async function runTask(task: Task) {
               {
                 role: "user",
                 content:
-                  `REQUEST: ${ask}\n\nPART ${k + 1} OF ${kept.length} of ${label}, pages ${part.from + 1}–${part.to}:\n` +
+                  `REQUEST: ${askedForModel}\n\nPART ${k + 1} OF ${kept.length} of ${label}, pages ${part.from + 1}–${part.to}:\n` +
                   `${privateBlock(part.text, "(This part of the document is withheld from cloud models.)")}\n\n` +
                   "Write concise notes (at most 200 words) on everything in this part that helps with the request: facts, figures, names, dates and short quotes, each with its page number. " +
                   "If nothing here is relevant, reply only: Nothing relevant.",
@@ -1275,7 +1308,7 @@ async function runTask(task: Task) {
     // A spoken request replaces the stand-in prompt
     let request = [spokenNow ? "" : ask, transcriptBlock, docsBlock].filter(Boolean).join("\n\n");
     if (images.length && lead !== "vision") {
-      openSub = addSubtask(task, "vision", `Describe the ${images.length} attached picture(s) for: ${ask}`);
+      openSub = addSubtask(task, "vision", `Describe the ${images.length} attached picture(s) for: ${asked.slice(0, 200)}`);
       task.activeAgent = "vision";
       emit(task, "delegating", `── ${TEAM.vision.name} (${openSub.model}) ── reading ${images.length} picture(s)\n\n`);
       emit(task, "thinking");
@@ -1328,11 +1361,11 @@ async function runTask(task: Task) {
     const workspace = editsFiles ? workspaceOf(task.project) : null;
     if (workspace) {
       workspace.ensure();
-      request += workspaceBlock(workspace, ask, WORKSPACE_CONTEXT_CHARS);
+      request += workspaceBlock(workspace, asked, WORKSPACE_CONTEXT_CHARS);
       push(`[Workspace: ${workspace.name}]\n`);
     }
     // Approved skills that fit this request
-    const leadSkills = useTeam ? skills.match(ask, lead, 2, projects.idOf(task.project)) : [];
+    const leadSkills = useTeam ? skills.match(asked, lead, 2, projects.idOf(task.project)) : [];
     if (leadSkills.length) {
       push(`[Using skill${leadSkills.length > 1 ? "s" : ""}: ${leadSkills.map((s) => s.name).join(", ")}]\n`);
       for (const s of leadSkills) skills.recordUse(s.id);
@@ -1344,7 +1377,7 @@ async function runTask(task: Task) {
       ...history,
       {
         role: "user",
-        content: await userMessage(lead, request, ask, useTeam, projects.idOf(task.project)),
+        content: await userMessage(lead, request, asked, useTeam, projects.idOf(task.project)),
         ...(lead === "vision" && images.length ? { images } : {}),
       },
     ];
@@ -1353,7 +1386,7 @@ async function runTask(task: Task) {
       lead,
       leadMessages,
       // The browser agent works from this text alone, so a reply carries the original request
-      (followUp ? `${ask}\n\n(This follows up on the earlier request: ${task.prompt.slice(0, 500)})` : ask) + pdfNote + skillBlock(leadSkills),
+      (followUp ? `${askedForModel}\n\n(This follows up on the earlier request: ${task.prompt.slice(0, 500)})` : askedForModel) + pdfNote + skillBlock(leadSkills),
       controller.signal,
       push,
       override,
@@ -1391,7 +1424,7 @@ async function runTask(task: Task) {
           for (const s of mateSkills) skills.recordUse(s.id);
         }
         // Coder and File teammates get the workspace too
-        const mateTask = h.task + skillBlock(mateSkills) + (workspace && (h.agent === "coder" || h.agent === "file") ? workspaceBlock(workspace, `${ask}\n${h.task}`, WORKSPACE_CONTEXT_CHARS) : "");
+        const mateTask = h.task + skillBlock(mateSkills) + (workspace && (h.agent === "coder" || h.agent === "file") ? workspaceBlock(workspace, `${asked}\n${h.task}`, WORKSPACE_CONTEXT_CHARS) : "");
         const turn = await agentTurn(
           task,
           h.agent,
@@ -1433,7 +1466,7 @@ async function runTask(task: Task) {
         [
           { role: "system", content: systemPrompt(task, lead, { team: true, delegate: false }) },
           ...history,
-          { role: "user", content: await userMessage(lead, synthesisPrompt(ask, results) + pdfNote, ask, true, projects.idOf(task.project)) },
+          { role: "user", content: await userMessage(lead, synthesisPrompt(askedForModel, results) + pdfNote, asked, true, projects.idOf(task.project)) },
         ],
         controller.signal,
         push,
@@ -1472,7 +1505,7 @@ async function runTask(task: Task) {
     log(lead, "complete", task.answer);
     // Read-only runs don't save memories either
     if (autoSkills() && worthASkill(task) && !skills.draftedFrom(task.id)) skillJobs.push(task.id);
-    if (useTeam && !task.readOnly && !isRoutine(task) && task.answer) memoryJobs.push({ agent: lead, prompt: ask, answer: task.answer, private: usedPrivate, taskId: task.id, project: projects.idOf(task.project) });
+    if (useTeam && !task.readOnly && !isRoutine(task) && task.answer) memoryJobs.push({ agent: lead, prompt: asked, answer: task.answer, private: usedPrivate, taskId: task.id, project: projects.idOf(task.project) });
     if (makeVideo && task.answer) {
       // Render, and let the lead fix the scene when Remotion can't render it
       let current = answer;
@@ -1485,7 +1518,7 @@ async function runTask(task: Task) {
           lead,
           [
             { role: "system", content: systemPrompt(task, lead, { team: useTeam, delegate: false }) },
-            { role: "user", content: await userMessage(lead, request, ask, useTeam, projects.idOf(task.project)) },
+            { role: "user", content: await userMessage(lead, request, asked, useTeam, projects.idOf(task.project)) },
             { role: "assistant", content: current },
             {
               role: "user",

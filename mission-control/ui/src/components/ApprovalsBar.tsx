@@ -109,12 +109,25 @@ interface Handoff {
   id: string;
   taskTitle: string;
   reason?: string;
+  since?: number;
   expiresAt: number;
 }
 
 export default function ApprovalsBar({ taskId }: { taskId?: string }) {
   const [list, setList] = useState<PendingApproval[]>([]);
   const [handoffs, setHandoffs] = useState<Handoff[]>([]);
+  // Hidden hand-off banners (by card and since), so the banner can't cover the browser it points to
+  const [hidden, setHidden] = useState<string[]>([]);
+  const [handoffError, setHandoffError] = useState<string | null>(null);
+  const handBack = async (id: string) => {
+    setHandoffError(null);
+    try {
+      await send("POST", `/api/browser/${encodeURIComponent(id)}/handback`, {});
+      await load();
+    } catch (e) {
+      setHandoffError(errText(e));
+    }
+  };
   const baseTitle = useRef(document.title);
   const load = () =>
     getJson<{ pending: PendingApproval[]; handoffs?: Handoff[] }>("/api/approvals")
@@ -135,7 +148,8 @@ export default function ApprovalsBar({ taskId }: { taskId?: string }) {
     document.title = n ? `⏸ (${n}) Needs you · ${baseTitle.current}` : baseTitle.current;
   }, [list.length, handoffs.length, taskId]);
   const shown = taskId ? list.filter((a) => a.taskId === taskId) : list;
-  const asks = taskId ? handoffs.filter((h) => h.id === taskId) : handoffs;
+  const key = (h: Handoff) => `${h.id}:${h.since ?? 0}`;
+  const asks = (taskId ? handoffs.filter((h) => h.id === taskId) : handoffs).filter((h) => !hidden.includes(key(h)));
   if (!shown.length && !asks.length) return null;
   return (
     <div className="space-y-2">
@@ -150,11 +164,28 @@ export default function ApprovalsBar({ taskId }: { taskId?: string }) {
               Card: {h.taskTitle} · <Countdown until={h.expiresAt} />
             </p>
           </div>
-          <button onClick={() => (location.hash = "#browser")} className="px-3 py-1.5 rounded-md bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium">
-            Go to the browser
-          </button>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button onClick={() => (location.hash = "#browser")} className="px-3 py-1.5 rounded-md bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium">
+              Go to the browser
+            </button>
+            <button
+              onClick={() => void handBack(h.id)}
+              title="Give the browser back to the agent; it looks at the page again"
+              className="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium"
+            >
+              Hand back
+            </button>
+            <button
+              onClick={() => setHidden((x) => [...x, key(h)])}
+              title="Hide this banner; the agent keeps waiting. Hand back from the Browser tab."
+              className="px-2 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
+            >
+              Hide
+            </button>
+          </div>
         </div>
       ))}
+      {handoffError && asks.length > 0 && <p className="text-[11px] text-rose-300 px-1">{handoffError}</p>}
       {shown.map((a) => (
         <Request key={a.id} a={a} onDone={() => void load()} />
       ))}

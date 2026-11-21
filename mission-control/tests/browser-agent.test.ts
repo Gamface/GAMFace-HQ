@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { searchResultTarget } from "../src/hq/browser";
+import { insteadOfGoogle, searchResultTarget } from "../src/hq/browser";
 import type { BrowserSession, PageState } from "../src/hq/browser";
 import { handoffRefusal, numberedLink, runBrowserAgent } from "../src/hq/browser-agent";
 import type { JsonChat } from "../src/hq/ollama";
@@ -139,4 +139,15 @@ test("greetings and bare replies don't go to the browser", async () => {
   assert.equal((await routeTask(toBrowser, "m", "What's the latest news on the Mars mission?")).agent, "browser");
   assert.equal(needsWeb("find me a cheap flight to Lisbon"), true);
   assert.equal(needsWeb("Assign Browser Agent 2"), false);
+});
+
+test("a Google search becomes the same DuckDuckGo search; other Google pages and sites are left alone", () => {
+  assert.equal(insteadOfGoogle("https://www.google.com/search?q=youth+arts+programs&sei=abc"), "https://html.duckduckgo.com/html/?q=youth%20arts%20programs");
+  assert.equal(insteadOfGoogle("https://google.ca/?q=toronto%20theatre"), "https://html.duckduckgo.com/html/?q=toronto%20theatre");
+  assert.equal(insteadOfGoogle("https://www.google.co.uk/search?q=a"), "https://html.duckduckgo.com/html/?q=a");
+  assert.equal(insteadOfGoogle("https://maps.google.com/maps?q=toronto"), null);
+  assert.equal(insteadOfGoogle("https://docs.google.com/document/d/x"), null);
+  assert.equal(insteadOfGoogle("https://www.google.com/"), null);
+  assert.equal(insteadOfGoogle("https://notgoogle.com/search?q=a"), null);
+  assert.equal(insteadOfGoogle("not a url"), null);
 });

@@ -68,3 +68,13 @@ test("a phrase copied from private material is caught", () => {
 test("a paraphrase in plain words isn't caught (the setting covers this)", () => {
   assert.deepEqual(check("Find recipes without nuts for someone with a peanut allergy"), []);
 });
+
+test("a tool call repeating the vault notes is caught; an ordinary search isn't", () => {
+  const notes =
+    "# HQ shared rules\nYou work for one person running GAMFace from their own PC. Client list: Riverside Youth Theatre, budget 4500.\n" +
+    "# Jarvis Tools\nPick the most direct tool: web search -> brave (better than the browser for plain searches, which Google often blocks).";
+  const seenPublic = "Find youth arts programs in Toronto\nbrave web_search brave.web_search Search the web with Brave";
+  assert.deepEqual(carriedPrivate(JSON.stringify({ query: "youth arts programs Toronto" }), notes, seenPublic), []);
+  const leak = carriedPrivate(JSON.stringify({ query: "Riverside Youth Theatre budget 4500" }), notes, seenPublic);
+  assert.ok(leak.length > 0, "names and numbers from the notes are caught");
+});

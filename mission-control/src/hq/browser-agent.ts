@@ -1,4 +1,4 @@
-import { fallbackSearch, searchBlocked } from "./browser";
+import { fallbackSearch, insteadOfGoogle, searchBlocked } from "./browser";
 import type { BrowserSession, PageState } from "./browser";
 import type { ChatMessage, JsonChat } from "./ollama";
 import { sanitize } from "./privacy";
@@ -178,8 +178,10 @@ export async function runBrowserAgent(opts: {
     try {
       switch (action) {
         case "navigate": {
-          const url = String(a.url ?? "");
-          opts.log(`navigate ${url}`, "action");
+          const asked = String(a.url ?? "");
+          // Google blocks automated searches: the same search goes to DuckDuckGo (then Bing)
+          const url = insteadOfGoogle(asked) ?? asked;
+          opts.log(url === asked ? `navigate ${url}` : `navigate ${url} (instead of Google, which blocks automated searches)`, "action");
           // DuckDuckGo sometimes blocks automated searches (a bot check) or times out: use Bing then
           const bing = fallbackSearch(url);
           try {

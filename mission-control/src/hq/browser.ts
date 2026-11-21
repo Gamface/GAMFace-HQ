@@ -331,6 +331,22 @@ export function fallbackSearch(url: string): string | null {
   }
 }
 
+/**
+ * A Google search address as the DuckDuckGo search the agent should use, or null when it
+ * isn't one. Google blocks automated searches ("unusual traffic"), so the agent never
+ * searches there even when the model asks to.
+ */
+export function insteadOfGoogle(url: string): string | null {
+  try {
+    const u = new URL(url);
+    const q = u.searchParams.get("q");
+    if (!/(^|\.)google\.[a-z]{2,3}(\.[a-z]{2})?$/i.test(u.hostname) || !/^\/(search|webhp)?$/i.test(u.pathname) || !q) return null;
+    return `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
+  } catch {
+    return null;
+  }
+}
+
 /** DuckDuckGo's "are you a bot" page, or a results page with no results. */
 export function searchBlocked(p: { url: string; text: string; links: unknown[] }): boolean {
   if (!/duckduckgo\.com/i.test(p.url)) return false;
