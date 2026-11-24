@@ -63,6 +63,8 @@ export const AgentTaskSchema = z.object({
   dependsOn: z.array(z.string().uuid()).max(10).default([]),
   // Finished cards wait in the Review column until accepted
   needsReview: z.boolean().default(false),
+  // The first run writes a plan and stops; you mark it up in the Inbox and approve it before the work runs
+  planFirst: z.boolean().default(false),
   // "backlog" parks the card; "ready" queues it
   column: z.enum(["backlog", "ready"]).default("ready"),
   // Read-only run: no typing or form submits, links only on allowedSites, no notes or memories saved
@@ -156,6 +158,7 @@ export const TaskPatchSchema = z.object({
   priority: PrioritySchema.optional(),
   dependsOn: z.array(z.string().uuid()).max(10).optional(),
   needsReview: z.boolean().optional(),
+  planFirst: z.boolean().optional(),
   // Move between backlog and ready, or reorder within a column
   column: z.enum(["backlog", "ready"]).optional(),
   position: z.number().optional(),
@@ -181,6 +184,38 @@ export const AgentStreamPayloadSchema = z.object({
   source: TaskSourceSchema.optional(),
 });
 
+const PlanAnnotationSchema = z.object({
+  blockId: z.string().max(20),
+  quote: z.string().max(2000),
+  kind: z.enum(["comment", "delete", "replace"]),
+  text: z.string().max(2000).optional(),
+});
+
+export const PlanStateSchema = z.object({
+  status: z.enum(["awaiting", "revising", "approved"]),
+  version: z.number(),
+  text: z.string(),
+  at: z.number(),
+  lastReview: z
+    .object({ decision: z.enum(["approve", "revise"]), annotations: z.array(PlanAnnotationSchema), note: z.string().optional(), at: z.number() })
+    .optional(),
+});
+
+/** Your review of a plan: the markup, and whether it runs or goes back for another version. */
+export const PlanReviewSchema = z.object({
+  decision: z.enum(["approve", "revise"]),
+  annotations: z.array(PlanAnnotationSchema).max(60).default([]),
+  note: z.string().trim().max(4000).optional(),
+  // The version you marked up; a newer one means your markup is stale
+  version: z.number().int().optional(),
+});
+
+/** Your answer to an agent's question in the Inbox. */
+export const QuestionAnswerSchema = z.object({
+  answer: z.string().trim().min(1).max(1000),
+  note: z.string().trim().max(1000).optional(),
+});
+
 export const TaskSummarySchema = z.object({
   id: z.string(),
   prompt: z.string(),
@@ -203,6 +238,9 @@ export const TaskSummarySchema = z.object({
   dependsOn: z.array(z.string()).optional(),
   needsReview: z.boolean().optional(),
   acceptedAt: z.number().optional(),
+  // Plan first: the card's plan and where its review stands
+  planFirst: z.boolean().optional(),
+  plan: PlanStateSchema.optional(),
   parentId: z.string().optional(),
   position: z.number().optional(),
   // Set when a restart cut the run short; the card waits for Retry
@@ -253,7 +291,7 @@ export type TaskSummary = z.infer<typeof TaskSummarySchema>;
 
 export const TERMINAL_STATUSES: readonly AgentStatus[] = ["complete", "canceled", "error"];
 
-export function boardColumn(t: Pick<TaskSummary, "status" | "needsReview" | "acceptedAt">): BoardColumn {
+export function boardColumn(t: Pick<TaskSummary, "status" | "needsReview" | "acceptedAt" | "plan">): BoardColumn {
   switch (t.status) {
     case "backlog":
     case "idle":
@@ -261,7 +299,8 @@ export function boardColumn(t: Pick<TaskSummary, "status" | "needsReview" | "acc
     case "queued":
       return "ready";
     case "complete":
-      return t.needsReview && !t.acceptedAt ? "review" : "done";
+      // A plan waiting for your markup is in review too
+      return t.plan?.status === "awaiting" || (t.needsReview && !t.acceptedAt) ? "review" : "done";
     case "canceled":
     case "error":
       return "failed";

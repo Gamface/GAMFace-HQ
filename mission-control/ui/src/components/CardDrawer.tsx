@@ -28,6 +28,8 @@ interface Detail {
   dependsOn?: string[];
   waitingOn: string[];
   needsReview?: boolean;
+  planFirst?: boolean;
+  plan?: { status: "awaiting" | "revising" | "approved"; version: number };
   readOnly?: boolean;
   allowedSites?: string[];
   usedPrivate?: boolean;
@@ -59,7 +61,7 @@ const RUNNING = ["routing", "thinking", "delegating", "streaming", "executing_to
 function columnOf(d: Detail): BoardCard["column"] {
   if (d.status === "backlog" || d.status === "idle") return "backlog";
   if (d.status === "queued") return "ready";
-  if (d.status === "complete") return d.needsReview && !d.acceptedAt ? "review" : "done";
+  if (d.status === "complete") return d.plan?.status === "awaiting" || (d.needsReview && !d.acceptedAt) ? "review" : "done";
   if (d.status === "error" || d.status === "canceled") return "failed";
   return "running";
 }
@@ -217,7 +219,12 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
                   Edit
                 </button>
               )}
-              {col === "review" && (
+              {col === "review" && d.plan?.status === "awaiting" && (
+                <button className={`${btn} bg-violet-600 hover:bg-violet-500 text-white`} onClick={() => (location.hash = "#inbox")}>
+                  ✎ Review plan v{d.plan.version} in the Inbox
+                </button>
+              )}
+              {col === "review" && d.plan?.status !== "awaiting" && (
                 <button className={`${btn} bg-emerald-600 hover:bg-emerald-500 text-white`} onClick={() => act(() => send("POST", `/api/tasks/${id}/accept`))}>
                   ✓ Accept
                 </button>
@@ -276,6 +283,7 @@ export default function CardDrawer({ id, cards, onClose, onChanged }: { id: stri
                 priority: d.priority ?? "normal",
                 dependsOn: d.dependsOn ?? [],
                 needsReview: Boolean(d.needsReview),
+                planFirst: Boolean(d.planFirst),
                 readOnly: Boolean(d.readOnly),
                 allowedSites: d.allowedSites ?? [],
                 images: d.images ?? [],

@@ -137,6 +137,8 @@ export interface BoardCard {
   dependsOn?: string[];
   waitingOn: string[];
   needsReview?: boolean;
+  planFirst?: boolean;
+  plan?: { status: "awaiting" | "revising" | "approved"; version: number };
   readOnly?: boolean;
   project?: string;
   profile?: string;

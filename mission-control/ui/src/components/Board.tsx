@@ -209,6 +209,11 @@ function Card({
         </span>
         {c.priority && c.priority !== "normal" && <span className={`px-1.5 py-0.5 rounded uppercase ${PRIORITY_STYLE[c.priority]}`}>{c.priority}</span>}
         {c.needsReview && <span className="px-1.5 py-0.5 rounded bg-fuchsia-900/70 text-fuchsia-200">review</span>}
+        {c.planFirst && (
+          <span className="px-1.5 py-0.5 rounded bg-violet-900/70 text-violet-200" title={c.plan?.status === "awaiting" ? "The plan waits for your markup in the Inbox" : "Plan first"}>
+            {c.plan?.status === "awaiting" ? `plan v${c.plan.version} · review in Inbox` : c.plan?.status === "approved" ? "plan approved" : "plan first"}
+          </span>
+        )}
         {c.readOnly && <span className="px-1.5 py-0.5 rounded bg-sky-900/70 text-sky-200" title="Read-only run">👁 read-only</span>}
         {c.usedPrivate && <span title="Used your private notes, memories or pictures">🔒</span>}
         {(c.documents?.length ?? 0) > 0 && <span title={`${c.documents!.length} PDF(s) attached`}>📑{c.documents!.length > 1 ? c.documents!.length : ""}</span>}

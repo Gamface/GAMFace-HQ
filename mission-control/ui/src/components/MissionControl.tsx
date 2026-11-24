@@ -25,6 +25,7 @@ import ProjectSwitcher from "./ProjectSwitcher";
 import { useProjects } from "../project";
 import ApprovalsBar from "./ApprovalsBar";
 import HomePage from "./HomePage";
+import InboxPage from "./InboxPage";
 import type { SystemInfo } from "./HomePage";
 import { Rail, TabBar, VIEWS } from "./Nav";
 import type { View } from "./Nav";
@@ -124,6 +125,18 @@ export default function MissionControl() {
   const [autoScroll, setAutoScroll] = useState(true);
   const [dispatchError, setDispatchError] = useState<string | null>(null);
   const [system, setSystem] = useState<SystemInfo | null>(null);
+  // How many things wait on you in the Inbox (questions, plans, results to check, approvals)
+  const [inboxCount, setInboxCount] = useState(0);
+  useEffect(() => {
+    const load = () =>
+      fetch(`${HARNESS_URL}/api/inbox`)
+        .then((r) => r.json())
+        .then((d: { count?: number }) => setInboxCount(d.count ?? 0))
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 8000);
+    return () => clearInterval(t);
+  }, []);
   const outputRef = useRef<HTMLDivElement>(null);
   const telemetryRef = useRef<HTMLDivElement>(null);
 
@@ -220,8 +233,8 @@ export default function MissionControl() {
 
   return (
     <div className="flex h-dvh bg-slate-950 text-slate-100 font-sans">
-      <Rail view={view} onView={setView} connection={connection} />
-      <TabBar view={view} onView={setView} onMic={pressMic} />
+      <Rail view={view} onView={setView} connection={connection} badges={{ inbox: inboxCount }} />
+      <TabBar view={view} onView={setView} onMic={pressMic} badges={{ inbox: inboxCount }} />
       {/* Actions waiting for the user's OK float over every page */}
       <div className="fixed top-3 md:top-[84px] left-1/2 -translate-x-1/2 w-[min(1100px,96vw)] z-40 shadow-2xl shadow-black/70 rounded-lg bg-slate-950">
         <ApprovalsBar />
@@ -274,6 +287,7 @@ export default function MissionControl() {
         </div>
       </header>
 
+      {view === "inbox" && <InboxPage />}
       {view === "board" && <Board />}
       {view === "team" && <TeamPage />}
       {view === "routines" && <RoutinesPage />}
