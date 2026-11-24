@@ -290,8 +290,10 @@ export interface PickOptions {
   now?: number;
 }
 
-/** A dependency is satisfied once it completed and, if it needs review, was accepted. */
+/** A dependency is satisfied once it completed and, if it needs review, was accepted (a plan-first one, once its plan ran). */
 function satisfied(dep: Task | undefined): boolean {
+  // A plan-first card counts once its plan is approved and the work itself is done
+  if (dep?.planFirst && dep.plan?.status !== "approved") return false;
   return !dep || (dep.status === "complete" && (!dep.needsReview || Boolean(dep.acceptedAt)));
 }
 

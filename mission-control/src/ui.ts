@@ -8,6 +8,8 @@ import {
   AgentStreamPayload,
   AgentTarget,
   AgentTaskSchema,
+  PlanReviewSchema,
+  QuestionAnswerSchema,
   TaskPatchSchema,
   TaskReplySchema,
   TaskSummary,
@@ -54,6 +56,8 @@ import { DOC_ID, DocCache, cleanName, extractPdf, partsOf, withPageMarks } from 
 import type { PdfText } from "./hq/docs";
 import { Scheduler } from "./hq/scheduler";
 import { ApprovalCenter, ApprovalPolicySchema } from "./hq/approvals";
+import { ASK_RULES, QuestionStore, answerMessage, parseAsks, readyToDeliver } from "./hq/inbox";
+import { PLAN_RULES, cleanAnnotations, applyAnnotations, reviewMessage } from "./hq/plans";
 import type { ActionRequest, Approval } from "./hq/approvals";
 import { PROFILE_NAME, Profiles } from "./hq/profiles";
 import { BrowserControl } from "./hq/takeover";
@@ -138,6 +142,8 @@ const VOICE_STYLE =
 
 // --- State ------------------------------------------------------------------
 const store = new TaskStore(DATA_DIR);
+// Questions agents leave for you in the Inbox (beside the cards, in the same database)
+const questions = new QuestionStore(store.sql);
 const { recovered } = store.load();
 const models = new ModelRegistry(store, {
   model: OLLAMA_MODEL,
@@ -710,10 +716,18 @@ async function streamTurn(
 const READ_ONLY_RULES =
   "\n\nTHIS IS A READ-ONLY RUN: look things up and report back only. Don't submit, change, buy, sign up for or delete anything.";
 
+/** A plan-first card whose plan isn't approved yet: this run writes (or rewrites) the plan. */
+const planMode = (task: Task) => Boolean(task.planFirst) && task.plan?.status !== "approved";
+/** Cards whose lead may leave a question in the Inbox (someone is there to answer it). */
+const mayAsk = (task: Task) => !isRoutine(task) && task.source !== "eval" && task.source !== "voice";
+
 function systemPrompt(task: Task, agent: AgentTarget, opts: { team: boolean; delegate: boolean }) {
   let system = TEAM[agent].prompt;
   if (task.source === "voice") system += ` ${VOICE_STYLE}`;
   if (opts.delegate) system += delegationRules();
+  // Only the lead's answer reaches you, so only the lead writes plans and asks questions
+  if (agent === task.targetAgent && planMode(task)) system += PLAN_RULES;
+  if (agent === task.targetAgent && mayAsk(task)) system += ASK_RULES;
   if (task.readOnly) system += READ_ONLY_RULES;
   if (agent === "file" && OBSIDIAN_VAULT && task.source !== "voice" && !task.readOnly) system += NOTE_RULES;
   if (opts.team) system += teamContext(agent, vaultNotes(OBSIDIAN_VAULT, agent));
@@ -1122,6 +1136,13 @@ async function runTask(task: Task) {
     // A reply to a card whose last answer was a scene ("make the title bigger") renders again
     const lastAnswer = followUp ? [...(task.thread ?? [])].reverse().find((t) => t.role === "agent")?.text : undefined;
     let makeVideo = (wantsVideo(ask) || Boolean(lastAnswer && extractScene(lastAnswer))) && task.source !== "eval";
+    // A plan-first run only writes the plan: no video, PDF, file edits or handoffs yet
+    const planning = planMode(task);
+    if (planning) {
+      makePdf = false;
+      makeVideo = false;
+      push(`[Plan first: writing plan version ${(task.plan?.version ?? 0) + 1} for your review. Nothing runs until you approve it in the Inbox.]\n`);
+    }
     const learned: string[] = [];
     const images = (task.images ?? []).map((id) => uploads.base64(id)).filter((b): b is string => Boolean(b));
 
@@ -1300,7 +1321,7 @@ async function runTask(task: Task) {
     const override = task.modelOverride;
     task.model = models.resolve(lead, override).ref;
     store.save(task);
-    const delegate = canDelegate && lead === "planner";
+    const delegate = canDelegate && lead === "planner" && !planning;
     extendLimit(lead, delegate);
     let usedPrivate = heardPrivate;
 
@@ -1358,7 +1379,7 @@ async function runTask(task: Task) {
       if (plan.picked.length) push(`[Assets for this video: ${plan.picked.map((a) => a.name).join(", ")}]\n`);
     }
     // Workspace cards: the files, and how to change them
-    const editsFiles = Boolean(task.workspace) && !task.readOnly && !isRoutine(task);
+    const editsFiles = Boolean(task.workspace) && !task.readOnly && !isRoutine(task) && !planning;
     const workspace = editsFiles ? workspaceOf(task.project) : null;
     if (workspace) {
       workspace.ensure();
@@ -1503,6 +1524,19 @@ async function runTask(task: Task) {
     }
     flush();
     task.answer = redact(answer.replace(/<note title="[^"]*">[\s\S]*?<\/note>/g, "")).text.trim();
+    // Questions for the Inbox: taken out of the answer, posted, and named in one line at its end
+    const fromAnswer = mayAsk(task) ? parseAsks(task.answer) : { asks: [], text: task.answer };
+    if (fromAnswer.asks.length) {
+      task.answer = fromAnswer.text;
+      const posted = questions.post({ id: task.id, title: task.title || task.prompt.slice(0, 80), agent: lead }, fromAnswer.asks);
+      task.answer += `\n\n${posted.map((q) => `❓ Waiting in your Inbox: ${q.question}${q.options.length ? ` (${q.options.join(" / ")})` : ""}`).join("\n")}`;
+      for (const q of posted) log(lead, "question", q.question);
+    }
+    if (planning) {
+      const version = (task.plan?.version ?? 0) + 1;
+      task.plan = { status: "awaiting", version, text: fromAnswer.text, at: Date.now(), ...(task.plan?.lastReview ? { lastReview: task.plan.lastReview } : {}) };
+      log(lead, "plan", `plan v${version} waiting for your review`);
+    }
     log(lead, "complete", task.answer);
     // Read-only runs don't save memories either
     if (autoSkills() && worthASkill(task) && !skills.draftedFrom(task.id)) skillJobs.push(task.id);
@@ -1577,6 +1611,8 @@ async function runTask(task: Task) {
     task.activeAgent = undefined;
     store.save(task);
     notifyDone(task);
+    // Answers you gave while it was running go back to it now
+    deliverAnswers(task);
   }
 }
 
@@ -1746,6 +1782,8 @@ function createTask(input: unknown, extra: { chatId?: string; routineId?: string
     priority: d.priority,
     dependsOn: d.dependsOn,
     needsReview: d.needsReview,
+    // Routines run unattended, so nobody would be there to approve a plan
+    planFirst: d.planFirst && d.source !== "routine" && d.source !== "eval" ? true : undefined,
     readOnly: routine.readOnly || undefined,
     deliverTo: routine.deliverTo,
     allowedSites: d.allowedSites.length ? d.allowedSites : undefined,
@@ -2073,6 +2111,8 @@ function replyTo(task: Task, input: unknown): string | null {
   const now = Date.now();
   task.thread = closeRound(task, now);
   task.reply = r.message;
+  // Replying to a plan that waits for review asks for another version of it
+  if (task.plan?.status === "awaiting") task.plan = { ...task.plan, status: "revising" };
   task.images = r.images.length ? r.images : undefined;
   task.audio = r.audio.length ? r.audio : undefined;
   task.documents = r.documents.length ? r.documents : undefined;
@@ -2131,6 +2171,11 @@ function patchTask(task: Task, input: unknown): { error?: string } {
   if (p.prompt) task.prompt = p.prompt;
   if (p.priority) task.priority = p.priority;
   if (p.needsReview !== undefined) task.needsReview = p.needsReview;
+  if (p.planFirst !== undefined) {
+    if (!editable) return { error: "Only cards in Backlog or Ready can change plan first" };
+    if (isRoutine(task)) return { error: "Routine cards run unattended, so they can't wait for a plan review" };
+    task.planFirst = p.planFirst || undefined;
+  }
   if (p.readOnly !== undefined) {
     if (!editable) return { error: "Only cards in Backlog or Ready can change read-only mode" };
     task.readOnly = p.readOnly || undefined;
@@ -2789,6 +2834,7 @@ app.get("/api/files/:name", (req, res) => {
 app.post("/api/tasks/:id/accept", requireToken, (req, res) => {
   const task = tasks.get(String(req.params.id));
   if (!task || task.status !== "complete") return res.status(400).json({ error: "Only finished cards can be accepted" });
+  if (task.plan?.status === "awaiting") return res.status(400).json({ error: "This card's plan is waiting for your review: approve it or send it back from the Inbox" });
   task.acceptedAt = Date.now();
   store.save(task);
   void pump(); // cards waiting on this one may now run
@@ -2800,6 +2846,7 @@ app.post("/api/tasks/:id/archive", requireToken, (req, res) => {
   if (!task || task.parentId) return res.status(404).json({ error: "Task not found" });
   if (RUNNING_STATUSES.includes(task.status)) return res.status(400).json({ error: "Cancel the card before removing it" });
   store.archive(task.id);
+  questions.dropTask(task.id);
   res.json({ ok: true });
 });
 
@@ -3020,6 +3067,119 @@ app.get("/api/search", (req, res) => {
     })
     .filter(Boolean);
   res.json(hits);
+});
+
+// --- Decision Inbox -----------------------------------------------------------
+/**
+ * Sends a card the answers it's been waiting for, once it's finished and every question
+ * it asked is answered or dismissed. Returns why not when it can't go yet.
+ */
+function deliverAnswers(task: Task): string | null {
+  const ready = readyToDeliver(questions, task.id, TERMINAL_STATUSES.includes(task.status));
+  if (!ready.length) return null;
+  const err = replyTo(task, { message: answerMessage(ready), targetAgent: "same" });
+  if (err) {
+    hive.log("inbox", "not sent", `${err} (the answer waits on the card)`, task.id);
+    return err;
+  }
+  questions.markDelivered(ready.map((q) => q.id));
+  hive.log("inbox", "answered", ready.map((q) => `${q.question} → ${q.answer}`).join("; "), task.id);
+  return null;
+}
+
+const INBOX_FINISHED_MS = 3 * 24 * 60 * 60_000;
+
+app.get("/api/inbox", (_req, res) => {
+  const top = [...tasks.values()].filter((t) => !t.parentId);
+  const open = questions.open().filter((q) => tasks.has(q.taskId));
+  const card = (t: Task) => ({
+    id: t.id,
+    title: t.title || t.prompt.slice(0, 80),
+    agent: t.targetAgent,
+    status: t.status,
+    project: t.project,
+    finishedAt: t.finishedAt,
+    preview: (t.answer ?? t.error ?? "").slice(0, 280),
+  });
+  const plans = top
+    .filter((t) => t.plan && (t.plan.status === "awaiting" || t.plan.status === "revising"))
+    .map((t) => ({ ...card(t), kind: "plan" as const, plan: t.plan }));
+  const reviews = top
+    .filter((t) => t.status === "complete" && t.needsReview && !t.acceptedAt && t.plan?.status !== "awaiting" && t.plan?.status !== "revising")
+    .map((t) => ({ ...card(t), kind: "result" as const }));
+  const since = Date.now() - INBOX_FINISHED_MS;
+  const finished = top
+    .filter((t) => TERMINAL_STATUSES.includes(t.status) && (t.finishedAt ?? 0) >= since && boardColumn(t) !== "review")
+    .sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0))
+    .slice(0, 20)
+    .map(card);
+  const waitingOnYou = open.length + plans.filter((p) => p.plan?.status === "awaiting").length + reviews.length + approvals.pending().length;
+  res.json({
+    questions: open.map((q) => ({ ...q, taskStatus: tasks.get(q.taskId)?.status })),
+    review: [...plans, ...reviews].sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0)),
+    finished,
+    approvals: approvals.pending().length,
+    answered: questions.recent(10),
+    count: waitingOnYou,
+  });
+});
+
+app.post("/api/inbox/questions/:id", requireToken, (req, res) => {
+  const parsed = QuestionAnswerSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "An answer is needed" });
+  const q = questions.answer(String(req.params.id), parsed.data.answer, parsed.data.note);
+  if (!q) return res.status(409).json({ error: "That question isn't waiting any more" });
+  const task = tasks.get(q.taskId);
+  if (!task) return res.json({ ok: true, delivered: false, reason: "The card is no longer on the board" });
+  const err = deliverAnswers(task);
+  const delivered = !questions.undelivered(task.id).length;
+  res.json({
+    ok: true,
+    delivered,
+    reason: delivered
+      ? undefined
+      : err ?? (TERMINAL_STATUSES.includes(task.status) ? "It goes back once you answer the card's other question" : "The card is busy; it gets your answer as soon as it finishes"),
+  });
+});
+
+app.post("/api/inbox/questions/:id/dismiss", requireToken, (req, res) => {
+  const q = questions.get(String(req.params.id));
+  if (!q || !questions.dismiss(q.id)) return res.status(409).json({ error: "That question isn't waiting any more" });
+  // Other answers on that card may have been waiting for this one
+  const task = tasks.get(q.taskId);
+  if (task) deliverAnswers(task);
+  res.json({ ok: true });
+});
+
+// --- Plan Markup ---------------------------------------------------------------
+app.post("/api/tasks/:id/plan", requireToken, (req, res) => {
+  const task = tasks.get(String(req.params.id));
+  if (!task || task.parentId) return res.status(404).json({ error: "Task not found" });
+  if (!task.plan || task.plan.status !== "awaiting") return res.status(409).json({ error: "This card has no plan waiting for review" });
+  const parsed = PlanReviewSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid review" });
+  const r = parsed.data;
+  if (r.version !== undefined && r.version !== task.plan.version) return res.status(409).json({ error: `There's a newer plan (version ${task.plan.version}); reload it before reviewing` });
+  const plan = task.plan;
+  const annotations = cleanAnnotations(plan.text, r.annotations);
+  const dropped = r.annotations.length - annotations.length;
+  const message = reviewMessage(plan.text, annotations, r.decision, r.note);
+  const lastReview = { decision: r.decision, annotations, ...(r.note ? { note: r.note } : {}), at: Date.now() };
+  // The approved text (your cuts and replacements made) is what the card works from
+  task.plan =
+    r.decision === "approve"
+      ? { ...plan, status: "approved", text: applyAnnotations(plan.text, annotations), lastReview }
+      : { ...plan, status: "revising", lastReview };
+  const err = replyTo(task, { message, targetAgent: "same" });
+  if (err) {
+    task.plan = plan;
+    store.save(task);
+    return res.status(400).json({ error: err });
+  }
+  store.save(task);
+  hive.log("plan", r.decision === "approve" ? "approved" : "revise", `v${plan.version}: ${annotations.length} mark(s)`, task.id);
+  // Cards waiting on this one may run once its work is done, not before
+  res.json({ ...summarize(task), dropped });
 });
 
 // --- Approvals API -----------------------------------------------------------

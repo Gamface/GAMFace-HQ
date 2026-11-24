@@ -17,6 +17,8 @@ export interface CardFields {
   priority: "low" | "normal" | "high";
   dependsOn: string[];
   needsReview: boolean;
+  // The first run writes a plan for your markup in the Inbox; the work runs once you approve it
+  planFirst?: boolean;
   readOnly: boolean;
   allowedSites: string[];
   images: string[];
@@ -152,6 +154,13 @@ export function CardForm({
       <label className="flex items-center gap-2 text-slate-300 cursor-pointer select-none">
         <input type="checkbox" checked={f.needsReview} onChange={(e) => set("needsReview", e.target.checked)} />
         I'll review the result before it counts as done
+      </label>
+      <label className="flex items-start gap-2 text-slate-300 cursor-pointer select-none">
+        <input type="checkbox" className="mt-0.5" checked={Boolean(f.planFirst)} onChange={(e) => set("planFirst", e.target.checked)} />
+        <span>
+          Plan first: show me the plan before any work runs
+          <span className="block text-[10px] text-slate-600">The plan waits in the Inbox. Comment, cut or replace parts of it, then approve or send it back.</span>
+        </span>
       </label>
       <div>
         <label className="flex items-center gap-2 text-slate-300 cursor-pointer select-none">

@@ -14,6 +14,8 @@ your existing Mission Control. Your UI, the `/api/agent/*` routes, the legacy
 | **Memory** | `src/hq/memory.ts` | Facts are extracted between tasks (never while one is running), recalled by relevance, and every 30 min unpinned memories decay, faded ones are forgotten and duplicates merge. **Memory** tab: add, pin, delete, tidy. Saved to `data/memories.json`. |
 | **Obsidian** | `vaultNotes` / `saveNotes` | Agents read `HQ/shared.md` and `HQ/agents/<agent>.md` from your vault. The file agent can save notes to `HQ/inbox/`. |
 | **Exfiltration guard** | `src/hq/guard.ts` | API keys, tokens, private keys and `password=` values are redacted from the live stream (even when split across token batches), the hive log, memories, notes and Telegram. |
+| **Decision Inbox** | `src/hq/inbox.ts`, `ui/src/components/InboxPage.tsx` | One page for everything waiting on you: agents leave questions instead of stopping to wait, plans wait for your markup, and finished work is listed. Answers go back to their card as a reply. See *Decision Inbox and Plan Markup*. |
+| **Plan Markup** | `src/hq/plans.ts`, `ui/src/components/PlanReview.tsx` | *Plan first* cards write a plan and stop. Comment on, cut or replace parts of it, then send it back for another version or approve it and the card does the work. |
 | **Telegram** | `src/hq/telegram.ts` | Long-polling bot with a chat ID allowlist. `/coder …` picks an agent, `/status` shows the queue. Answers come back when the task finishes. |
 
 | **Code preview** | `ui/src/components/PreviewPane.tsx` | **Preview** tab renders the HTML, CSS and JavaScript from the selected task in a sandboxed frame (no access to Mission Control). Reload, open in a new tab, copy the HTML, or show the code blocks. Other languages are listed but not run. |
@@ -533,6 +535,47 @@ API: `GET/POST /api/profiles`, `PUT /api/profiles/default`, `DELETE /api/profile
 `POST /api/browser/:id/takeover`, `/handback`, `/close` (profile windows) and `/input`
 (`{ type: "click", x, y }`, `{ type: "type", text }`, `{ type: "key", key }`,
 `{ type: "scroll", dy }`, `{ type: "navigate", url }`, `{ type: "back" }`).
+
+## Decision Inbox and Plan Markup
+
+The **Inbox** page (second icon; a badge counts what's waiting) is one place for everything
+that needs you, from every card, in three parts:
+
+- **Questions.** An agent that needs a decision no longer stops and waits. It makes its best
+  assumption, says which one, finishes what it can, and leaves you a question with clickable
+  options (plus *Something else…* and a note). Answer whenever you like: the answer goes back
+  to that card as a reply and the card carries on from there. A card that asked two questions
+  gets both answers in one go; a card that's busy gets them as soon as it finishes. Approvals
+  (which do pause a card) are counted here too and stay in the bar at the top of the page.
+- **To review.** Plans waiting for your markup, and results from cards marked *I'll review the
+  result*, with **Accept** right there.
+- **Finished work.** What the team got done in the last 3 days.
+
+**Plan first** (a new checkbox on a card): the first run only writes a plan — no handoffs, no
+file edits, no video or PDF — and the card waits in Review (`plan v1 · review in Inbox` on the
+board). In the Inbox, open the plan and mark it up: select words and choose **Comment**, **Cut**
+or **Replace**, or use a step's 💬 ✂ ⇄ buttons (handy on a phone). **Show result** previews the
+plan with your edits made. Then:
+
+- **Send back for changes**: your markup and note go to the agent, which writes version 2.
+- **Approve & run**: your cuts and replacements are made, your comments go along, and the same
+  card does the work (Jarvis may delegate again). Cards that depend on it wait until then.
+
+Replying to a card whose plan is waiting also asks for a new version. Reviewing a version
+that has since been replaced is refused, so your markup always matches what you saw.
+
+How agents ask: they end their answer with `<ask options="A|B|C">Question?</ask>` (at most
+2, 2–5 options each; no options means an open question). Mission Control takes these out of
+the answer, posts them to the Inbox and adds a line naming them. Routines, voice and eval runs
+don't ask (nobody is there to answer). Questions live in the `questions` table beside the cards.
+
+Code: `src/hq/inbox.ts` (questions), `src/hq/plans.ts` (plan blocks and edits, shared with
+the dashboard), `ui/src/components/InboxPage.tsx`, `ui/src/components/PlanReview.tsx`.
+
+API: `GET /api/inbox` (questions, review, finished, `count`), `POST /api/inbox/questions/:id`
+(`{ answer, note? }`), `POST /api/inbox/questions/:id/dismiss`, `POST /api/tasks/:id/plan`
+(`{ decision: "approve" | "revise", annotations: [{ blockId, quote, kind: "comment" | "delete" |
+"replace", text? }], note?, version? }`). Cards take `planFirst: true` on create and edit.
 
 ## Approvals (Phase 4)
 
