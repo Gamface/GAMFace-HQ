@@ -52,6 +52,8 @@ import { Uploads } from "./hq/uploads";
 import { parseWav, splitWav } from "./hq/wav";
 import { closeRound, historyMessages } from "./hq/thread";
 import { FILE_ID, Files, buildReport, fileType, pdfInstructions, printPdf, wantsPdf } from "./hq/pdf";
+import { BookStore, TRIMS, bookEpub, bookFileName, bookHtml, bookMarkdown, bookSummary, describeStep, editBook, failed, newBook, nextStep, rewriteChapter, runStep, settle } from "./hq/books";
+import type { Book, BookModel, BookStep, Trim } from "./hq/books";
 import { DOC_ID, DocCache, cleanName, extractPdf, partsOf, withPageMarks } from "./hq/docs";
 import type { PdfText } from "./hq/docs";
 import { Scheduler } from "./hq/scheduler";
@@ -1638,7 +1640,7 @@ async function pump() {
 async function runSkillJob() {
   const id = skillJobs.shift();
   const task = id ? tasks.get(id) : undefined;
-  if (!task) return;
+  if (!task) return runBookJob();
   backgroundBusy = true;
   try {
     const out = await inProject(task.project, () => draftSkill(task));
@@ -1669,6 +1671,68 @@ async function runBackgroundJob() {
   }
 }
 
+// --- Books (novels and ebooks) ------------------------------------------------------
+// One model call at a time, between cards: a card that arrives while a chapter is being
+// written waits for that chapter, never for the whole book. See src/hq/books.ts.
+const books = new BookStore(path.join(DATA_DIR, "books"));
+const BOOK_STEP_TIMEOUT_MS = Number(process.env.BOOK_STEP_TIMEOUT_MS) || 30 * 60_000;
+/** The book step running now, and what the model has written so far (shown live on the Books page) */
+let bookRun: { id: string; step: BookStep; label: string; controller: AbortController; text: string; startedAt: number } | null = null;
+
+const bookModel: BookModel = {
+  write: async (messages, signal, onToken) => {
+    const out = await gateway.stream("writer", messages, signal, onToken, (note) => hive.log("writer", "policy", note));
+    return { text: out.text, ref: out.ref };
+  },
+  json: async (messages) => {
+    const out = await gateway.json("writer", messages, (note) => hive.log("writer", "policy", note));
+    return { json: out.json ?? {}, ref: out.ref };
+  },
+  // Half the context for the prompt, half for the chapter; cloud models have room to spare
+  contextChars: () => {
+    const r = models.resolve("writer");
+    return r.provider.local ? Math.floor((r.settings.numCtx || 8192) * 4 * 0.5) : 120_000;
+  },
+};
+
+async function runBookJob() {
+  const next = books.next();
+  if (!next) return;
+  const { book, step } = next;
+  backgroundBusy = true;
+  const controller = new AbortController();
+  bookRun = { id: book.id, step, label: describeStep(book, step), controller, text: "", startedAt: Date.now() };
+  const name = `“${book.title || "Untitled"}”`;
+  if (step.kind !== "summary") hive.log("writer", "book", `${bookRun.label}: ${name}`);
+  try {
+    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(BOOK_STEP_TIMEOUT_MS)]);
+    await inProject(book.project, () => runStep(book, step, bookModel, signal, (t) => bookRun && (bookRun.text += t)));
+    book.error = undefined;
+    book.failures = 0;
+    settle(book);
+    if (book.stage === "review") notices.add("book", `book:${book.id}`, `The outline for ${name} is ready: check it on the Books page, then approve it to start writing.`);
+    if (book.stage === "done") {
+      const words = book.chapters.reduce((n, c) => n + (c.words ?? 0), 0);
+      hive.log("writer", "book", `finished ${name}: ${book.chapters.length} chapters, ${words.toLocaleString("en-US")} words`);
+      notices.add("book", `book:${book.id}`, `${name} is finished (${words.toLocaleString("en-US")} words): download it from the Books page.`);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (controller.signal.aborted) book.paused = true;
+    else {
+      failed(book, controller.signal.aborted || /timeout|aborted/i.test(msg) ? `${bookRun.label} took too long (BOOK_STEP_TIMEOUT_MS)` : msg);
+      hive.log("writer", "error", `${bookRun.label} (${name}): ${msg.slice(0, 200)}`);
+      if (book.paused) notices.add("book", `book:${book.id}`, `${name} is paused: ${book.error}`);
+    }
+  } finally {
+    // A book deleted while its step ran stays deleted
+    if (books.get(book.id) === book) books.save(book);
+    bookRun = null;
+    backgroundBusy = false;
+    void pump();
+  }
+}
+
 setInterval(() => {
   memory
     .maintain()
@@ -1679,7 +1743,7 @@ setInterval(() => {
 }, MEMORY_INTERVAL_MIN * 60 * 1000);
 
 // --- Creating and changing cards ---------------------------------------------
-const ROLE_LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", vision: "Vision", tools: "Tools", router: "Router", memory: "Memory", audio: "Transcriber" };
+const ROLE_LABEL: Record<string, string> = { planner: "Jarvis", coder: "Coder", browser: "Browser", file: "File", security_audit: "Security", vision: "Vision", tools: "Tools", router: "Router", memory: "Memory", audio: "Transcriber", writer: "Writer" };
 
 /** "switch coder to claude" and friends change models without running a task. */
 function handleSwitch(text: string): string | null {
@@ -2457,6 +2521,169 @@ app.post("/api/tasks/:id/video", requireToken, async (req, res) => {
     return res.status(422).json({ error: why || "The video couldn't be rendered" });
   }
   res.json({ files: task.files });
+});
+
+// --- Books ---------------------------------------------------------------------------
+
+function bookView(b: Book) {
+  const run = bookRun?.id === b.id ? bookRun : null;
+  const step = nextStep(b);
+  return {
+    ...b,
+    next: step ? describeStep(b, step) : null,
+    running: run ? { label: run.label, step: run.step, text: run.text.slice(-8000), startedAt: run.startedAt } : null,
+  };
+}
+
+function bookOr404(req: Request, res: Response): Book | null {
+  const b = books.get(String(req.params.id));
+  if (!b) res.status(404).json({ error: "Book not found" });
+  return b ?? null;
+}
+
+const isRunning = (b: Book) => bookRun?.id === b.id;
+
+function bookCover(b: Book): { data: Buffer; mime: "image/png" | "image/jpeg" | "image/webp" | "image/gif" } | undefined {
+  const up = b.cover ? uploads.read(b.cover) : null;
+  if (!up || !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(up.type)) return undefined;
+  return { data: up.buf, mime: up.type as "image/png" };
+}
+
+app.get("/api/books", (req, res) => {
+  const p = typeof req.query.project === "string" && req.query.project !== "all" ? projects.idOf(req.query.project === "general" ? null : req.query.project) : undefined;
+  const list = books.list(p);
+  res.json({
+    books: list.map((b) => ({ ...bookSummary(b), running: isRunning(b) ? bookRun!.label : null })),
+    writer: models.resolve("writer").ref,
+    pdf: Boolean(BROWSER_CDP_URL),
+    trims: Object.keys(TRIMS),
+  });
+});
+
+app.get("/api/books/:id", (req, res) => {
+  const b = bookOr404(req, res);
+  if (b) res.json(bookView(b));
+});
+
+app.post("/api/books", requireToken, (req, res) => {
+  const made = newBook(req.body ?? {});
+  if ("error" in made) return res.status(400).json(made);
+  if (made.project && !projects.get(made.project)) return res.status(400).json({ error: "Unknown project" });
+  books.save(made);
+  hive.log("writer", "book", `new ${made.kind}: ${made.title || made.brief.slice(0, 80)}`);
+  void pump();
+  res.status(201).json(bookView(made));
+});
+
+app.patch("/api/books/:id", requireToken, (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const edits = Object.keys(body).filter((k) => k !== "paused");
+  if (edits.length && isRunning(b)) return res.status(409).json({ error: `Wait for “${bookRun!.label}” to finish, or pause the book first` });
+  if (typeof body.cover === "string" && body.cover && !uploads.exists(body.cover)) return res.status(400).json({ error: "Unknown picture: upload it first" });
+  const err = editBook(b, body);
+  if (err) return res.status(400).json({ error: err });
+  if (body.paused === true && b.stage !== "done") {
+    b.paused = true;
+    if (isRunning(b)) bookRun!.controller.abort();
+  } else if (body.paused === false) {
+    b.paused = false;
+    b.error = undefined;
+    b.failures = 0;
+  }
+  books.save(b);
+  void pump();
+  res.json(bookView(b));
+});
+
+app.post("/api/books/:id/approve", requireToken, (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  if (b.stage !== "review" || !b.chapters.length) return res.status(400).json({ error: "There's no outline waiting for approval" });
+  b.stage = "writing";
+  b.paused = false;
+  b.error = undefined;
+  b.failures = 0;
+  books.save(b);
+  hive.log("writer", "book", `outline approved: “${b.title || "Untitled"}” (${b.chapters.length} chapters)`);
+  void pump();
+  res.json(bookView(b));
+});
+
+/** Plans again: the story bible and outline ({what: "bible"}), or only the outline. */
+app.post("/api/books/:id/replan", requireToken, (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  if (isRunning(b)) return res.status(409).json({ error: "Pause the book first" });
+  if (b.chapters.some((c) => c.text) && req.body?.force !== true) return res.status(400).json({ error: "Chapters are already written; planning again would throw them away (send force: true to do it anyway)" });
+  if (req.body?.what === "bible") b.bible = "";
+  b.chapters = [];
+  b.stage = "planning";
+  b.paused = false;
+  b.error = undefined;
+  b.failures = 0;
+  books.save(b);
+  void pump();
+  res.json(bookView(b));
+});
+
+app.post("/api/books/:id/chapters/:n/rewrite", requireToken, (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  if (isRunning(b)) return res.status(409).json({ error: "Pause the book first" });
+  const err = rewriteChapter(b, Number(req.params.n), typeof req.body?.note === "string" ? req.body.note : undefined);
+  if (err) return res.status(400).json({ error: err });
+  books.save(b);
+  void pump();
+  res.json(bookView(b));
+});
+
+app.delete("/api/books/:id", requireToken, (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  if (isRunning(b)) bookRun!.controller.abort();
+  books.delete(b.id);
+  res.json({ ok: true });
+});
+
+app.get("/api/books/:id/export/:fmt", (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  const fmt = String(req.params.fmt);
+  if (!b.chapters.some((c) => c.text)) return res.status(400).json({ error: "No chapters are written yet" });
+  const out =
+    fmt === "epub"
+      ? { type: "application/epub+zip", body: bookEpub(b, bookCover(b)) }
+      : fmt === "md"
+        ? { type: "text/markdown; charset=utf-8", body: Buffer.from(bookMarkdown(b)) }
+        : fmt === "html"
+          ? { type: "text/html; charset=utf-8", body: Buffer.from(bookHtml(b, { trim: (req.query.trim as Trim) || "6x9" })) }
+          : null;
+  if (!out) return res.status(400).json({ error: "Formats: epub, md, html" });
+  res.setHeader("Content-Type", out.type);
+  res.setHeader("Content-Disposition", `attachment; filename="${bookFileName(b, fmt)}"`);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  // The HTML is a download, never a page that runs in Mission Control's origin
+  if (fmt === "html") res.setHeader("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'");
+  res.end(out.body);
+});
+
+/** A print-ready PDF (6×9 in by default), saved with the other files. */
+app.post("/api/books/:id/pdf", requireToken, async (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  if (!BROWSER_CDP_URL) return res.status(400).json({ error: "PDFs are printed by the browser sidecar: set BROWSER_CDP_URL (see README-HQ)" });
+  if (!b.chapters.some((c) => c.text)) return res.status(400).json({ error: "No chapters are written yet" });
+  const trim = (typeof req.body?.trim === "string" && req.body.trim in TRIMS ? req.body.trim : "6x9") as Trim;
+  const cover = bookCover(b);
+  try {
+    const pdf = await printPdf(bookHtml(b, { trim, cover: cover ? `data:${cover.mime};base64,${cover.data.toString("base64")}` : undefined }), BROWSER_CDP_URL, { footer: "number" });
+    const saved = files.save(b.title || "book", pdf);
+    res.json({ ...saved, url: `/api/files/${saved.name}` });
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+  }
 });
 
 // --- Asset dictionary, brand and voices (for videos) --------------------------

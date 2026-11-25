@@ -170,6 +170,62 @@ into an MP4 that appears on the card (🎬): play it there or download it.
 API: `POST /api/tasks/:id/video` renders the scene in a finished card's answer. The video
 service itself: `POST /render`, `GET /jobs/:id`, `GET /jobs/:id/video`, `GET /health`.
 
+## Books: novels and ebooks
+
+The **Books** page (book icon) writes whole books: novels and nonfiction ebooks, from a
+short brief to a finished EPUB and print-ready PDF. It's built so a local model with an 8K
+context can finish a 50,000-word manuscript.
+
+1. **Brief.** Novel or ebook, what it's about, genre or topic, audience, style and voice,
+   number of chapters and words per chapter (20 × 2,500 for a novel and 10 × 1,500 for an
+   ebook by default; up to 60 chapters of up to 8,000 words).
+2. **Plan.** The Writer writes a **story bible** (logline, characters, setting, themes,
+   style guide, and the ending, planned up front) or, for an ebook, a **book plan**
+   (reader promise, audience, voice, key terms, chapter pattern). Then a chapter
+   **outline**: a title and 3–5 sentences of beats for each chapter.
+3. **You review.** Nothing is written until you approve the outline. Rename, rewrite,
+   reorder, add or remove chapters, then **Approve and start writing**. The bible can be
+   edited at any time, and later chapters follow your changes.
+4. **Write.** Chapters are written in order. Each one sees the bible, the outline (nearby
+   chapters in full, far ones by title), a **continuity note** for every earlier chapter
+   and the last few paragraphs of the one before. All of it is shrunk to fit the model's
+   context. A chapter that comes back under 60% of its target gets up to two
+   "keep going" calls. After each chapter a short continuity note is written (who's
+   where, what changed, open threads), so chapter 18 still remembers chapter 2.
+5. **Revise.** Open any chapter to read it, **Edit text** by hand (its continuity note
+   is rewritten), or **Rewrite** it with a note ("more dialogue", "cut the flashback").
+6. **Download.** **EPUB** (EPUB 3 with a table of contents and the cover, for Apple Books,
+   Kobo, Google Play Books, Calibre and Amazon KDP upload), **Markdown**, or a
+   **print-ready PDF** at 6×9 in, 5×8, 5.5×8.5, A5 or US Letter. The PDF has a cover,
+   title page, contents and each chapter on a new page, and is printed by the browser
+   sidecar like the other PDFs. Downloads work part-way through too.
+
+- **The Writer agent** is a new row on the Team page. It starts on the main local model
+  at temperature 0.8. Give it a cloud model for better prose
+  (`switch writer to claude`). Its spend caps, fallback and project rules work like every
+  other agent's. Books in a project kept on this PC stay local.
+- **It never blocks your cards.** Each step (the plan, the outline, one chapter, one
+  continuity note) is a single model call. It runs from the queue only when no card is
+  waiting, so a new card waits at most for the chapter being written. The book is saved
+  after every step: a restart, **Pause** or a failed call loses at most that chapter. A step
+  that fails is tried once more, then the book pauses with the reason (a notice appears in the header).
+  `BOOK_STEP_TIMEOUT_MS` (30 minutes) limits one step.
+- **What you'll still need to do:** read it. Local models drift, repeat phrases and
+  invent things. The story bible, the outline gate and the continuity notes keep drift
+  down, but don't replace an edit. Ebook chapters are told not to make up statistics,
+  studies or quotes, but check every fact before you publish. Store listings also ask
+  whether a book is AI-generated: Amazon KDP requires you to say so.
+- Books are saved as JSON in `data/books/`. A cover is a picture you upload. To use one from the
+  picture tool, download it from the Gallery and add it on the book's page.
+
+API: `GET/POST /api/books` (`kind`, `brief`, `title`, `author`, `genre`, `audience`, `style`,
+`chapterCount`, `chapterWords`, `project`, `start`), `GET/PATCH/DELETE /api/books/:id` (PATCH:
+`bible`, `chapters` as `[{from?, title, beats, text?, note?}]` where `from` is a chapter's
+current index, `cover`, `paused`, …), `POST /api/books/:id/approve`,
+`POST /api/books/:id/replan {what: "bible"|"outline", force?}`,
+`POST /api/books/:id/chapters/:n/rewrite {note}`, `GET /api/books/:id/export/epub|md|html`,
+`POST /api/books/:id/pdf {trim}`.
+
 ## Home and the new look
 
 The dashboard opens on **Home**: a greeting (click your name to set it), the **Jarvis**

@@ -7,7 +7,7 @@ import type { TaskStore } from "./taskstore";
 export interface Notice {
   id: string;
   key: string;
-  kind: "budget" | "local-only" | "price-missing" | "fallback" | "read-only" | "routine" | "skill";
+  kind: "budget" | "local-only" | "price-missing" | "fallback" | "read-only" | "routine" | "skill" | "book";
   message: string;
   firstAt: number;
   lastAt: number;
