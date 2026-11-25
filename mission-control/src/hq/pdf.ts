@@ -153,7 +153,7 @@ export async function buildReport(
 }
 
 /** Prints HTML to PDF in a throwaway browser profile with no network access. */
-export async function printPdf(html: string, cdpBase: string, opts: { footer?: "pages" | "number" } = {}): Promise<Buffer> {
+export async function printPdf(html: string, cdpBase: string, opts: { footer?: "pages" | "number" | "none" } = {}): Promise<Buffer> {
   const cdp = await Cdp.connect(await resolveCdpUrl(cdpBase));
   let targetId = "";
   let contextId = "";
@@ -181,7 +181,7 @@ export async function printPdf(html: string, cdpBase: string, opts: { footer?: "
       {
         printBackground: true,
         preferCSSPageSize: true,
-        displayHeaderFooter: true,
+        displayHeaderFooter: opts.footer !== "none",
         headerTemplate: "<span></span>",
         // Reports say "Page 3 of 12"; books just carry the number
         footerTemplate:

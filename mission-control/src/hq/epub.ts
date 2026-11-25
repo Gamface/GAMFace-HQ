@@ -22,6 +22,10 @@ export interface EpubInput {
   subtitle?: string;
   chapters: EpubChapter[];
   cover?: { data: Buffer; mime: "image/png" | "image/jpeg" | "image/webp" | "image/gif" };
+  /** Pictures the chapters use, referenced as images/<name> */
+  images?: { name: string; data: Buffer; mime: "image/png" | "image/jpeg" | "image/webp" }[];
+  /** Added to the stylesheet */
+  extraCss?: string;
   modified?: Date;
 }
 
@@ -171,7 +175,7 @@ export function buildEpub(input: EpubInput): Buffer {
           `<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>\n</container>\n`,
       ),
     },
-    { name: "OEBPS/style.css", data: Buffer.from(BOOK_CSS) },
+    { name: "OEBPS/style.css", data: Buffer.from(BOOK_CSS + (input.extraCss ?? "")) },
   ];
 
   const manifest: string[] = [
@@ -181,6 +185,11 @@ export function buildEpub(input: EpubInput): Buffer {
     `<item id="title" href="title.xhtml" media-type="application/xhtml+xml"/>`,
   ];
   const spine: string[] = [];
+  for (const [i, img] of (input.images ?? []).entries()) {
+    if (!/^[a-z0-9-]+\.(png|jpg|webp)$/.test(img.name)) continue;
+    files.push({ name: `OEBPS/images/${img.name}`, data: img.data, compress: false });
+    manifest.push(`<item id="img${i + 1}" href="images/${img.name}" media-type="${img.mime}"/>`);
+  }
 
   if (input.cover && coverExt) {
     files.push({ name: `OEBPS/cover.${coverExt}`, data: input.cover.data, compress: false });

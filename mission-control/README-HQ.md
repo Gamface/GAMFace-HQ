@@ -170,61 +170,147 @@ into an MP4 that appears on the card (🎬): play it there or download it.
 API: `POST /api/tasks/:id/video` renders the scene in a finished card's answer. The video
 service itself: `POST /render`, `GET /jobs/:id`, `GET /jobs/:id/video`, `GET /health`.
 
-## Books: novels and ebooks
+## Books: novels, ebooks, picture books and puzzle books
 
-The **Books** page (book icon) writes whole books: novels and nonfiction ebooks, from a
-short brief to a finished EPUB and print-ready PDF. It's built so a local model with an 8K
-context can finish a 50,000-word manuscript.
+The **Books** page (book icon) makes whole books: novels, nonfiction ebooks, children's
+picture books and puzzle books. They can be written from a short brief or **repurposed
+from your own content**, and come out as EPUB, Markdown, a print PDF, or **KDP paperback
+files with a listing kit**. It's built so a local model with an 8K context can finish a
+full-length book.
 
-1. **Brief.** Novel or ebook, what it's about, genre or topic, audience, style and voice,
-   number of chapters and words per chapter (20 × 2,500 for a novel and 10 × 1,500 for an
-   ebook by default; up to 60 chapters of up to 8,000 words).
-2. **Plan.** The Writer writes a **story bible** (logline, characters, setting, themes,
-   style guide, and the ending, planned up front) or, for an ebook, a **book plan**
-   (reader promise, audience, voice, key terms, chapter pattern). Then a chapter
-   **outline**: a title and 3–5 sentences of beats for each chapter.
+### How a book is made
+
+1. **Brief.** The kind of book, what it's about, audience, style and voice, how many
+   chapters, pages or puzzles, and how long each is.
+2. **Plan.** The Writer writes a **story bible** (novels: characters, setting, style guide,
+   and the ending, planned up front), a **book plan** (ebooks: reader promise, voice, chapter
+   pattern), a **character and style sheet** (picture books) or a **theme sheet** (puzzle
+   books). Then an **outline**: chapters with beats, picture-book pages with their text and
+   picture, or the puzzles themselves.
 3. **You review.** Nothing is written until you approve the outline. Rename, rewrite,
-   reorder, add or remove chapters, then **Approve and start writing**. The bible can be
-   edited at any time, and later chapters follow your changes.
-4. **Write.** Chapters are written in order. Each one sees the bible, the outline (nearby
-   chapters in full, far ones by title), a **continuity note** for every earlier chapter
-   and the last few paragraphs of the one before. All of it is shrunk to fit the model's
-   context. A chapter that comes back under 60% of its target gets up to two
-   "keep going" calls. After each chapter a short continuity note is written (who's
-   where, what changed, open threads), so chapter 18 still remembers chapter 2.
-5. **Revise.** Open any chapter to read it, **Edit text** by hand (its continuity note
-   is rewritten), or **Rewrite** it with a note ("more dialogue", "cut the flashback").
-6. **Download.** **EPUB** (EPUB 3 with a table of contents and the cover, for Apple Books,
-   Kobo, Google Play Books, Calibre and Amazon KDP upload), **Markdown**, or a
-   **print-ready PDF** at 6×9 in, 5×8, 5.5×8.5, A5 or US Letter. The PDF has a cover,
-   title page, contents and each chapter on a new page, and is printed by the browser
-   sidecar like the other PDFs. Downloads work part-way through too.
+   reorder, add or remove items, then approve. The plan can be edited at any time.
+4. **Write.**
+   - Chapters are written in order. Each one sees the plan, the outline, a continuity note
+     for every earlier chapter and the end of the one before, shrunk to fit the context.
+   - Short chapters get up to two "keep going" calls.
+   - Picture-book pages get one illustration each. Puzzle books get one story per puzzle.
+5. **Revise.** Edit any text by hand, **Rewrite** with a note ("more dialogue"),
+   **Draw again** (picture books) or make a **New puzzle** for the same scene.
+6. **Download.** EPUB (with the cover, and pictures for picture books), Markdown, or a PDF
+   at 5×8, 5.5×8.5, 6×9, A5, 8×10, 8.5×8.5 or 8.5×11 in. Downloads work part-way through.
 
-- **The Writer agent** is a new row on the Team page. It starts on the main local model
-  at temperature 0.8. Give it a cloud model for better prose
-  (`switch writer to claude`). Its spend caps, fallback and project rules work like every
-  other agent's. Books in a project kept on this PC stay local.
-- **It never blocks your cards.** Each step (the plan, the outline, one chapter, one
-  continuity note) is a single model call. It runs from the queue only when no card is
-  waiting, so a new card waits at most for the chapter being written. The book is saved
-  after every step: a restart, **Pause** or a failed call loses at most that chapter. A step
-  that fails is tried once more, then the book pauses with the reason (a notice appears in the header).
-  `BOOK_STEP_TIMEOUT_MS` (30 minutes) limits one step.
-- **What you'll still need to do:** read it. Local models drift, repeat phrases and
-  invent things. The story bible, the outline gate and the continuity notes keep drift
-  down, but don't replace an edit. Ebook chapters are told not to make up statistics,
-  studies or quotes, but check every fact before you publish. Store listings also ask
-  whether a book is AI-generated: Amazon KDP requires you to say so.
-- Books are saved as JSON in `data/books/`. A cover is a picture you upload. To use one from the
-  picture tool, download it from the Gallery and add it on the book's page.
+### From your own content (repurposing)
 
-API: `GET/POST /api/books` (`kind`, `brief`, `title`, `author`, `genre`, `audience`, `style`,
-`chapterCount`, `chapterWords`, `project`, `start`), `GET/PATCH/DELETE /api/books/:id` (PATCH:
-`bible`, `chapters` as `[{from?, title, beats, text?, note?}]` where `from` is a chapter's
-current index, `cover`, `paused`, …), `POST /api/books/:id/approve`,
-`POST /api/books/:id/replan {what: "bible"|"outline", force?}`,
-`POST /api/books/:id/chapters/:n/rewrite {note}`, `GET /api/books/:id/export/epub|md|html`,
-`POST /api/books/:id/pdf {trim}`.
+Under **Start from my own content** (or **Your content** on a book's page), add:
+
+| Source | How it's read |
+| --- | --- |
+| Web pages, blog posts | Fetched with the browser's address checks on every redirect (no private-network addresses). Menus, headers, footers, sidebars and scripts are dropped. |
+| Public Google Docs | Exported as text. Share it as "Anyone with the link". |
+| YouTube videos | Their captions (your own, else the automatic ones). If YouTube refuses, add the audio as a recording or paste the transcript. |
+| PDFs, Word (.docx), text or Markdown files | Read here. Scanned PDFs need OCR first. |
+| Recordings | Transcribed on your PC (Whisper, or the Transcriber model). Up to about 13 minutes each. |
+| Pasted text | Used as it is. |
+
+- **Large sources are read in parts.** Over 12,000 characters, the sources are cut into
+  parts of about 3,500 characters, and the Writer takes notes on each part (one step per
+  part). The plan and outline are made from the notes.
+- **Each chapter gets its passages.** The outline says which parts each chapter draws on,
+  and the chapter is written from those passages in full. When a chapter names none, the
+  parts that best match its title and beats are used.
+- **Stay true to my content** (on by default): the Writer keeps your facts, examples and
+  voice, reorganizes and smooths them into book form, and adds nothing that isn't in them.
+  Turn it off to use your content as a starting point the Writer may expand.
+
+### Children's picture books
+
+- The plan is a character sheet: each character's look in one exact sentence ("a small round
+  hedgehog with a red knitted scarf"), plus one line of art style (yours, if you gave one).
+- The outline writes the whole story page by page: the words on the page (40 by default)
+  and what the picture shows.
+- Each page's picture is made by the picture tool (ComfyUI on your PC; see *Pictures*). Every
+  picture gets the same style line, the same character descriptions word for word and the
+  same seed, which keeps the characters recognisable. It's not a guarantee: some pages may
+  need **Draw again**. You can edit the style and characters on the book's page.
+- Untick **Make pictures with the picture tool** to finish without pictures (for example to
+  add your own). Without the tools service, the book pauses at the first picture and says so.
+- The print layout is the picture across the top 72% of the page and the text below in
+  large type. Default trim is 8.5×8.5 in.
+
+### Puzzle books
+
+- **Whodunit cases** (suspect, place, weapon, and arrival time from medium up) or **logic
+  grid puzzles**. Easy is 4 people and 3 categories, medium 4 and 4, hard 5 and 4.
+- **The logic is all code** (`src/hq/puzzles.ts`). A random solution is picked, true clues
+  are drawn from it ("is either … or …", "arrived exactly 30 minutes before", "is not …"),
+  and a solver keeps adding clues until **exactly one answer** is left. Then it drops every
+  clue that isn't needed.
+- The Writer only names things (suspects, rooms, weapons, or categories for logic grids)
+  and writes each puzzle's opening story. **It is never shown the answer or the clues**,
+  so it can't give the answer away or contradict the clues. Names it gets wrong (repeats,
+  too few) are replaced with built-in ones.
+- Each puzzle page has the story, the suspects, the facts, the clues and a solving grid.
+  The answer key (culprit and full solution) comes at the back. Default trim is 8.5×11 in.
+- Making a hard puzzle takes a few seconds of solving per puzzle.
+
+### Amazon KDP paperback files
+
+**Make interior + cover** on a book's page (needs the browser sidecar, like the other PDFs):
+
+- **Interior.** Mirrored margins with KDP's minimum inside margin for the page count
+  (0.375 in up to 150 pages, 0.5 to 300, 0.625 to 500, 0.75 to 700, 0.875 above). The book
+  is printed until the margin matches its real page count. Short books are padded to KDP's
+  24-page minimum (picture books get a "This book belongs to" page). Picture books are
+  laid out with bleed (0.125 in wider, 0.25 in taller), so choose **Bleed** in KDP.
+- **Cover.** One page with back, spine and front, plus 0.125 in bleed all round. The spine
+  width comes from the page count and paper (white 0.002252, cream 0.0025, colour 0.002347
+  in per page). It has spine text only from 80 pages, as KDP requires.
+  - The back cover has the listing's back-cover text, with the barcode area left clear.
+  - The front uses your cover picture (picture books: the first illustration), or a
+    typographic design in colours chosen from the title.
+- KDP's previewer has the final word: check both files there before publishing.
+
+### Listing kit
+
+**Write the listing** writes the following, each with a copy button:
+
+- A store description in the simple HTML KDP accepts (other tags are removed).
+- Back-cover text.
+- Seven keyword phrases. Ones with "free", "bestseller" and the like are dropped.
+- Three browse categories.
+- A subtitle suggestion if the book has none.
+
+The listing runs as the book's next step. KDP asks whether a book's text or images are
+AI-generated: say yes for what the Writer and the picture tool made.
+
+### Running
+
+- **The Writer agent** is a row on the Team page (main local model, temperature 0.8). Give it
+  a cloud model for better prose (`switch writer to claude`). Spend caps, fallbacks and
+  projects kept on this PC apply as for every agent.
+- **It never blocks your cards.** Each step (a note on one source part, the plan, the
+  outline, one chapter, one picture, the listing) runs from the queue only when no card is
+  waiting. The book is saved after every step: a restart, **Pause** or a failed call loses at
+  most that step.
+  - A failed step is tried once more, then the book pauses with the reason.
+  - `BOOK_STEP_TIMEOUT_MS` (30 minutes) limits one step.
+- **What you'll still need to do:** read and edit it. Local models drift, repeat phrases and
+  invent things. The plan, the outline gate and the continuity notes keep drift down, but
+  they don't replace an edit. Ebook chapters are told not to make up statistics, studies or
+  quotes, but check every fact before you publish.
+- Books are saved as JSON in `data/books/`. Pictures and PDFs go in `data/files/` (and appear
+  in the Gallery). The cover is a picture you upload.
+
+API: `GET/POST /api/books` (`kind`: `novel|ebook|picture|puzzle`, `brief`, `title`, `author`,
+`genre`, `audience`, `style`, `chapterCount`, `chapterWords`, `trim`, `faithful`, `artStyle`,
+`pictures`, `puzzleType`: `mystery|logic`, `difficulty`, `project`, `start`),
+`GET/PATCH/DELETE /api/books/:id` (PATCH: `bible`, `chapters` as `[{from?, title, beats, text?, note?}]`,
+`art`, `faithful`, `trim`, `cover`, `paused`, …), `POST /api/books/:id/approve`,
+`POST /api/books/:id/replan {what, force?}`, `POST /api/books/:id/chapters/:n/rewrite {note, part: text|picture|puzzle}`,
+`POST /api/books/:id/sources` (`{kind: "url", url}`, `{kind: "text", text, name}`,
+`{kind: "pdf"|"audio", upload}`, `{kind: "docx", data, name}`), `DELETE /api/books/:id/sources/:sid`,
+`POST /api/books/:id/listing`, `POST /api/books/:id/kdp {trim, paper: white|cream|color}`,
+`GET /api/books/:id/export/epub|md|html`, `POST /api/books/:id/pdf {trim}`.
 
 ## Home and the new look
 

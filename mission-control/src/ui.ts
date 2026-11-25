@@ -52,9 +52,13 @@ import { Uploads } from "./hq/uploads";
 import { parseWav, splitWav } from "./hq/wav";
 import { closeRound, historyMessages } from "./hq/thread";
 import { FILE_ID, Files, buildReport, fileType, pdfInstructions, printPdf, wantsPdf } from "./hq/pdf";
-import { BookStore, TRIMS, bookEpub, bookFileName, bookHtml, bookMarkdown, bookSummary, describeStep, editBook, failed, newBook, nextStep, rewriteChapter, runStep, settle } from "./hq/books";
-import type { Book, BookModel, BookStep, Trim } from "./hq/books";
-import { DOC_ID, DocCache, cleanName, extractPdf, partsOf, withPageMarks } from "./hq/docs";
+import { BookStore, TRIMS, addSource, bookDetail, bookEpub, bookFileName, bookHtml, bookMarkdown, bookSummary, describeStep, editBook, failed, newBook, nextStep, removeSource, rewriteChapter, runStep, settle, trimOf } from "./hq/books";
+import type { Book, BookModel, BookStep, ImageLoader, Trim } from "./hq/books";
+import { MIN_PAGES, MAX_PAGES, coverHtml, coverSpec, gutterFor } from "./hq/kdp";
+import type { Paper } from "./hq/kdp";
+import { docxToText, fetchSource } from "./hq/sources";
+import type { SourceKind } from "./hq/sources";
+import { DOC_ID, DocCache, cleanName, extractPdf, partsOf, pdfPageCount, withPageMarks } from "./hq/docs";
 import type { PdfText } from "./hq/docs";
 import { Scheduler } from "./hq/scheduler";
 import { ApprovalCenter, ApprovalPolicySchema } from "./hq/approvals";
@@ -1693,6 +1697,18 @@ const bookModel: BookModel = {
     const r = models.resolve("writer");
     return r.provider.local ? Math.floor((r.settings.numCtx || 8192) * 4 * 0.5) : 120_000;
   },
+  // Picture books: one illustration per page from the images server (ComfyUI on this PC)
+  ...(tools
+    ? {
+        illustrate: async (prompt: string, seed: number, size: "square" | "portrait" | "landscape") => {
+          const out = await tools!.call("images", "generate_image", { prompt, seed, size }, { timeoutMs: 10 * 60_000 });
+          const pic = out.media?.find((m) => m.mimeType.startsWith("image/"));
+          if (out.isError || !pic) throw new Error(out.text.slice(0, 300) || "The picture tool made no picture");
+          const saved = files.save("book-page", Buffer.from(pic.data, "base64"), pic.mimeType === "image/jpeg" ? "jpg" : pic.mimeType === "image/webp" ? "webp" : "png");
+          return { name: saved.name, ref: "images.generate_image" };
+        },
+      }
+    : {}),
 };
 
 async function runBookJob() {
@@ -2529,7 +2545,7 @@ function bookView(b: Book) {
   const run = bookRun?.id === b.id ? bookRun : null;
   const step = nextStep(b);
   return {
-    ...b,
+    ...bookDetail(b),
     next: step ? describeStep(b, step) : null,
     running: run ? { label: run.label, step: run.step, text: run.text.slice(-8000), startedAt: run.startedAt } : null,
   };
@@ -2549,6 +2565,18 @@ function bookCover(b: Book): { data: Buffer; mime: "image/png" | "image/jpeg" | 
   return { data: up.buf, mime: up.type as "image/png" };
 }
 
+/** A book's saved illustrations, for the EPUB and the PDFs. */
+const bookImage: ImageLoader = (name) => {
+  const buf = files.read(name);
+  if (!buf) return null;
+  const mime = fileType(name);
+  return mime === "image/png" || mime === "image/jpeg" || mime === "image/webp" ? { data: buf, mime } : null;
+};
+const bookImageUri = (name: string) => {
+  const img = bookImage(name);
+  return img ? `data:${img.mime};base64,${img.data.toString("base64")}` : null;
+};
+
 app.get("/api/books", (req, res) => {
   const p = typeof req.query.project === "string" && req.query.project !== "all" ? projects.idOf(req.query.project === "general" ? null : req.query.project) : undefined;
   const list = books.list(p);
@@ -2556,7 +2584,8 @@ app.get("/api/books", (req, res) => {
     books: list.map((b) => ({ ...bookSummary(b), running: isRunning(b) ? bookRun!.label : null })),
     writer: models.resolve("writer").ref,
     pdf: Boolean(BROWSER_CDP_URL),
-    trims: Object.keys(TRIMS),
+    pictures: Boolean(tools),
+    trims: Object.keys(TRIMS).filter((t) => t !== "letter"),
   });
 });
 
@@ -2632,11 +2661,154 @@ app.post("/api/books/:id/chapters/:n/rewrite", requireToken, (req, res) => {
   const b = bookOr404(req, res);
   if (!b) return;
   if (isRunning(b)) return res.status(409).json({ error: "Pause the book first" });
-  const err = rewriteChapter(b, Number(req.params.n), typeof req.body?.note === "string" ? req.body.note : undefined);
+  const part = req.body?.part === "picture" || req.body?.part === "puzzle" ? req.body.part : "text";
+  const err = rewriteChapter(b, Number(req.params.n), typeof req.body?.note === "string" ? req.body.note : undefined, part);
   if (err) return res.status(400).json({ error: err });
   books.save(b);
   void pump();
   res.json(bookView(b));
+});
+
+/** Turns a recording into text: Whisper on the voice service first, the Transcriber model if it fails. */
+async function transcribeForBook(wav: Buffer, project: string | null): Promise<string> {
+  if (TRANSCRIBE_WITH === "whisper" && voice) {
+    const heard = await voice.transcribe(wav, spellingHint());
+    if (!("error" in heard)) return heard.text.trim();
+  }
+  const texts: string[] = [];
+  for (const piece of splitWav(wav)) texts.push((await inProject(project, () => gateway.transcribe(piece, undefined, (note) => hive.log("audio", "policy", note), spellingHint()))).text);
+  return texts.join(" ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Adds source material to a book: {kind: "url", url} (a page, a public Google Doc, a
+ * YouTube video's captions, a PDF or Word file), {kind: "text", text, name},
+ * {kind: "pdf" | "audio", upload} (an id from POST /api/uploads) or {kind: "docx", data, name} (base64).
+ */
+app.post("/api/books/:id/sources", requireToken, async (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  if (isRunning(b)) return res.status(409).json({ error: "Pause the book first" });
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const kind = String(body.kind ?? "");
+  try {
+    let got: { kind: SourceKind; name: string; origin?: string; text: string };
+    if (kind === "url") {
+      const url = typeof body.url === "string" ? body.url.trim() : "";
+      if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: "Give a web address starting with http:// or https://" });
+      const out = await fetchSource(url, { allowPrivate: BROWSER_ALLOW_PRIVATE });
+      if ("buf" in out) {
+        const text = out.kind === "pdf" ? (await extractPdf(out.buf, out.title)).pages.join("\n\n") : docxToText(out.buf);
+        got = { kind: out.kind, name: out.title, origin: url, text };
+      } else got = { kind: out.kind, name: out.title, origin: url, text: out.text };
+    } else if (kind === "text") {
+      got = { kind: "text", name: typeof body.name === "string" && body.name.trim() ? body.name.trim() : "Pasted text", text: typeof body.text === "string" ? body.text : "" };
+    } else if (kind === "pdf") {
+      const buf = typeof body.upload === "string" ? uploads.bytes(body.upload) : null;
+      if (!buf) return res.status(400).json({ error: "Upload the PDF first (POST /api/uploads)" });
+      const pdf = await extractPdf(buf, typeof body.name === "string" ? body.name : "document.pdf");
+      if (pdf.scanned) return res.status(400).json({ error: "That PDF is scanned pages with no text layer; run it through OCR first" });
+      got = { kind: "pdf", name: typeof body.name === "string" ? body.name : pdf.title || "PDF", text: pdf.pages.join("\n\n") };
+    } else if (kind === "docx") {
+      const data = typeof body.data === "string" ? body.data.replace(/^data:[^;,]*;base64,/, "") : "";
+      const buf = Buffer.from(data, "base64");
+      if (!buf.length || buf.length > 30 * 1024 * 1024) return res.status(400).json({ error: "Send the Word file as base64 (at most 30 MB)" });
+      got = { kind: "docx", name: typeof body.name === "string" ? body.name : "Word document", text: docxToText(buf) };
+    } else if (kind === "audio") {
+      const wav = typeof body.upload === "string" ? uploads.bytes(body.upload) : null;
+      if (!wav || !parseWav(wav)) return res.status(400).json({ error: "Upload the recording first (POST /api/uploads with kind audio)" });
+      got = { kind: "audio", name: typeof body.name === "string" ? body.name : "Recording", text: await transcribeForBook(wav, b.project) };
+    } else return res.status(400).json({ error: "kind must be url, text, pdf, docx or audio" });
+    const added = addSource(b, got);
+    if ("error" in added) return res.status(400).json(added);
+    books.save(b);
+    hive.log("writer", "book", `source added to “${b.title || "Untitled"}”: ${added.name} (${added.text.length.toLocaleString("en-US")} characters)`);
+    res.status(201).json(bookView(b));
+  } catch (e) {
+    res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+app.delete("/api/books/:id/sources/:sid", requireToken, (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  if (isRunning(b)) return res.status(409).json({ error: "Pause the book first" });
+  if (!removeSource(b, String(req.params.sid))) return res.status(404).json({ error: "Source not found" });
+  books.save(b);
+  res.json(bookView(b));
+});
+
+/** Asks for a listing kit (description, back cover, keywords, categories); it runs as the book's next step. */
+app.post("/api/books/:id/listing", requireToken, (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  if (!b.bible) return res.status(400).json({ error: "Plan the book first" });
+  b.listing = undefined;
+  b.wantListing = true;
+  b.paused = false;
+  b.error = undefined;
+  b.failures = 0;
+  books.save(b);
+  void pump();
+  res.json(bookView(b));
+});
+
+/**
+ * KDP paperback files: the interior, printed until its gutter matches its page count and
+ * padded to KDP's 24-page minimum, and the full cover sized from that page count.
+ */
+app.post("/api/books/:id/kdp", requireToken, async (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  if (!BROWSER_CDP_URL) return res.status(400).json({ error: "KDP files are printed by the browser sidecar: set BROWSER_CDP_URL (see README-HQ)" });
+  if (!b.chapters.some((c) => c.text || c.image)) return res.status(400).json({ error: "Nothing is written yet" });
+  const trim = (typeof req.body?.trim === "string" && req.body.trim in TRIMS ? req.body.trim : trimOf(b)) as Trim;
+  const paper: Paper = req.body?.paper === "cream" || req.body?.paper === "color" ? req.body.paper : b.kind === "picture" ? "color" : "white";
+  const footer = b.kind === "picture" ? "none" : "number";
+  try {
+    // The gutter depends on the page count, which depends on the gutter: print until they agree
+    let pages = 100;
+    let pdf: Buffer = Buffer.alloc(0);
+    for (let pass = 0; pass < 3; pass++) {
+      pdf = await printPdf(bookHtml(b, { trim, kdp: { pages }, image: bookImageUri }), BROWSER_CDP_URL, { footer });
+      const counted = await pdfPageCount(pdf);
+      const settled = gutterFor(counted) === gutterFor(pages);
+      pages = counted;
+      if (settled) break;
+    }
+    const notes: string[] = [];
+    if (pages < MIN_PAGES) {
+      notes.push(`Padded from ${pages} to ${MIN_PAGES} pages, KDP's minimum${b.kind === "picture" ? " (with a “This book belongs to” page)" : ""}.`);
+      pdf = await printPdf(bookHtml(b, { trim, kdp: { pages, padTo: MIN_PAGES }, image: bookImageUri }), BROWSER_CDP_URL, { footer });
+      pages = await pdfPageCount(pdf);
+    }
+    if (pages > MAX_PAGES) return res.status(400).json({ error: `${pages} pages is over KDP's paperback limit of ${MAX_PAGES}: use a larger trim size` });
+    const spec = coverSpec(trim, pages, paper);
+    const front = bookCover(b);
+    const firstPicture = b.kind === "picture" ? b.chapters.find((c) => c.image)?.image : undefined;
+    const image = front ? `data:${front.mime};base64,${front.data.toString("base64")}` : firstPicture ? (bookImageUri(firstPicture) ?? undefined) : undefined;
+    const coverPdf = await printPdf(
+      coverHtml(spec, { title: b.title || "Untitled", subtitle: b.subtitle, author: b.author, blurb: b.listing?.backCover || b.brief, image }),
+      BROWSER_CDP_URL,
+      { footer: "none" },
+    );
+    const interior = files.save(`${b.title || "book"}-interior`, pdf);
+    const cover = files.save(`${b.title || "book"}-cover`, coverPdf);
+    if (!spec.spineText) notes.push(`No spine text: KDP only allows it from 80 pages.`);
+    if (b.kind === "picture") notes.push("In KDP choose “Bleed” for the interior: the pictures run to the page edge.");
+    notes.push(`In KDP choose ${paper === "color" ? "premium colour" : `${paper} paper`} and ${trim === "letter" ? "8.5 x 11" : trim.replace("x", " x ")} in: the cover was sized for that paper.`);
+    if (!b.listing) notes.push("The back cover uses your brief; make a listing kit first for proper back-cover copy.");
+    hive.log("writer", "book", `KDP files for “${b.title || "Untitled"}”: ${pages} pages, ${spec.width}×${spec.height} in cover`);
+    res.json({
+      interior: { ...interior, url: `/api/files/${interior.name}`, pages },
+      cover: { ...cover, url: `/api/files/${cover.name}`, ...spec },
+      trim,
+      paper,
+      notes,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+  }
 });
 
 app.delete("/api/books/:id", requireToken, (req, res) => {
@@ -2654,11 +2826,11 @@ app.get("/api/books/:id/export/:fmt", (req, res) => {
   if (!b.chapters.some((c) => c.text)) return res.status(400).json({ error: "No chapters are written yet" });
   const out =
     fmt === "epub"
-      ? { type: "application/epub+zip", body: bookEpub(b, bookCover(b)) }
+      ? { type: "application/epub+zip", body: bookEpub(b, bookCover(b), bookImage) }
       : fmt === "md"
         ? { type: "text/markdown; charset=utf-8", body: Buffer.from(bookMarkdown(b)) }
         : fmt === "html"
-          ? { type: "text/html; charset=utf-8", body: Buffer.from(bookHtml(b, { trim: (req.query.trim as Trim) || "6x9" })) }
+          ? { type: "text/html; charset=utf-8", body: Buffer.from(bookHtml(b, { trim: (req.query.trim as Trim) || trimOf(b), image: bookImageUri })) }
           : null;
   if (!out) return res.status(400).json({ error: "Formats: epub, md, html" });
   res.setHeader("Content-Type", out.type);
@@ -2675,10 +2847,11 @@ app.post("/api/books/:id/pdf", requireToken, async (req, res) => {
   if (!b) return;
   if (!BROWSER_CDP_URL) return res.status(400).json({ error: "PDFs are printed by the browser sidecar: set BROWSER_CDP_URL (see README-HQ)" });
   if (!b.chapters.some((c) => c.text)) return res.status(400).json({ error: "No chapters are written yet" });
-  const trim = (typeof req.body?.trim === "string" && req.body.trim in TRIMS ? req.body.trim : "6x9") as Trim;
+  const trim = (typeof req.body?.trim === "string" && req.body.trim in TRIMS ? req.body.trim : trimOf(b)) as Trim;
   const cover = bookCover(b);
   try {
-    const pdf = await printPdf(bookHtml(b, { trim, cover: cover ? `data:${cover.mime};base64,${cover.data.toString("base64")}` : undefined }), BROWSER_CDP_URL, { footer: "number" });
+    const html = bookHtml(b, { trim, cover: cover ? `data:${cover.mime};base64,${cover.data.toString("base64")}` : undefined, image: bookImageUri });
+    const pdf = await printPdf(html, BROWSER_CDP_URL, { footer: b.kind === "picture" ? "none" : "number" });
     const saved = files.save(b.title || "book", pdf);
     res.json({ ...saved, url: `/api/files/${saved.name}` });
   } catch (e) {
