@@ -28,9 +28,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from mcstudio import sheet
 from mcstudio.comfy import STEM_NODE, Comfy
 from mcstudio.store import DATA, Jobs, Library, outputs
+from mcstudio import videojobs
 from mcstudio.worker import Worker, check_params, job_title, save_upload
 
 MAX_UPLOAD = 150 * 1024 * 1024
+# Clips and recordings for the video workflows can be bigger than songs
+MAX_BODY = int(videojobs.MAX_MEDIA * 1.4) + 1024
 COMFY_URL = os.environ.get("COMFY_URL", "http://host.docker.internal:8188")
 VOICE_URL = os.environ.get("VOICE_URL", "")
 
@@ -91,7 +94,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def body(self) -> dict:
         size = int(self.headers.get("Content-Length") or 0)
-        if size > MAX_UPLOAD * 1.4:
+        if size > MAX_BODY:
             raise ValueError("Request too large")
         raw = self.rfile.read(size) or b"{}"
         try:
@@ -124,6 +127,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, j) if j else self.send(404, {"error": "Job not found"})
             if p == ["outputs"]:
                 return self.send(200, {"outputs": outputs(DATA)})
+            if p == ["media"]:
+                return self.send(200, {"media": videojobs.list_media(DATA)})
             if len(p) >= 2 and p[0] == "files":
                 return self.file("/".join(p[1:]))
             return self.send(404, {"error": "Not found"})
@@ -191,7 +196,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(400, {"error": "Send the audio as base64"})
                 if not raw:
                     return self.send(400, {"error": "The file is empty"})
-                if len(raw) > MAX_UPLOAD:
+                if len(raw) > MAX_UPLOAD:  # songs; media has its own limit
                     return self.send(413, {"error": f"Files can be at most {MAX_UPLOAD // 1024 // 1024} MB"})
                 meta = save_upload(library, str(body.get("title") or ""), raw, str(body.get("filename") or "upload"))
                 if body.get("split", True):
@@ -207,6 +212,11 @@ class Handler(BaseHTTPRequestHandler):
                 job = jobs.add(kind, params, job_title(kind, params, library))
                 worker.wake.set()
                 return self.send(201, job)
+            if p == ["media"]:
+                try:
+                    return self.send(201, videojobs.save_media(str(body.get("folder") or ""), str(body.get("filename") or ""), str(body.get("data") or ""), DATA))
+                except (binascii.Error, ValueError) as e:
+                    return self.send(400, {"error": str(e) if isinstance(e, ValueError) and not isinstance(e, binascii.Error) else "Send the file as base64"})
             if len(p) == 3 and p[0] == "jobs" and p[2] == "cancel":
                 err = jobs.cancel(p[1])
                 return self.send(400 if err else 200, {"error": err} if err else {"ok": True})
@@ -238,6 +248,7 @@ ALLOWED = {
     "karaoke": {"song", "semitones", "lyrics", "keep_backing_vocals"},
     "sheet": {"song", "parts"},
     "daw": {"song"},
+    **videojobs.ALLOWED,
 }
 
 

@@ -516,11 +516,14 @@ app.use(cors({ origin: CORS_ORIGINS }));
 type Middleware = (req: Request, res: Response, next: NextFunction) => void;
 const jsonBody = express.json({ limit: "40mb" }) as Middleware;
 const assetBody = express.json({ limit: "120mb" }) as Middleware;
-// Songs added to the studio: up to 100 MB of audio, sent as base64
+// Songs added to the studio: up to 100 MB of audio; clips for its videos: up to 200 MB (base64)
 const studioBody = express.json({ limit: "140mb" }) as Middleware;
+const studioMediaBody = express.json({ limit: "285mb" }) as Middleware;
 app.use((req: Request, res: Response, next: NextFunction) => {
   const p = (req.url ?? "").split("?")[0];
-  return (req.method === "POST" && p === "/api/assets" ? assetBody : req.method === "POST" && p === "/api/studio/songs" ? studioBody : jsonBody)(req, res, next);
+  const parser =
+    req.method !== "POST" ? jsonBody : p === "/api/assets" ? assetBody : p === "/api/studio/songs" ? studioBody : p === "/api/studio/media" ? studioMediaBody : jsonBody;
+  return parser(req, res, next);
 });
 
 function requireToken(req: Request, res: Response, next: NextFunction) {
@@ -2824,7 +2827,8 @@ app.post("/api/books/:id/kdp", requireToken, async (req, res) => {
 // The dashboard talks to the studio through here, so the studio itself is never published.
 // Reading is open like the rest of the API; changes need the token.
 const STUDIO_ROUTES: { method: string; path: RegExp }[] = [
-  { method: "GET", path: /^\/(health|songs|jobs|outputs)$/ },
+  { method: "GET", path: /^\/(health|songs|jobs|outputs|media)$/ },
+  { method: "POST", path: /^\/media$/ },
   { method: "GET", path: /^\/(songs|jobs)\/[a-f0-9]{12}$/ },
   { method: "GET", path: /^\/files\/[A-Za-z0-9._/-]+$/ },
   { method: "POST", path: /^\/(songs|jobs)$/ },
@@ -2844,7 +2848,7 @@ app.use("/api/studio", async (req: Request, res: Response) => {
       headers: { "Content-Type": "application/json", ...(req.headers.range ? { Range: String(req.headers.range) } : {}) },
       body: req.method === "GET" ? undefined : JSON.stringify(req.body ?? {}),
       // An upload is converted before the answer comes back
-      signal: AbortSignal.timeout(req.method === "POST" && sub === "/songs" ? 10 * 60_000 : isFile ? 5 * 60_000 : 30_000),
+      signal: AbortSignal.timeout(req.method === "POST" && (sub === "/songs" || sub === "/media") ? 10 * 60_000 : isFile ? 5 * 60_000 : 30_000),
     });
     if (isFile) {
       res.status(r.status);

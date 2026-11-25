@@ -11,11 +11,13 @@ import time
 import traceback
 from pathlib import Path
 
-from . import audio, daw, karaoke, separate, sheet
+from . import audio, daw, karaoke, separate, sheet, videojobs
+from .js import context as js_context
 from .comfy import STEM_NODE, STEMS, Comfy, ComfyError, audio_files, song_workflow, split_workflow
 from .store import DATA, Jobs, Library, slug
 
-KINDS = ("split", "song", "practice", "karaoke", "sheet", "daw")
+MUSIC_KINDS = ("split", "song", "practice", "karaoke", "sheet", "daw")
+KINDS = MUSIC_KINDS + videojobs.VIDEO_KINDS
 
 
 class Worker:
@@ -26,6 +28,8 @@ class Worker:
         self.voice_url = voice_url
         self.data = data or DATA
         self.cpu_model = cpu_model  # tests pass a small model; normally loaded on first CPU split
+        # The video workflows reach the library, ComfyUI and the voice service through here
+        js_context.library, js_context.comfy, js_context.voice_url = library, comfy, voice_url
         self.wake = threading.Event()
         self.thread = threading.Thread(target=self.loop, daemon=True)
 
@@ -44,7 +48,10 @@ class Worker:
     def run(self, job: dict) -> None:
         self.jobs.update(job, status="running", startedAt=int(time.time() * 1000), progress="starting")
         try:
-            result = getattr(self, f"do_{job['type']}")(job, **job["params"])
+            if job["type"] in videojobs.VIDEO_KINDS:
+                result = videojobs.run(job["type"], job["params"], self.data, lambda t: self.progress(job, t))
+            else:
+                result = getattr(self, f"do_{job['type']}")(job, **job["params"])
             self.jobs.update(job, status="done", progress="", result=result, finishedAt=int(time.time() * 1000))
         except InterruptedError:
             self.jobs.update(job, status="cancelled", progress="", finishedAt=int(time.time() * 1000))
@@ -239,14 +246,17 @@ class Worker:
 
 def job_title(kind: str, params: dict, library: Library) -> str:
     song = library.get(str(params.get("song", ""))) if params.get("song") else None
-    name = song["title"] if song else str(params.get("title") or params.get("prompt") or "")[:60]
-    return {"split": "Split", "song": "New song", "practice": "Practice", "karaoke": "Karaoke", "sheet": "Sheet music", "daw": "DAW stems"}[kind] + (f": {name}" if name else "")
+    name = str(params.get("title") or "") or (song["title"] if song else str(params.get("prompt") or "")[:60])
+    labels = {"split": "Split", "song": "New song", "practice": "Practice", "karaoke": "Karaoke", "sheet": "Sheet music", "daw": "DAW stems", **videojobs.LABELS}
+    return labels[kind] + (f": {name[:60]}" if name else "")
 
 
 def check_params(kind: str, p: dict, library: Library) -> str | None:
     """What's wrong with a job request, or None."""
     if kind not in KINDS:
         return f"Unknown job type (one of {', '.join(KINDS)})"
+    if kind in videojobs.VIDEO_KINDS:
+        return videojobs.check(kind, p, library)
     if kind == "song":
         if not str(p.get("prompt", "")).strip():
             return "Describe the song (style, instruments, mood)"

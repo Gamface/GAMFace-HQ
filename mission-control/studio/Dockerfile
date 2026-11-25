@@ -4,9 +4,10 @@
 # Built once with internet: about 2 GB of packages and the Demucs weights.
 FROM python:3.12-slim
 
-# ffmpeg: decoding, mixing, encoding · rubberband: speed and key · MuseScore 3: MIDI to PDF
+# ffmpeg: decoding, mixing, encoding, video · rubberband: speed and key · MuseScore 3: MIDI to PDF
+# Inkscape + Inter: title cards, slides and thumbnails for the video workflows
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg rubberband-cli musescore3 fonts-dejavu-core libsndfile1 ca-certificates \
+        ffmpeg rubberband-cli musescore3 inkscape fonts-inter fonts-dejavu-core libsndfile1 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

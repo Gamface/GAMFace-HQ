@@ -176,6 +176,10 @@ class FakeComfy:
                             name = node["inputs"]["filename_prefix"].replace("/", "_") + ".flac"
                             outs[nid] = {"audio": [{"filename": name, "subfolder": "", "type": "output"}]}
                             outer.files[name] = outer.flac
+                        if node["class_type"] == "SaveImage":
+                            name = f"pic-{pid}.png"
+                            outs[nid] = {"images": [{"filename": name, "subfolder": "", "type": "output"}]}
+                            outer.files[name] = outer.png
                     return self.reply(200, {pid: {"status": {"status_str": "success", "completed": True}, "outputs": outs}})
                 if self.path.startswith("/view?"):
                     from urllib.parse import parse_qs, urlparse
@@ -200,6 +204,8 @@ class FakeComfy:
         tmp = Path(tempfile.mkdtemp())
         subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=330:duration=12:sample_rate=48000", "-ac", "2", str(tmp / "s.flac")], check=True)
         self.flac = (tmp / "s.flac").read_bytes()
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "gradients=s=1216x832", "-frames:v", "1", str(tmp / "p.png")], check=True)
+        self.png = (tmp / "p.png").read_bytes()
 
 
 class FakeVoice:
@@ -213,6 +219,20 @@ class FakeVoice:
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path == "/speak":
+                    # A tone as long as the text would take to say, with evenly spread word timings
+                    words = body["text"].split()
+                    secs = max(1.0, len(words) * 0.35)
+                    with tempfile.TemporaryDirectory() as td:
+                        wav = tone(Path(td) / "s.wav", 200, secs, 24000, 1)
+                        audio_b64 = base64.b64encode(wav.read_bytes()).decode()
+                    timed = [{"text": w, "start": round(i * 0.35, 3), "end": round(i * 0.35 + 0.3, 3)} for i, w in enumerate(words)]
+                    data = json.dumps({"audio": audio_b64, "seconds": secs, "words": timed, "voice": body.get("voice")}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 raw = base64.b64decode(body["audio"])
                 assert raw[:4] == b"RIFF", "the voice service gets a WAV"
                 outer.calls += 1
