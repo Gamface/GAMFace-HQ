@@ -278,7 +278,20 @@ Under **Start from my own content** (or **Your content** on a book's page), add:
   Run it again later. Without the browser sidecar only demand is read.
 - Amazon changes its pages: if no listings can be read, the research says so and the
   parser in `src/hq/research.ts` (`parseResults`) needs updating.
-- Research is saved in `data/research/`. API: `GET/POST /api/research {seed, market: books|kindle, project}`,
+- **Etsy** (for printables, planners and digital downloads) uses Etsy's official API with
+  your free key. Create an app at etsy.com/developers and put its keystring in `ETSY_API_KEY`
+  and its shared secret in `ETSY_SHARED_SECRET` in `.env` (Etsy wants them sent as
+  `keystring:secret`; a combined value in `ETSY_API_KEY` works too).
+  - It reads the niche's top 100 listings, takes the multi-word phrases at least two sellers
+    tagged them with, and searches each phrase. That's about 9 of the 5,000 calls a day a
+    key allows.
+  - **Demand** is the median favourites of a phrase's top listings, and **competition** is how
+    many listings match it. Etsy's API doesn't report sales.
+  - The browser isn't used.
+- Etsy's **Dev MCP server** (`mcp.api.etsycloud.com`) only answers questions about Etsy's API
+  documentation; it returns no listings. The Printing Press `etsy` CLI adds stored snapshots
+  and trends on top of the same key, if you want deeper Etsy research later.
+- Research is saved in `data/research/`. API: `GET/POST /api/research {seed, market: books|kindle|etsy, project}`,
   `GET/DELETE /api/research/:id`.
 
 ### Amazon KDP paperback files

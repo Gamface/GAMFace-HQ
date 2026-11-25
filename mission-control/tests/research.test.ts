@@ -8,7 +8,11 @@ import {
   ResearchStore,
   competitionOf,
   conceptsPrompt,
+  etsyKeyHeader,
+  etsyPhrases,
   isBlockedPage,
+  mineEtsy,
+  parseEtsy,
   mineKeywords,
   newResearch,
   parseConcepts,
@@ -134,6 +138,49 @@ test("Research: the concepts prompt carries only the measured numbers; concepts 
   assert.equal(parsed.concepts[1].kind, "ebook", "an unknown kind becomes an ebook");
   assert.equal(parsed.summary, "Puppy guides are wide open.");
   assert.deepEqual(parseConcepts({}), { error: "The model proposed no usable concepts" });
+});
+
+const etsyListing = (title: string, tags: string[], favorites: number, price = 499) => ({ title, tags, num_favorers: favorites, views: favorites * 10, is_digital: true, price: { amount: price, divisor: 100, currency_code: "USD" } });
+
+test("Etsy: listings are parsed, phrases come from sellers' tags, and the key is sent as keystring:secret", () => {
+  assert.equal(etsyKeyHeader("abc", "s3cret"), "abc:s3cret");
+  assert.equal(etsyKeyHeader("abc:s3cret", "other"), "abc:s3cret", "a combined key is kept");
+  assert.equal(etsyKeyHeader("abc"), "abc");
+  const parsed = parseEtsy({ count: 5120, results: [etsyListing("Budget Planner &amp; Tracker", ["Budget Planner", "printable"], 40, 899)] });
+  assert.deepEqual(parsed, { count: 5120, listings: [{ title: "Budget Planner & Tracker", tags: ["budget planner", "printable"], price: 8.99, favorites: 40, views: 400, digital: true }] });
+  const phrases = etsyPhrases("budget planner", [
+    { title: "a", tags: ["budget planner printable", "monthly budget", "gift"], favorites: 1, views: 0, digital: true },
+    { title: "b", tags: ["budget planner printable", "monthly budget", "budget planner"], favorites: 1, views: 0, digital: true },
+    { title: "c", tags: ["debt tracker", "budget binder"], favorites: 1, views: 0, digital: true },
+  ]);
+  assert.deepEqual(phrases, ["budget planner printable", "monthly budget"], "on-niche, multi-word, used by at least two sellers");
+});
+
+test("Etsy: research searches the niche then each phrase; demand is favourites, competition is listing count", async () => {
+  const calls: { url: string; key: string | null }[] = [];
+  const fake = (async (url: string, init?: RequestInit) => {
+    calls.push({ url, key: new Headers(init?.headers).get("x-api-key") });
+    const k = decodeURIComponent(/keywords=([^&]+)/.exec(url)![1]);
+    if (k === "budget planner")
+      return Response.json({
+        count: 90000,
+        results: [etsyListing("A", ["budget planner printable", "debt payoff planner"], 10), etsyListing("B", ["budget planner printable", "debt payoff planner"], 20), etsyListing("C", ["x"], 30)],
+      });
+    if (k === "debt payoff planner") return Response.json({ count: 800, results: [etsyListing("D", [], 300), etsyListing("E", [], 500)] });
+    return Response.json({ count: 40000, results: [etsyListing("F", [], 50)] });
+  }) as typeof fetch;
+  const out = await mineEtsy("budget planner", "key:secret", { fetchImpl: fake });
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every((c) => c.key === "key:secret" && c.url.startsWith("https://openapi.etsy.com/v3/application/listings/active?")));
+  assert.match(calls[0].url, /limit=100&sort_on=score/);
+  const debt = out.keywords.find((k) => k.text === "debt payoff planner")!;
+  assert.equal(debt.demand, 100, "median 400 favourites, the strongest");
+  assert.equal(debt.competition!.total, 800);
+  assert.equal(debt.score, 100, "high demand, few competing listings");
+  assert.ok(out.keywords.find((k) => k.text === "budget planner")!.score! < 10);
+  await assert.rejects(mineEtsy("x y z", "bad", { fetchImpl: (async () => new Response("", { status: 403 })) as typeof fetch }), /refused the API key/);
+  const r = { ...(newResearch({ seed: "budget planner", market: "etsy" }) as Research), keywords: out.keywords };
+  assert.match(conceptsPrompt(r)[1].content, /\(Etsy, where printables[\s\S]*"debt payoff planner": demand 100\/100, opportunity 100\/100; 800 competing listings, median 400 favourites/);
 });
 
 test("Research: saved per item; research cut off by a restart is marked failed", () => {

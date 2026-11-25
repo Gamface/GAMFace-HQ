@@ -20,7 +20,7 @@ import { Cdp, resolveCdpUrl } from "./browser";
 import type { ChatMessage } from "./ollama";
 import { decodeEntities } from "./sources";
 
-export type Market = "books" | "kindle";
+export type Market = "books" | "kindle" | "etsy";
 export type ResearchStatus = "mining" | "competition" | "thinking" | "done" | "failed";
 
 export interface Competition {
@@ -34,6 +34,10 @@ export interface Competition {
   /** The first few titles, so you can see who you'd be up against */
   titles: string[];
   sponsored: number;
+  /** Etsy: every listing that matches the phrase (Etsy reports it) */
+  total?: number;
+  /** Etsy: median favourites of the listings read (buyers saving them) */
+  medianFavorites?: number;
 }
 
 export interface Keyword {
@@ -74,8 +78,8 @@ export interface Research {
 }
 
 export const RESEARCH_ID = /^[a-f0-9]{12}$/;
-const ALIAS: Record<Market, string> = { books: "stripbooks", kindle: "digital-text" };
-const DEPT: Record<Market, string> = { books: "stripbooks", kindle: "digital-text" };
+const ALIAS: Record<Market, string> = { books: "stripbooks", kindle: "digital-text", etsy: "" };
+const DEPT: Record<Market, string> = { books: "stripbooks", kindle: "digital-text", etsy: "" };
 export const COMPETITION_CHECKS = 8;
 
 export function newResearch(input: Record<string, unknown>): Research | { error: string } {
@@ -85,7 +89,7 @@ export function newResearch(input: Record<string, unknown>): Research | { error:
   return {
     id: randomBytes(6).toString("hex"),
     seed,
-    market: input.market === "kindle" ? "kindle" : "books",
+    market: input.market === "kindle" ? "kindle" : input.market === "etsy" ? "etsy" : "books",
     status: "mining",
     notes: [],
     keywords: [],
@@ -231,7 +235,13 @@ export function competitionOf(listings: Listing[]): Competition {
  * median review count and many listings under 100 reviews score best.
  */
 export function scoreKeywords(keywords: Keyword[]): Keyword[] {
-  const raw = keywords.map((k) => (k.competition && k.competition.results ? (k.demand * (0.4 + k.competition.lowShare)) / (1 + Math.log10(1 + k.competition.medianReviews)) : undefined));
+  const raw = keywords.map((k) => {
+    const c = k.competition;
+    if (!c || !c.results) return undefined;
+    // Etsy: demand against how many listings compete for the phrase
+    if (c.total !== undefined) return k.demand / (1 + Math.log10(1 + c.total));
+    return (k.demand * (0.4 + c.lowShare)) / (1 + Math.log10(1 + c.medianReviews));
+  });
   const top = Math.max(0, ...raw.filter((x): x is number => x !== undefined)) || 1;
   return keywords.map((k, i) => (raw[i] === undefined ? { ...k, score: undefined } : { ...k, score: Math.round((raw[i]! / top) * 100) }));
 }
@@ -273,6 +283,109 @@ export async function renderPage(url: string, cdpBase: string, timeoutMs = 25000
   }
 }
 
+// --- Etsy (Open API v3, with your free API key) --------------------------------------------
+
+export const ETSY_API = "https://openapi.etsy.com/v3/application";
+
+export interface EtsyListing {
+  title: string;
+  tags: string[];
+  price?: number;
+  favorites: number;
+  views: number;
+  digital: boolean;
+}
+
+/** Etsy wants x-api-key as keystring:shared_secret. */
+export const etsyKeyHeader = (key: string, secret?: string) => (key.includes(":") || !secret ? key : `${key}:${secret}`);
+
+/** Listings and the total match count from GET /listings/active. Exported for tests. */
+export function parseEtsy(json: unknown): { count: number; listings: EtsyListing[] } {
+  const j = (json ?? {}) as { count?: unknown; results?: unknown };
+  const list = Array.isArray(j.results) ? (j.results as Record<string, unknown>[]) : [];
+  return {
+    count: typeof j.count === "number" ? j.count : list.length,
+    listings: list.map((l) => {
+      const p = (l.price ?? {}) as { amount?: number; divisor?: number };
+      return {
+        title: decodeEntities(String(l.title ?? "")).slice(0, 200),
+        tags: Array.isArray(l.tags) ? l.tags.map((t) => String(t).toLowerCase().trim()).filter(Boolean) : [],
+        price: typeof p.amount === "number" && p.divisor ? Math.round((p.amount / p.divisor) * 100) / 100 : undefined,
+        favorites: typeof l.num_favorers === "number" ? l.num_favorers : 0,
+        views: typeof l.views === "number" ? l.views : 0,
+        digital: l.is_digital === true,
+      };
+    }),
+  };
+}
+
+/** Phrases sellers tag their top listings with that stay on the niche, most used first. */
+export function etsyPhrases(seed: string, listings: EtsyListing[], max = 8): string[] {
+  const words = seed.split(" ").filter((w) => w.length > 2);
+  const counts = new Map<string, number>();
+  for (const l of listings) for (const t of new Set(l.tags)) if (t !== seed && t.includes(" ") && words.some((w) => t.includes(w))) counts.set(t, (counts.get(t) ?? 0) + 1);
+  return [...counts.entries()]
+    .filter(([, n]) => n >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, max)
+    .map(([t]) => t);
+}
+
+export function etsyCompetition(count: number, listings: EtsyListing[]): Competition {
+  const top = listings.slice(0, 25);
+  return {
+    results: top.length,
+    total: count,
+    medianReviews: 0,
+    lowShare: 0,
+    medianFavorites: median(top.map((l) => l.favorites)),
+    avgPrice: mean(top.map((l) => l.price).filter((p): p is number => p !== undefined)),
+    titles: top.slice(0, 5).map((l) => l.title),
+    sponsored: 0,
+  };
+}
+
+/**
+ * Etsy research: the niche's top listings, the phrases their sellers tag them with, then
+ * each phrase's listings. Demand is how many buyers favourite a phrase's top listings;
+ * competition is how many listings match it. About 9 calls of the 5,000 a day a key allows.
+ */
+export async function mineEtsy(
+  seed: string,
+  apiKey: string,
+  opts: { fetchImpl?: typeof fetch; delayMs?: number; onProgress?: (text: string) => void } = {},
+): Promise<{ keywords: Keyword[]; failed: number }> {
+  const doFetch = opts.fetchImpl ?? fetch;
+  const search = async (keywords: string, limit: number) => {
+    const url = `${ETSY_API}/listings/active?keywords=${encodeURIComponent(keywords)}&limit=${limit}&sort_on=score`;
+    const res = await doFetch(url, { headers: { "x-api-key": apiKey, Accept: "application/json" }, signal: AbortSignal.timeout(15000) });
+    if (res.status === 401 || res.status === 403) throw new Error(`Etsy refused the API key (${res.status}). Check ETSY_API_KEY and ETSY_SHARED_SECRET in .env.`);
+    if (!res.ok) throw new Error(`Etsy answered ${res.status}`);
+    return parseEtsy(await res.json());
+  };
+  opts.onProgress?.(`Reading Etsy's top listings for “${seed}”`);
+  const first = await search(seed, 100);
+  const phrases = etsyPhrases(seed, first.listings);
+  const found: { text: string; comp: Competition }[] = [{ text: seed, comp: etsyCompetition(first.count, first.listings) }];
+  let failed = 0;
+  for (const [i, phrase] of phrases.entries()) {
+    opts.onProgress?.(`Checking “${phrase}” on Etsy (${i + 1} of ${phrases.length})`);
+    try {
+      const got = await search(phrase, 25);
+      found.push({ text: phrase, comp: etsyCompetition(got.count, got.listings) });
+    } catch (e) {
+      if (/refused the API key/.test(String(e))) throw e;
+      failed++;
+    }
+    if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
+  }
+  const top = Math.max(1, ...found.map((f) => f.comp.medianFavorites ?? 0));
+  const keywords = found
+    .map((f) => ({ text: f.text, demand: Math.round(((f.comp.medianFavorites ?? 0) / top) * 100), letters: 0, competition: f.comp }))
+    .sort((a, b) => b.demand - a.demand);
+  return { keywords: scoreKeywords(keywords), failed };
+}
+
 // --- Concepts -----------------------------------------------------------------------------
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
@@ -280,7 +393,10 @@ const pct = (x: number) => `${Math.round(x * 100)}%`;
 export function conceptsPrompt(r: Research): ChatMessage[] {
   const checked = r.keywords.filter((k) => k.competition);
   const rows = (checked.length ? [...checked].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)) : r.keywords.slice(0, 15)).map((k) =>
-    k.competition
+    k.competition?.total !== undefined
+      ? `- "${k.text}": demand ${k.demand}/100, opportunity ${k.score ?? "?"}/100; ${k.competition.total.toLocaleString("en-US")} competing listings, median ${k.competition.medianFavorites ?? 0} favourites on the top ones` +
+        `${k.competition.avgPrice ? `, average price $${k.competition.avgPrice}` : ""}; top titles: ${k.competition.titles.slice(0, 3).join(" | ")}`
+      : k.competition
       ? `- "${k.text}": demand ${k.demand}/100, opportunity ${k.score ?? "?"}/100; first page: median ${k.competition.medianReviews} reviews, ${pct(k.competition.lowShare)} under 100 reviews` +
         `${k.competition.avgPrice ? `, average price $${k.competition.avgPrice}` : ""}; top titles: ${k.competition.titles.slice(0, 3).join(" | ")}`
       : `- "${k.text}": demand ${k.demand}/100 (competition not checked)`,
@@ -295,7 +411,9 @@ export function conceptsPrompt(r: Research): ChatMessage[] {
     {
       role: "user",
       content:
-        `Niche: "${r.seed}" (Amazon ${r.market === "kindle" ? "Kindle ebooks" : "books"}).\n\nPhrases buyers search for, from Amazon's own suggestions (demand is relative to the strongest phrase):\n${rows.join("\n")}\n` +
+        (r.market === "etsy"
+          ? `Niche: "${r.seed}" (Etsy, where printables, planners and digital downloads sell).\n\nPhrases from the tags of Etsy's top listings (demand is how many buyers favourite the top listings, relative to the strongest phrase):\n${rows.join("\n")}\n`
+          : `Niche: "${r.seed}" (Amazon ${r.market === "kindle" ? "Kindle ebooks" : "books"}).\n\nPhrases buyers search for, from Amazon's own suggestions (demand is relative to the strongest phrase):\n${rows.join("\n")}\n`) +
         (more.length ? `\nOther suggested phrases: ${more.join("; ")}\n` : "") +
         `\nPropose 3 book concepts this tool can make. Each must be one of: "ebook" (nonfiction), "novel", "picture" (children's picture book) or "puzzle" (whodunit or logic puzzle book). ` +
         `Reply as {"summary": "2–3 sentences on what the numbers show", "concepts": [{"title": "…", "kind": "ebook|novel|picture|puzzle", "keyword": "the phrase it targets", ` +

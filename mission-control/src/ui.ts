@@ -57,7 +57,7 @@ import type { Book, BookModel, BookStep, ImageLoader, Trim } from "./hq/books";
 import { MIN_PAGES, MAX_PAGES, coverHtml, coverSpec, gutterFor } from "./hq/kdp";
 import type { Paper } from "./hq/kdp";
 import { docxToText, fetchSource } from "./hq/sources";
-import { COMPETITION_CHECKS, ResearchStore, competitionOf, conceptsPrompt, isBlockedPage, mineKeywords, newResearch, parseConcepts, parseResults, renderPage, scoreKeywords, searchUrl } from "./hq/research";
+import { COMPETITION_CHECKS, ResearchStore, competitionOf, conceptsPrompt, etsyKeyHeader, isBlockedPage, mineEtsy, mineKeywords, newResearch, parseConcepts, parseResults, renderPage, scoreKeywords, searchUrl } from "./hq/research";
 import type { Research } from "./hq/research";
 import type { SourceKind } from "./hq/sources";
 import { DOC_ID, DocCache, cleanName, extractPdf, partsOf, pdfPageCount, withPageMarks } from "./hq/docs";
@@ -2821,10 +2821,22 @@ let researchBusy = false;
 const researchProgress = new Map<string, string>();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Etsy research needs your app's API key (etsy.com/developers): the keystring and the shared secret
+const ETSY_KEY = process.env.ETSY_API_KEY?.trim() ? etsyKeyHeader(process.env.ETSY_API_KEY.trim(), process.env.ETSY_SHARED_SECRET?.trim()) : "";
+
 async function runResearch(r: Research) {
   const save = () => research.get(r.id) === r && research.save(r);
   r.status = "mining";
   save();
+  if (r.market === "etsy") {
+    if (!ETSY_KEY) throw new Error("Etsy research needs an Etsy API key: set ETSY_API_KEY and ETSY_SHARED_SECRET in .env (free from etsy.com/developers), then restart.");
+    const got = await mineEtsy(r.seed, ETSY_KEY, { delayMs: 300, onProgress: (t) => researchProgress.set(r.id, t) });
+    r.keywords = got.keywords;
+    if (got.failed) r.notes.push(`${got.failed} Etsy searches failed; the rest were used.`);
+    if (!r.keywords.length) throw new Error("Etsy found nothing for this niche. Try broader words.");
+    save();
+    return finishResearch(r, save);
+  }
   const mined = await mineKeywords(r.seed, r.market, { delayMs: 250, onProgress: (d, t) => researchProgress.set(r.id, `Reading Amazon's search suggestions (${d} of ${t})`) });
   r.keywords = mined.keywords;
   if (mined.failed) r.notes.push(`${mined.failed} of 27 suggestion requests failed; the rest were used.`);
@@ -2857,6 +2869,11 @@ async function runResearch(r: Research) {
       await sleep(1500 + Math.random() * 1500);
     }
   } else r.notes.push("Competition wasn't checked: it needs the browser sidecar (BROWSER_CDP_URL).");
+  return finishResearch(r, save);
+}
+
+/** The last stage: the Writer turns the numbers into book ideas. */
+async function finishResearch(r: Research, save: () => unknown) {
   r.status = "thinking";
   save();
   // The Writer's model shares the GPU: wait for the running card or book step to finish
@@ -2902,7 +2919,7 @@ const researchView = (r: Research) => ({ ...r, progress: researchProgress.get(r.
 
 app.get("/api/research", (req, res) => {
   const p = typeof req.query.project === "string" && req.query.project !== "all" ? projects.idOf(req.query.project === "general" ? null : req.query.project) : undefined;
-  res.json({ items: research.list(p).map(researchView), browser: Boolean(BROWSER_CDP_URL) });
+  res.json({ items: research.list(p).map(researchView), browser: Boolean(BROWSER_CDP_URL), etsy: Boolean(ETSY_KEY) });
 });
 
 app.get("/api/research/:id", (req, res) => {

@@ -16,6 +16,8 @@ interface Competition {
   avgRating?: number;
   titles: string[];
   sponsored: number;
+  total?: number;
+  medianFavorites?: number;
 }
 
 interface Keyword {
@@ -39,7 +41,7 @@ export interface Concept {
 interface Research {
   id: string;
   seed: string;
-  market: "books" | "kindle";
+  market: Market;
   status: "mining" | "competition" | "thinking" | "done" | "failed";
   error?: string;
   notes: string[];
@@ -50,6 +52,8 @@ interface Research {
   progress: string | null;
 }
 
+type Market = "books" | "kindle" | "etsy";
+const MARKET_LABEL: Record<Market, string> = { books: "Amazon books", kindle: "Kindle ebooks", etsy: "Etsy" };
 const running = (r: Research) => r.status !== "done" && r.status !== "failed";
 
 function Bar({ value, tone = "bg-cyan-500" }: { value: number; tone?: string }) {
@@ -65,20 +69,21 @@ function KeywordTable({ r }: { r: Research }) {
   const checked = r.keywords.filter((k) => k.competition);
   const rows = [...(checked.length ? [...checked].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)) : []), ...r.keywords.filter((k) => !k.competition)];
   const shown = all ? rows : rows.slice(0, 15);
+  const etsy = r.market === "etsy";
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-xs">
         <thead>
           <tr className="text-left text-slate-500 border-b border-slate-800">
-            <th className="py-1.5 pr-3 font-normal">Search phrase</th>
-            <th className="py-1.5 pr-3 font-normal" title="How early and how often Amazon suggests it, relative to the strongest phrase">
+            <th className="py-1.5 pr-3 font-normal">{etsy ? "Phrase (from sellers' tags)" : "Search phrase"}</th>
+            <th className="py-1.5 pr-3 font-normal" title={etsy ? "How many buyers favourite the top listings, relative to the strongest phrase" : "How early and how often Amazon suggests it, relative to the strongest phrase"}>
               Demand
             </th>
-            <th className="py-1.5 pr-3 font-normal" title="Median review count of the first page's organic listings">
-              Median reviews
+            <th className="py-1.5 pr-3 font-normal" title={etsy ? "Every Etsy listing that matches the phrase" : "Median review count of the first page's organic listings"}>
+              {etsy ? "Listings" : "Median reviews"}
             </th>
-            <th className="py-1.5 pr-3 font-normal" title="Share of first-page listings with fewer than 100 reviews">
-              Under 100
+            <th className="py-1.5 pr-3 font-normal" title={etsy ? "Median favourites of the top 25 listings" : "Share of first-page listings with fewer than 100 reviews"}>
+              {etsy ? "Median favourites" : "Under 100"}
             </th>
             <th className="py-1.5 pr-3 font-normal">Avg price</th>
             <th className="py-1.5 font-normal" title="Demand against competition, among the phrases checked">
@@ -103,8 +108,8 @@ function KeywordTable({ r }: { r: Research }) {
                   <span className="text-slate-400">{k.demand}</span>
                 </div>
               </td>
-              <td className="py-1.5 pr-3 text-slate-300">{k.competition ? k.competition.medianReviews.toLocaleString() : "—"}</td>
-              <td className="py-1.5 pr-3 text-slate-300">{k.competition ? `${Math.round(k.competition.lowShare * 100)}%` : "—"}</td>
+              <td className="py-1.5 pr-3 text-slate-300">{!k.competition ? "—" : etsy ? (k.competition.total ?? 0).toLocaleString() : k.competition.medianReviews.toLocaleString()}</td>
+              <td className="py-1.5 pr-3 text-slate-300">{!k.competition ? "—" : etsy ? (k.competition.medianFavorites ?? 0).toLocaleString() : `${Math.round(k.competition.lowShare * 100)}%`}</td>
               <td className="py-1.5 pr-3 text-slate-300">{k.competition?.avgPrice ? `$${k.competition.avgPrice.toFixed(2)}` : "—"}</td>
               <td className="py-1.5">
                 {k.score !== undefined ? (
@@ -152,7 +157,7 @@ function ResearchView({ id, onStart, onGone }: { id: string; onStart: (c: Concep
         <div className="flex-1">
           <h3 className="text-base font-semibold text-slate-100">“{r.seed}”</h3>
           <p className="text-xs text-slate-500">
-            Amazon {r.market === "kindle" ? "Kindle ebooks" : "books"} · {new Date(r.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+            {MARKET_LABEL[r.market]} · {new Date(r.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
           </p>
         </div>
         {!running(r) && (
@@ -204,6 +209,11 @@ function ResearchView({ id, onStart, onGone }: { id: string; onStart: (c: Concep
           <h4 className="text-sm font-medium text-slate-200">What buyers search for</h4>
           <KeywordTable r={r} />
           <p className="text-[11px] text-slate-500">
+            {r.market === "etsy"
+              ? "Phrases come from the tags sellers put on Etsy's top listings for your niche. Demand is how many buyers favourite each phrase's top listings, relative to the strongest; competition is how many listings match it. Etsy's API doesn't report sales."
+              : null}
+          </p>
+          <p className={`text-[11px] text-slate-500 ${r.market === "etsy" ? "hidden" : ""}`}>
             Demand comes from Amazon's own search suggestions (how early and how often a phrase is suggested). It's a relative signal, not a search volume. Competition is read from the first page of results: under 100 reviews
             and a low median usually means room for a new book. Sales ranks aren't read.
           </p>
@@ -218,15 +228,17 @@ export default function BookResearch({ onStart }: { onStart: (c: Concept) => voi
   const proj = useProjects();
   const [items, setItems] = useState<Research[]>([]);
   const [browser, setBrowser] = useState(true);
+  const [etsyReady, setEtsyReady] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
   const [seed, setSeed] = useState("");
-  const [market, setMarket] = useState<"books" | "kindle">("books");
+  const [market, setMarket] = useState<Market>("books");
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(() => {
-    getJson<{ items: Research[]; browser: boolean }>(`/api/research${proj.query ? `?${proj.query}` : ""}`)
+    getJson<{ items: Research[]; browser: boolean; etsy?: boolean }>(`/api/research${proj.query ? `?${proj.query}` : ""}`)
       .then((r) => {
         setItems(r.items);
         setBrowser(r.browser);
+        setEtsyReady(r.etsy !== false);
         setSelected((s) => s ?? r.items[0]?.id ?? null);
       })
       .catch((e) => setError(errText(e)));
@@ -262,15 +274,19 @@ export default function BookResearch({ onStart }: { onStart: (c: Concept) => voi
             placeholder="A niche: dog training, cozy mystery, budget planner, bedtime stories…"
             aria-label="Niche"
           />
-          <select value={market} onChange={(e) => setMarket(e.target.value as "books" | "kindle")} className="bg-slate-950 border border-slate-700 rounded px-2 text-sm text-slate-200" aria-label="Market">
+          <select value={market} onChange={(e) => setMarket(e.target.value as Market)} className="bg-slate-950 border border-slate-700 rounded px-2 text-sm text-slate-200" aria-label="Market">
             <option value="books">Amazon books</option>
             <option value="kindle">Kindle ebooks</option>
+            <option value="etsy">Etsy (printables, planners)</option>
           </select>
           <button disabled={seed.trim().length < 3} onClick={() => void start()} className={primary}>
             Research
           </button>
         </div>
-        {!browser && <p className="text-[11px] text-amber-300/90">Without the browser sidecar (BROWSER_CDP_URL) only demand is read, not competition.</p>}
+        {!browser && market !== "etsy" && <p className="text-[11px] text-amber-300/90">Without the browser sidecar (BROWSER_CDP_URL) only demand is read, not competition.</p>}
+        {market === "etsy" && !etsyReady && (
+          <p className="text-[11px] text-amber-300/90">Etsy research needs a free Etsy API key: create an app at etsy.com/developers, put its keystring in ETSY_API_KEY and its shared secret in ETSY_SHARED_SECRET in .env, then restart.</p>
+        )}
         {error && <p className="text-xs text-rose-300">{error}</p>}
       </div>
       {items.length > 0 && (
