@@ -253,6 +253,34 @@ Under **Start from my own content** (or **Your content** on a book's page), add:
   The answer key (culprit and full solution) comes at the back. Default trim is 8.5×11 in.
 - Making a hard puzzle takes a few seconds of solving per puzzle.
 
+### Find a niche (research)
+
+**Find a niche** on the Books page researches a niche before you write:
+
+1. **Demand.** It asks Amazon for search suggestions for your niche, then niche + a … niche + z
+   (27 requests, books or Kindle). A phrase Amazon suggests early, and for many letters, is
+   one buyers type often. **Demand** is relative to the strongest phrase, not a search
+   volume: only paid tools have those.
+2. **Competition.** For the 8 strongest phrases, the browser sidecar opens Amazon's results
+   page (a throwaway profile, no pictures downloaded, a pause between pages). It reads each
+   organic listing's reviews, rating and price, and leaves sponsored listings out of the
+   numbers. You get the median review count, the share under 100 reviews, the average price
+   and the titles you'd be up against. Sales ranks aren't read (that means opening every
+   product page).
+3. **Opportunity** scores demand against competition: high demand with a low median and
+   many listings under 100 reviews scores best.
+4. **Book ideas.** The Writer proposes three concepts from the numbers: kind of book, the
+   phrase it targets, its angle against the existing titles, audience and a brief. It's told
+   to use only the measured numbers. **Start this book** opens a new book with all that
+   filled in.
+
+- If Amazon shows a robot check, competition stops there and says how many phrases it read.
+  Run it again later. Without the browser sidecar only demand is read.
+- Amazon changes its pages: if no listings can be read, the research says so and the
+  parser in `src/hq/research.ts` (`parseResults`) needs updating.
+- Research is saved in `data/research/`. API: `GET/POST /api/research {seed, market: books|kindle, project}`,
+  `GET/DELETE /api/research/:id`.
+
 ### Amazon KDP paperback files
 
 **Make interior + cover** on a book's page (needs the browser sidecar, like the other PDFs):

@@ -57,6 +57,8 @@ import type { Book, BookModel, BookStep, ImageLoader, Trim } from "./hq/books";
 import { MIN_PAGES, MAX_PAGES, coverHtml, coverSpec, gutterFor } from "./hq/kdp";
 import type { Paper } from "./hq/kdp";
 import { docxToText, fetchSource } from "./hq/sources";
+import { COMPETITION_CHECKS, ResearchStore, competitionOf, conceptsPrompt, isBlockedPage, mineKeywords, newResearch, parseConcepts, parseResults, renderPage, scoreKeywords, searchUrl } from "./hq/research";
+import type { Research } from "./hq/research";
 import type { SourceKind } from "./hq/sources";
 import { DOC_ID, DocCache, cleanName, extractPdf, partsOf, pdfPageCount, withPageMarks } from "./hq/docs";
 import type { PdfText } from "./hq/docs";
@@ -2809,6 +2811,123 @@ app.post("/api/books/:id/kdp", requireToken, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
   }
+});
+
+// --- Niche research (src/hq/research.ts) -----------------------------------------------
+const research = new ResearchStore(path.join(DATA_DIR, "research"));
+const researchQueue: string[] = [];
+let researchBusy = false;
+/** What each running research is doing now, for the Books page */
+const researchProgress = new Map<string, string>();
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function runResearch(r: Research) {
+  const save = () => research.get(r.id) === r && research.save(r);
+  r.status = "mining";
+  save();
+  const mined = await mineKeywords(r.seed, r.market, { delayMs: 250, onProgress: (d, t) => researchProgress.set(r.id, `Reading Amazon's search suggestions (${d} of ${t})`) });
+  r.keywords = mined.keywords;
+  if (mined.failed) r.notes.push(`${mined.failed} of 27 suggestion requests failed; the rest were used.`);
+  if (!r.keywords.length) throw new Error("Amazon suggested nothing for this niche. Try broader words.");
+  save();
+  if (BROWSER_CDP_URL) {
+    r.status = "competition";
+    save();
+    const count = Math.min(COMPETITION_CHECKS, r.keywords.length);
+    for (let i = 0; i < count; i++) {
+      const k = r.keywords[i];
+      researchProgress.set(r.id, `Reading the first page of results for “${k.text}” (${i + 1} of ${count})`);
+      let html: string;
+      try {
+        html = await renderPage(searchUrl(k.text, r.market), BROWSER_CDP_URL);
+      } catch (e) {
+        r.notes.push(`The browser couldn't open Amazon (${e instanceof Error ? e.message : e}); competition was read for ${i} phrases.`);
+        break;
+      }
+      if (isBlockedPage(html)) {
+        r.notes.push(`Amazon showed a robot check, so competition was read for ${i} of ${count} phrases. Try again later.`);
+        break;
+      }
+      const listings = parseResults(html);
+      if (!listings.length) r.notes.push(`No listings could be read for “${k.text}” (Amazon's page may have changed).`);
+      else r.keywords[i] = { ...k, competition: competitionOf(listings) };
+      r.keywords = scoreKeywords(r.keywords);
+      save();
+      // Paced like a person reading, so Amazon is less likely to show a robot check
+      await sleep(1500 + Math.random() * 1500);
+    }
+  } else r.notes.push("Competition wasn't checked: it needs the browser sidecar (BROWSER_CDP_URL).");
+  r.status = "thinking";
+  save();
+  // The Writer's model shares the GPU: wait for the running card or book step to finish
+  researchProgress.set(r.id, "Waiting for the model to be free…");
+  for (let waited = 0; (runningTaskId || backgroundBusy) && waited < 20 * 60_000; waited += 2000) await sleep(2000);
+  researchProgress.set(r.id, "The Writer is turning the numbers into book ideas…");
+  backgroundBusy = true;
+  try {
+    const out = await inProject(r.project, () => gateway.json("writer", conceptsPrompt(r), (note) => hive.log("writer", "policy", note)));
+    const parsed = parseConcepts(out.json ?? {});
+    if ("error" in parsed) throw new Error(parsed.error);
+    r.concepts = parsed.concepts;
+    r.summary = parsed.summary;
+  } finally {
+    backgroundBusy = false;
+    void pump();
+  }
+  r.status = "done";
+  hive.log("writer", "research", `niche “${r.seed}”: ${r.keywords.length} phrases, ${r.keywords.filter((k) => k.competition).length} checked, ${r.concepts?.length ?? 0} concepts`);
+}
+
+async function runResearchQueue() {
+  if (researchBusy) return;
+  const id = researchQueue.shift();
+  if (!id) return;
+  const r = research.get(id);
+  if (!r) return void runResearchQueue();
+  researchBusy = true;
+  try {
+    await runResearch(r);
+  } catch (e) {
+    r.status = "failed";
+    r.error = (e instanceof Error ? e.message : String(e)).slice(0, 400);
+  } finally {
+    if (research.get(r.id) === r) research.save(r);
+    researchProgress.delete(r.id);
+    researchBusy = false;
+    void runResearchQueue();
+  }
+}
+
+const researchView = (r: Research) => ({ ...r, progress: researchProgress.get(r.id) ?? (researchQueue.includes(r.id) ? "Waiting for the research before it" : null) });
+
+app.get("/api/research", (req, res) => {
+  const p = typeof req.query.project === "string" && req.query.project !== "all" ? projects.idOf(req.query.project === "general" ? null : req.query.project) : undefined;
+  res.json({ items: research.list(p).map(researchView), browser: Boolean(BROWSER_CDP_URL) });
+});
+
+app.get("/api/research/:id", (req, res) => {
+  const r = research.get(String(req.params.id));
+  if (!r) return res.status(404).json({ error: "Research not found" });
+  res.json(researchView(r));
+});
+
+app.post("/api/research", requireToken, (req, res) => {
+  const r = newResearch(req.body ?? {});
+  if ("error" in r) return res.status(400).json(r);
+  if (r.project && !projects.get(r.project)) return res.status(400).json({ error: "Unknown project" });
+  research.save(r);
+  researchQueue.push(r.id);
+  void runResearchQueue();
+  res.status(201).json(researchView(r));
+});
+
+app.delete("/api/research/:id", requireToken, (req, res) => {
+  const id = String(req.params.id);
+  if (researchProgress.has(id)) return res.status(409).json({ error: "Wait for this research to finish" });
+  const i = researchQueue.indexOf(id);
+  if (i >= 0) researchQueue.splice(i, 1);
+  if (!research.delete(id)) return res.status(404).json({ error: "Research not found" });
+  res.json({ ok: true });
 });
 
 app.delete("/api/books/:id", requireToken, (req, res) => {

@@ -4,6 +4,8 @@ import { HARNESS_URL } from "../config";
 import { useProjects } from "../project";
 import { KIND_LABEL, KdpPanel, ListingPanel, SourcePicker, SourcesPanel, addSource, btn, errText, input, num, pendingName, primary, quiet, trimLabel } from "./BookParts";
 import type { Book, Chapter, Kind, PendingSource, Stage } from "./BookParts";
+import BookResearch from "./BookResearch";
+import type { Concept } from "./BookResearch";
 
 // Books: novels, nonfiction ebooks, children's picture books and puzzle books, written from
 // a brief or repurposed from your own content. The Writer plans, waits for you to approve
@@ -71,10 +73,23 @@ const PLACEHOLDER: Record<Kind, string> = {
   puzzle: "Cosy murder mysteries in a 1920s seaside hotel, solved by a retired cook with a sharp eye for detail.",
 };
 
-function NewBook({ onMade, onCancel, pictures }: { onMade: (id: string) => void; onCancel: () => void; pictures: boolean }) {
+function NewBook({ onMade, onCancel, pictures, initial }: { onMade: (id: string) => void; onCancel: () => void; pictures: boolean; initial?: Concept | null }) {
   const proj = useProjects();
-  const [kind, setKind] = useState<Kind>("novel");
-  const [f, setF] = useState({ brief: "", title: "", author: "", genre: "", audience: "", style: "", chapterCount: 20, chapterWords: 2500, artStyle: "", puzzleType: "mystery", difficulty: "medium" });
+  // From niche research: the idea's kind, title, audience and brief
+  const [kind, setKind] = useState<Kind>(initial?.kind ?? "novel");
+  const [f, setF] = useState({
+    brief: initial ? `${initial.brief}${initial.angle ? `\n\nAngle: ${initial.angle}` : ""}` : "",
+    title: initial?.title ?? "",
+    author: "",
+    genre: initial?.keyword ?? "",
+    audience: initial?.audience ?? "",
+    style: "",
+    chapterCount: KIND_DEFAULTS[initial?.kind ?? "novel"].count,
+    chapterWords: KIND_DEFAULTS[initial?.kind ?? "novel"].words,
+    artStyle: "",
+    puzzleType: "mystery",
+    difficulty: "medium",
+  });
   const [pending, setPending] = useState<PendingSource[]>([]);
   const [faithful, setFaithful] = useState(true);
   const [usePictures, setUsePictures] = useState(true);
@@ -113,6 +128,7 @@ function NewBook({ onMade, onCancel, pictures }: { onMade: (id: string) => void;
   return (
     <div className="max-w-2xl space-y-3">
       <h2 className="text-lg font-semibold text-slate-100">New book</h2>
+      {initial && <p className="text-xs text-cyan-300">From your niche research: “{initial.title}”. Adjust anything, then start planning.</p>}
       <div className="flex flex-wrap gap-2">
         {(["novel", "ebook", "picture", "puzzle"] as const).map((k) => (
           <button key={k} onClick={() => pick(k)} className={`${btn} border ${kind === k ? "border-cyan-600 bg-cyan-950 text-cyan-300" : "border-slate-700 text-slate-400 hover:bg-slate-800"}`}>
@@ -754,7 +770,8 @@ function BookView({ id, meta, onGone, onChanged }: { id: string; meta: ListReply
 export default function BooksPage() {
   const proj = useProjects();
   const [list, setList] = useState<ListReply | null>(null);
-  const [selected, setSelected] = useState<string | "new" | null>(null);
+  const [selected, setSelected] = useState<string | "new" | "research" | null>(null);
+  const [prefill, setPrefill] = useState<Concept | null>(null);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(() => {
     getJson<ListReply>(`/api/books${proj.query ? `?${proj.query}` : ""}`)
@@ -779,9 +796,20 @@ export default function BooksPage() {
       <aside className="md:w-72 shrink-0 bg-slate-900 border border-slate-800 rounded-xl overflow-y-auto max-h-72 md:max-h-none">
         <div className="p-3 flex items-center justify-between">
           <h1 className="text-sm font-semibold text-slate-100">Books</h1>
-          <button onClick={() => setSelected("new")} className={primary}>
-            + New book
-          </button>
+          <div className="flex gap-1.5">
+            <button onClick={() => setSelected("research")} className={`${quiet} ${selected === "research" ? "border-cyan-700 text-cyan-300" : ""}`} title="Research what buyers search for on Amazon">
+              Find a niche
+            </button>
+            <button
+              onClick={() => {
+                setPrefill(null);
+                setSelected("new");
+              }}
+              className={primary}
+            >
+              + New book
+            </button>
+          </div>
         </div>
         {list && <p className="px-3 pb-2 text-[11px] text-slate-500">Writer: {list.writer} (change it on the Team page)</p>}
         {error && <p className="px-3 text-xs text-rose-300">{error}</p>}
@@ -811,8 +839,17 @@ export default function BooksPage() {
         {list && !list.books.length && <p className="px-3 py-2 text-xs text-slate-500">No books yet.</p>}
       </aside>
       <main className="flex-1 min-w-0 bg-slate-900 border border-slate-800 rounded-xl overflow-y-auto p-4 md:p-6">
-        {selected === "new" ? (
+        {selected === "research" ? (
+          <BookResearch
+            onStart={(c) => {
+              setPrefill(c);
+              setSelected("new");
+            }}
+          />
+        ) : selected === "new" ? (
           <NewBook
+            key={prefill?.title ?? "blank"}
+            initial={prefill}
             pictures={list?.pictures !== false}
             onMade={(id) => {
               setSelected(id);

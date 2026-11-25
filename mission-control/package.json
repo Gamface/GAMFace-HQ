@@ -7,7 +7,7 @@
     "start": "tsx src/ui.ts",
     "typecheck": "tsc --noEmit",
     "eval": "tsx evals/run.ts",
-    "test": "tsx --test tests/hq.test.ts tests/board.test.ts tests/policy.test.ts tests/routine.test.ts tests/vision.test.ts tests/audio.test.ts tests/reply.test.ts tests/pdf.test.ts tests/docs.test.ts tests/scheduler.test.ts tests/colibri.test.ts tests/approvals.test.ts tests/profiles.test.ts tests/skills.test.ts tests/video.test.ts tests/media.test.ts tests/projects.test.ts tests/changes.test.ts tests/presets.test.ts tests/brain.test.ts tests/browser-agent.test.ts tests/tools.test.ts tests/tool-agent.test.ts tests/privacy-carry.test.ts tests/pictures.test.ts tests/gallery.test.ts tests/inbox.test.ts tests/books.test.ts tests/book-kinds.test.ts",
+    "test": "tsx --test tests/hq.test.ts tests/board.test.ts tests/policy.test.ts tests/routine.test.ts tests/vision.test.ts tests/audio.test.ts tests/reply.test.ts tests/pdf.test.ts tests/docs.test.ts tests/scheduler.test.ts tests/colibri.test.ts tests/approvals.test.ts tests/profiles.test.ts tests/skills.test.ts tests/video.test.ts tests/media.test.ts tests/projects.test.ts tests/changes.test.ts tests/presets.test.ts tests/brain.test.ts tests/browser-agent.test.ts tests/tools.test.ts tests/tool-agent.test.ts tests/privacy-carry.test.ts tests/pictures.test.ts tests/gallery.test.ts tests/inbox.test.ts tests/books.test.ts tests/book-kinds.test.ts tests/research.test.ts",
     "preflight": "tsx scripts/preflight.ts",
     "brain:migrate": "tsx src/brain/migrate.ts",
     "brain:token": "tsx src/brain/token.ts",
