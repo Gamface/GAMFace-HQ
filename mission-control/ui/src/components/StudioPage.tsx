@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getJson, send } from "../api";
 import { HARNESS_URL } from "../config";
+import VideoStudio from "./VideoStudio";
 
 // The music studio: add songs (or write new ones with ACE-Step on the graphics card), split them
 // into stems, then make practice tracks, karaoke, sheet music and DAW exports. The work runs in
@@ -73,6 +74,21 @@ function Chip({ ok, label, title }: { ok: boolean; label: string; title?: string
 /** One file from a result: players for audio, links for the rest. */
 function FileLink({ rel }: { rel: string }) {
   const name = rel.split("/").pop() ?? rel;
+  if (/\.mp4$/i.test(name))
+    return (
+      <div className="space-y-1">
+        <video controls preload="metadata" src={fileUrl(rel)} className="max-h-72 max-w-full rounded border border-slate-800 bg-black" />
+        <a href={fileUrl(rel, true)} className="text-[11px] text-cyan-400 hover:text-cyan-300 block truncate">
+          {name}
+        </a>
+      </div>
+    );
+  if (/\.(png|jpe?g)$/i.test(name))
+    return (
+      <a href={fileUrl(rel, true)} className="inline-block">
+        <img src={fileUrl(rel)} alt={name} className="h-20 rounded border border-slate-800" />
+      </a>
+    );
   if (/\.(mp3|wav|flac)$/i.test(name))
     return (
       <div className="flex items-center gap-2">
@@ -419,6 +435,7 @@ export default function StudioPage() {
   const [selected, setSelected] = useState<string | "new" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [upload, setUpload] = useState<string | null>(null);
+  const [mode, setMode] = useState<"music" | "video">("music");
   const load = useCallback(() => {
     Promise.all([getJson<Health>("/api/studio/health"), getJson<{ songs: Song[] }>("/api/studio/songs"), getJson<{ jobs: Job[] }>("/api/studio/jobs"), getJson<{ outputs: Output[] }>("/api/studio/outputs")])
       .then(([h, s, j, o]) => {
@@ -520,7 +537,17 @@ export default function StudioPage() {
         </div>
         {error && <p className="text-xs text-rose-300 rounded border border-rose-900 bg-rose-950/40 px-3 py-2">{error}</p>}
 
-        {selected === "new" ? (
+        <div className="flex gap-1.5" role="tablist" aria-label="Studio mode">
+          {(["music", "video"] as const).map((m) => (
+            <button key={m} role="tab" aria-selected={mode === m} onClick={() => setMode(m)} className={`${btn} border text-sm ${mode === m ? "border-cyan-600 bg-cyan-950 text-cyan-300" : "border-slate-700 text-slate-400 hover:bg-slate-800"}`}>
+              {m === "music" ? "♪ Music studio" : "▶ Video studio"}
+            </button>
+          ))}
+        </div>
+
+        {mode === "video" ? (
+          <VideoStudio songs={songs} onJob={load} comfy={Boolean(health?.comfy)} voice={Boolean(health?.voice)} />
+        ) : selected === "new" ? (
           <NewSong health={health} onJob={load} />
         ) : song ? (
           <section className="space-y-4">
