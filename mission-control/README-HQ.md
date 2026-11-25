@@ -170,6 +170,68 @@ into an MP4 that appears on the card (🎬): play it there or download it.
 API: `POST /api/tasks/:id/video` renders the scene in a finished card's answer. The video
 service itself: `POST /render`, `GET /jobs/:id`, `GET /jobs/:id/video`, `GET /health`.
 
+## Studio: songs, stems, practice, karaoke and sheet music
+
+The **Studio** page (music-note icon) is the music half of Jarvis Studio (from ods-Jarvis),
+rebuilt for this PC so the heavy work runs on the **RX 9060 XT**. Docker can't use an AMD card
+on Windows, so the GPU work goes through **ComfyUI** on Windows (already set up for pictures),
+and everything else runs in the new **`studio` container**.
+
+| What | Where it runs |
+|---|---|
+| **New songs**: ACE-Step 1.5, sung (with your lyrics, marked `[verse]`, `[chorus]`, `[bridge]`) or instrumental, 10 s to 10 min, with BPM, key, time signature and language | Graphics card (ComfyUI) |
+| **Stems**: vocals, drums, bass and other (Hybrid Demucs) | Graphics card with the stems node below; otherwise the CPU (same model, slower) |
+| **Stems mixer**: play every part in sync in the browser, mute, solo, levels | Your browser |
+| **Practice tracks**: leave parts out, 50–150% speed (same key), ±12 semitones (same speed), a section | CPU (ffmpeg + rubberband) |
+| **Karaoke**: backing without vocals (or with a quiet guide), key change, timed lyrics as `.lrc` | CPU; lyrics by Whisper in the voice service |
+| **Sheet music**: vocals, bass and other parts as MIDI, PDF and MusicXML | CPU (basic-pitch's ONNX model + MuseScore 3) |
+| **DAW export**: one ZIP with every stem lined up at 0:00, a REAPER project and steps for Audacity and Ardour | CPU |
+
+Add audio with **+ Add audio** (MP3, WAV, FLAC, M4A, OGG, or a video's sound; up to 100 MB and
+20 minutes): it's split into stems straight away. Only use audio you have the right to use.
+Everything lands in `mission-control/data/studio` (`library/` for songs and stems, `outputs/`
+for finished work), and each job's files play or download from the page.
+
+### Setting it up on the PC
+
+1. **Build and start it:** `docker compose up -d --build studio` (the first build downloads
+   about 2 GB: CPU PyTorch, ffmpeg, MuseScore and the Demucs weights).
+2. **ACE-Step 1.5 in ComfyUI:** update Comfy Desktop, then either open *Template Library →
+   Audio → ACE-Step 1.5* once and let it download the model, or put
+   `ace_step_1.5_turbo_aio.safetensors` (Hugging Face: `Comfy-Org/ace_step_1.5_ComfyUI_files`)
+   in ComfyUI's `models/checkpoints`. The Studio page shows **ACE-Step songs** in green once
+   ComfyUI has it.
+3. **Stems on the graphics card:** copy `tools/comfyui/custom_nodes/mission_control_stems` into
+   ComfyUI's `custom_nodes` folder
+   (`%LOCALAPPDATA%\Comfy-Desktop\ComfyUI-Installs\GAMFace\ComfyUI\custom_nodes`) and restart
+   ComfyUI. It downloads the Demucs weights (about 320 MB) the first time. Until then stems are
+   split on the CPU, with the same result.
+4. **Speed:** ComfyUI's AMD bug workaround (hipBLASLt off, see *Pictures*) slows everything on
+   the card, songs included. After updating Comfy Desktop, try without those two settings.
+
+### How it fits together
+
+- The studio container is on the private `render` network with the harness and the voice
+  service, plus its own `studio-out` network so it can reach ComfyUI at
+  `host.docker.internal:8188` (`COMFY_URL`). It isn't published to your machine. The
+  dashboard reaches it through the harness at `/api/studio/*`, where changes need the token
+  like the rest of the API.
+- **One job at a time:** splitting and songs use the graphics card or every CPU core, so jobs
+  queue. Jobs cut off by a restart are marked interrupted, and you can run them again. A new
+  song is split straight after it's written (untick that if you don't need stems).
+- **Live control of desktop apps** (Guitarix, Ardour, Audacity, OBS) from Jarvis Studio on
+  gamface-S8 isn't part of this: the studio gives you files to open in them. Guitarix has no
+  Windows version.
+- The video half of Jarvis Studio (music videos, beat-cut edits, shorts, narrated videos and
+  explainers) is the next phase.
+- Tests: `docker compose run --rm studio python -m unittest discover -s tests` (real ffmpeg,
+  rubberband, basic-pitch and MuseScore; an untrained Demucs and a fake ComfyUI).
+
+API (through the harness): `GET /api/studio/health|songs|jobs|outputs`, `GET /api/studio/songs/:id`,
+`POST /api/studio/songs {title, filename, data}` (base64), `DELETE /api/studio/songs/:id`,
+`POST /api/studio/jobs {type: split|song|practice|karaoke|sheet|daw, …}`,
+`POST /api/studio/jobs/:id/cancel`, `GET /api/studio/files/<path>` (`?download=1`).
+
 ## Books: novels, ebooks, picture books and puzzle books
 
 The **Books** page (book icon) makes whole books: novels, nonfiction ebooks, children's
