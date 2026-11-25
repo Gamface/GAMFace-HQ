@@ -121,3 +121,14 @@ export function partsOf(doc: PdfText, maxChars: number): { from: number; to: num
   if (start < doc.pages.length) parts.push({ from: start, to: doc.pages.length, text: withPageMarks(doc, start).slice(0, maxChars) });
   return parts;
 }
+
+/** How many pages a PDF has (for KDP: margins and the spine depend on it). */
+export async function pdfPageCount(buf: Buffer): Promise<number> {
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const task = pdfjs.getDocument({ data: new Uint8Array(buf), disableFontFace: true, useWorkerFetch: false, enableXfa: false, useSystemFonts: false, verbosity: 0 });
+  try {
+    return (await task.promise).numPages;
+  } finally {
+    await task.destroy();
+  }
+}

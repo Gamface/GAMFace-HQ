@@ -6,7 +6,7 @@ import type { TaskStore } from "./taskstore";
 // Which model each agent uses. Settings live in the database (edited on the
 // Team page or with "switch <agent> to <model>"), with defaults from .env.
 
-export const MODEL_ROLES = ["planner", "coder", "browser", "file", "security_audit", "vision", "tools", "router", "memory", "audio"] as const;
+export const MODEL_ROLES = ["planner", "coder", "browser", "file", "security_audit", "vision", "tools", "router", "memory", "audio", "writer"] as const;
 export type ModelRole = (typeof MODEL_ROLES)[number];
 
 export interface RoleSettings {
@@ -123,6 +123,8 @@ export class ModelRegistry {
         numCtx: this.defaults.numCtx,
         think: background ? false : this.defaults.think,
         localOnly: LOCAL_ONLY_BY_DEFAULT.includes(r),
+        // Prose reads better with a little more variety than code or planning
+        ...(r === "writer" ? { temperature: 0.8 } : {}),
       };
     }
     const aliases: Record<string, string> = { local: main };
@@ -408,6 +410,9 @@ const ROLE_NAMES: Record<string, ModelRole> = {
   ears: "audio",
   router: "router",
   memory: "memory",
+  writer: "writer",
+  author: "writer",
+  books: "writer",
 };
 
 export interface SwitchCommand {

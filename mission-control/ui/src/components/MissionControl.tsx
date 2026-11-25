@@ -18,6 +18,7 @@ import RoutinesPage from "./RoutinesPage";
 import SkillsPage from "./SkillsPage";
 import AssetsPage from "./AssetsPage";
 import GalleryPage from "./GalleryPage";
+import BooksPage from "./BooksPage";
 import ToolsPage from "./ToolsPage";
 import ProjectsPage from "./ProjectsPage";
 import FilesPage from "./FilesPage";
@@ -295,6 +296,7 @@ export default function MissionControl() {
       {view === "tools" && <ToolsPage />}
       {view === "assets" && <AssetsPage />}
       {view === "gallery" && <GalleryPage />}
+      {view === "books" && <BooksPage />}
       {view === "projects" && <ProjectsPage />}
       {view === "files" && <FilesPage />}
       {view === "console" && (<>

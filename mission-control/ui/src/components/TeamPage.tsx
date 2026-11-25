@@ -62,6 +62,7 @@ const ROLES: { key: string; what: string }[] = [
   { key: "vision", what: "Reads attached pictures (needs a vision model)" },
   { key: "tools", what: "Decides each tool call (installed MCP tools)" },
   { key: "audio", what: "Turns attached audio into text, on your PC by default (needs an audio model like gemma4:12b, or a Whisper server)" },
+  { key: "writer", what: "Writes books: story bibles, outlines and chapters (Books page)" },
   { key: "router", what: "Picks the agent for auto tasks (fast model)" },
   { key: "memory", what: "Extracts memories between tasks (fast model)" },
 ];
