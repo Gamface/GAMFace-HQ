@@ -136,16 +136,15 @@ def _snapshot(base: Path) -> dict[Path, float]:
 
 
 def _finished(base: Path, before: dict[Path, float], data: Path) -> list[str]:
-    """The files a job made or changed, without the working files (caches, stems, SVGs)."""
+    """The finished files a job made or changed: videos, subtitles, timelines, thumbnails and
+    YouTube chapters. Working files (mixes, title cards, overlays, scene caches) are left out."""
     out = []
     for f, m in _snapshot(base).items():
-        if before.get(f) == m:
+        if before.get(f) == m or "cache" in f.relative_to(base).parts:
             continue
-        if any(part in ("cache", "work") for part in f.relative_to(base).parts) or f.suffix in (".svg", ".json", ".txt") and f.name not in ("chapters.txt",):
-            continue
-        if f.name.endswith(".raw.wav") or re.match(r"^(voice|seg|clip|part|song-mix|mix|backing|stem)[-_]", f.name):
-            continue
-        out.append(str(f.relative_to(data)))
+        keep = f.suffix.lower() in (".mp4", ".srt", ".otio", ".lrc") or f.name == "chapters.txt" or (f.name.startswith("thumbnail") and f.suffix.lower() in (".png", ".jpg"))
+        if keep and not re.match(r"^(seg|part)-\d", f.name):
+            out.append(str(f.relative_to(data)))
     return sorted(out, key=lambda r: (not r.endswith(".mp4"), r))
 
 
