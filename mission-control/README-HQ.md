@@ -222,10 +222,45 @@ for finished work), and each job's files play or download from the page.
 - **Live control of desktop apps** (Guitarix, Ardour, Audacity, OBS) from Jarvis Studio on
   gamface-S8 isn't part of this: the studio gives you files to open in them. Guitarix has no
   Windows version.
-- The video half of Jarvis Studio (music videos, beat-cut edits, shorts, narrated videos and
-  explainers) is the next phase.
 - Tests: `docker compose run --rm studio python -m unittest discover -s tests` (real ffmpeg,
-  rubberband, basic-pitch and MuseScore; an untrained Demucs and a fake ComfyUI).
+  rubberband, basic-pitch, MuseScore and Inkscape; an untrained Demucs and a fake ComfyUI).
+
+### Video studio
+
+**▶ Video studio** on the Studio page runs Jarvis Studio's video workflows (its code, from
+ods-Jarvis commit afca719, is in `studio/mcstudio/js/video`, with changes marked `HQ:`).
+Songs come from the music library; upload clips, photos and recordings into **media folders**
+(up to 200 MB each, kept in `data/studio/media`). Finished videos play on the page and land in
+`data/studio/outputs`.
+
+| Workflow | What you get |
+|---|---|
+| **Music video** | A moving waveform lane per part, spectrum bars or one big waveform; title card, lyrics, thumbnail; 16:9, 9:16 or 1:1; a section by start and end |
+| **Shorts** | 9:16, 1:1 and 16:9 clips of a song (its loudest part) or of your video, with captions and -14 LUFS audio. Never posts anywhere |
+| **Beat-cut edit** | A media folder cut every 2, 4 or 8 beats of a song, plus an `.otio` timeline for Kdenlive |
+| **Narrated video** | Kokoro reads your script, one slide or photo per paragraph, captions from the script, music ducked under the voice |
+| **Explainer** | Any length, scene by scene: a picture per scene from ComfyUI on the graphics card (Z-Image Turbo), 12 looks (cinematic, documentary, 3D cartoon, anime, watercolor storybook, comic, claymation, pencil sketch, flat, retro VHS, whiteboard, social), chapter cards, animated captions, `chapters.txt` for YouTube. Each scene's pieces are kept, so a changed scene is the only one made again |
+| **Captions** | Whisper subtitles (`.srt`) for any video, optionally burned in |
+| **Performance** | Your take (recorded in OBS or on a phone) lined up with the studio backing by cross-correlation, mixed, with lyrics |
+
+What changed from gamface-S8:
+
+| On the laptop | In HQ |
+|---|---|
+| StemDeck songs and lyrics | The studio library; lyrics are what Whisper hears in the vocals (kept with the song) |
+| Lemonade SD-Turbo pictures (CPU, 512 px) | ComfyUI Z-Image Turbo on the RX 9060 XT (about 1 megapixel) |
+| MOSS-TTS voice cloning, Kokoro | Kokoro in the voice service (no voice cloning) |
+| Lemonade's Whisper | Whisper in the voice service |
+| Intel VAAPI encoding | x264 on the CPU (the container has no GPU) |
+| Live OBS recording (perform start/finish) | Record in OBS yourself, upload the take, use **Performance** |
+| Song sections (chorus) from StemDeck | Not detected: give start and end, or shorts use the loudest part |
+
+Videos render on the CPU: expect a few minutes per minute of video, longer for explainers
+with a picture per scene (each picture is a ComfyUI job on the graphics card).
+
+API: `GET /api/studio/media`, `POST /api/studio/media {folder, filename, data}` (base64), and
+`POST /api/studio/jobs` with `type` one of `music_video`, `shorts`, `beat_edit`, `narrated`,
+`explainer`, `captions` or `performance` (media by its path, e.g. `media/my-clips`).
 
 API (through the harness): `GET /api/studio/health|songs|jobs|outputs`, `GET /api/studio/songs/:id`,
 `POST /api/studio/songs {title, filename, data}` (base64), `DELETE /api/studio/songs/:id`,
