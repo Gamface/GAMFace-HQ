@@ -34,6 +34,8 @@ services:
       GPU_VRAM_GB: ${GPU_VRAM_GB:-16}
       # Voiceovers and word-timed captions: the voice service below
       VOICE_URL: http://voice:3030
+      # The music studio below (songs, stems, practice, karaoke, sheet music)
+      STUDIO_URL: http://studio:3050
       # Recordings are transcribed by Whisper in the voice service; "model" uses the Transcriber
       TRANSCRIBE_WITH: ${TRANSCRIBE_WITH:-whisper}
       # Tools (MCP servers) the agents may use: the tools service below
@@ -143,6 +145,26 @@ services:
     networks: [render]
     restart: unless-stopped
 
+  # The music studio: songs (ACE-Step 1.5) and stem splitting run on the graphics card through
+  # ComfyUI on Windows; practice tracks, karaoke, sheet music and DAW exports run here on the
+  # CPU. Built once with internet (about 2 GB). Only the harness talks to it; it reaches
+  # ComfyUI on the PC (host.docker.internal:8188) and the voice service for lyrics. Its
+  # songs and outputs are in data/studio.
+  studio:
+    build: ./studio
+    environment:
+      COMFY_URL: ${COMFY_URL:-http://host.docker.internal:8188}
+      VOICE_URL: http://voice:3030
+      # Free stock photos and clips for themed music videos (pexels.com/api, pixabay.com/api/docs)
+      PEXELS_API_KEY: ${PEXELS_API_KEY:-}
+      PIXABAY_API_KEY: ${PIXABAY_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data/studio:/data
+    networks: [render, studio-out]
+    restart: unless-stopped
+
   # Tools for the agents: the MCP servers listed in tools/tools.json. Its own networks:
   # one to the harness only, one out to the internet for the tools. It sees none of
   # your files and none of Mission Control's keys; tool API keys go in tools/.env.
@@ -187,6 +209,8 @@ networks:
     internal: true
   # The tools service's way out to the internet (nothing else is on it)
   tools-out: {}
+  # The studio's way to ComfyUI on the PC (host.docker.internal)
+  studio-out: {}
 
 volumes:
   brain_pgdata:

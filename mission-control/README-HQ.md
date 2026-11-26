@@ -170,6 +170,105 @@ into an MP4 that appears on the card (🎬): play it there or download it.
 API: `POST /api/tasks/:id/video` renders the scene in a finished card's answer. The video
 service itself: `POST /render`, `GET /jobs/:id`, `GET /jobs/:id/video`, `GET /health`.
 
+## Studio: songs, stems, practice, karaoke and sheet music
+
+The **Studio** page (music-note icon) is the music half of Jarvis Studio (from ods-Jarvis),
+rebuilt for this PC so the heavy work runs on the **RX 9060 XT**. Docker can't use an AMD card
+on Windows, so the GPU work goes through **ComfyUI** on Windows (already set up for pictures),
+and everything else runs in the new **`studio` container**.
+
+| What | Where it runs |
+|---|---|
+| **New songs**: ACE-Step 1.5, sung (with your lyrics, marked `[verse]`, `[chorus]`, `[bridge]`) or instrumental, 10 s to 10 min, with BPM, key, time signature and language | Graphics card (ComfyUI) |
+| **Stems**: vocals, drums, bass and other (Hybrid Demucs) | Graphics card with the stems node below; otherwise the CPU (same model, slower) |
+| **Stems mixer**: play every part in sync in the browser, mute, solo, levels | Your browser |
+| **Practice tracks**: leave parts out, 50–150% speed (same key), ±12 semitones (same speed), a section | CPU (ffmpeg + rubberband) |
+| **Karaoke**: backing without vocals (or with a quiet guide), key change, timed lyrics as `.lrc` | CPU; lyrics by Whisper in the voice service |
+| **Sheet music**: vocals, bass and other parts as MIDI, PDF and MusicXML | CPU (basic-pitch's ONNX model + MuseScore 3) |
+| **DAW export**: one ZIP with every stem lined up at 0:00, a REAPER project and steps for Audacity and Ardour | CPU |
+
+Add audio with **+ Add audio** (MP3, WAV, FLAC, M4A, OGG, or a video's sound; up to 100 MB and
+20 minutes): it's split into stems straight away. Only use audio you have the right to use.
+Everything lands in `mission-control/data/studio` (`library/` for songs and stems, `outputs/`
+for finished work), and each job's files play or download from the page.
+
+### Setting it up on the PC
+
+1. **Build and start it:** `docker compose up -d --build studio` (the first build downloads
+   about 2 GB: CPU PyTorch, ffmpeg, MuseScore and the Demucs weights).
+2. **ACE-Step 1.5 in ComfyUI:** open ComfyUI in your browser (http://127.0.0.1:8188, the
+   background copy Mission Control uses; don't press Start in the Desktop app while it runs),
+   pick *Templates → Audio → ACE-Step 1.5* and download its models. Either version works: the
+   all-in-one `ace_step_1.5_turbo_aio.safetensors`, or the split files (`acestep_v1.5_turbo`,
+   `qwen_0.6b_ace15`, `qwen_1.7b_ace15`, `ace_1.5_vae`, about 9 GB). The Studio page shows
+   **ACE-Step songs** in green once ComfyUI has them.
+3. **Stems on the graphics card:** copy `tools/comfyui/custom_nodes/mission_control_stems` into
+   ComfyUI's `custom_nodes` folder
+   (`%LOCALAPPDATA%\Comfy-Desktop\ComfyUI-Installs\GAMFace\ComfyUI\custom_nodes`) and restart
+   ComfyUI. It downloads the Demucs weights (about 320 MB) the first time. Until then stems are
+   split on the CPU, with the same result.
+4. **Speed:** ComfyUI's AMD bug workaround (hipBLASLt off, see *Pictures*) slows everything on
+   the card, songs included. After updating Comfy Desktop, try without those two settings.
+
+### How it fits together
+
+- The studio container is on the private `render` network with the harness and the voice
+  service, plus its own `studio-out` network so it can reach ComfyUI at
+  `host.docker.internal:8188` (`COMFY_URL`). It isn't published to your machine. The
+  dashboard reaches it through the harness at `/api/studio/*`, where changes need the token
+  like the rest of the API.
+- **One job at a time:** splitting and songs use the graphics card or every CPU core, so jobs
+  queue. Jobs cut off by a restart are marked interrupted, and you can run them again. A new
+  song is split straight after it's written (untick that if you don't need stems).
+- **Live control of desktop apps** (Guitarix, Ardour, Audacity, OBS) from Jarvis Studio on
+  gamface-S8 isn't part of this: the studio gives you files to open in them. Guitarix has no
+  Windows version.
+- Tests: `docker compose run --rm studio python -m unittest discover -s tests` (real ffmpeg,
+  rubberband, basic-pitch, MuseScore and Inkscape; an untrained Demucs and a fake ComfyUI).
+
+### Video studio
+
+**▶ Video studio** on the Studio page runs Jarvis Studio's video workflows (its code, from
+ods-Jarvis commit afca719, is in `studio/mcstudio/js/video`, with changes marked `HQ:`).
+Songs come from the music library; upload clips, photos and recordings into **media folders**
+(up to 200 MB each, kept in `data/studio/media`). Finished videos play on the page and land in
+`data/studio/outputs`.
+
+| Workflow | What you get |
+|---|---|
+| **Themed music video** | Real photos and video clips that fit the song's theme ("open road, sunset over the sea", or the song's own style when left empty), cut to the beat with lyrics and a title. Footage comes from **free stock** (Pexels and Pixabay: get free keys at pexels.com/api and pixabay.com/api/docs and put them in `PEXELS_API_KEY` / `PIXABAY_API_KEY` in `.env`), **photo-real AI pictures** from ComfyUI on the graphics card, and/or **your media folder**, in any mix. Every stock shot's photographer and page goes in `credits.txt`; the footage is kept as a media folder (`themed-<title>`) so you can reuse or trim it |
+| **Visualizer** (music video) | A moving waveform lane per part, spectrum bars or one big waveform; title card, lyrics, thumbnail; 16:9, 9:16 or 1:1; a section by start and end |
+| **Shorts** | 9:16, 1:1 and 16:9 clips of a song (its loudest part) or of your video, with captions and -14 LUFS audio. Never posts anywhere |
+| **Beat-cut edit** | A media folder cut every 2, 4 or 8 beats of a song, plus an `.otio` timeline for Kdenlive |
+| **Narrated video** | Kokoro reads your script, one slide or photo per paragraph, captions from the script, music ducked under the voice |
+| **Explainer** | Any length, scene by scene: a picture per scene from ComfyUI on the graphics card (Z-Image Turbo), 12 looks (cinematic, documentary, 3D cartoon, anime, watercolor storybook, comic, claymation, pencil sketch, flat, retro VHS, whiteboard, social), chapter cards, animated captions, `chapters.txt` for YouTube. Each scene's pieces are kept, so a changed scene is the only one made again |
+| **Captions** | Whisper subtitles (`.srt`) for any video, optionally burned in |
+| **Performance** | Your take (recorded in OBS or on a phone) lined up with the studio backing by cross-correlation, mixed, with lyrics |
+
+What changed from gamface-S8:
+
+| On the laptop | In HQ |
+|---|---|
+| StemDeck songs and lyrics | The studio library; lyrics are what Whisper hears in the vocals (kept with the song) |
+| Lemonade SD-Turbo pictures (CPU, 512 px) | ComfyUI Z-Image Turbo on the RX 9060 XT (about 1 megapixel) |
+| MOSS-TTS voice cloning, Kokoro | Kokoro in the voice service (no voice cloning) |
+| Lemonade's Whisper | Whisper in the voice service |
+| Intel VAAPI encoding | x264 on the CPU (the container has no GPU) |
+| Live OBS recording (perform start/finish) | Record in OBS yourself, upload the take, use **Performance** |
+| Song sections (chorus) from StemDeck | Not detected: give start and end, or shorts use the loudest part |
+
+Videos render on the CPU: expect a few minutes per minute of video, longer for explainers
+with a picture per scene (each picture is a ComfyUI job on the graphics card).
+
+API: `GET /api/studio/media`, `POST /api/studio/media {folder, filename, data}` (base64), and
+`POST /api/studio/jobs` with `type` one of `music_video`, `shorts`, `beat_edit`, `narrated`,
+`explainer`, `captions` or `performance` (media by its path, e.g. `media/my-clips`).
+
+API (through the harness): `GET /api/studio/health|songs|jobs|outputs`, `GET /api/studio/songs/:id`,
+`POST /api/studio/songs {title, filename, data}` (base64), `DELETE /api/studio/songs/:id`,
+`POST /api/studio/jobs {type: split|song|practice|karaoke|sheet|daw, …}`,
+`POST /api/studio/jobs/:id/cancel`, `GET /api/studio/files/<path>` (`?download=1`).
+
 ## Books: novels, ebooks, picture books and puzzle books
 
 The **Books** page (book icon) makes whole books: novels, nonfiction ebooks, children's

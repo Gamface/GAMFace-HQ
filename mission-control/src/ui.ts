@@ -183,6 +183,8 @@ const video = VIDEO_RENDER_URL ? new VideoClient(VIDEO_RENDER_URL.replace(/\/+$/
 const VIDEO_FIX_ROUNDS = Number(process.env.VIDEO_FIX_ROUNDS ?? 2);
 // Voiceovers and word timings: the voice service (voice/, docker-compose.yml)
 const VOICE_URL = process.env.VOICE_URL || "";
+// The music studio (studio/, docker-compose.yml): songs, stems, practice, karaoke, sheet music
+const STUDIO_URL = (process.env.STUDIO_URL || "").replace(/\/+$/, "");
 const voice = VOICE_URL ? new VoiceClient(VOICE_URL.replace(/\/+$/, "")) : null;
 // Tools (MCP servers) for the agents: the tools service (tools/, docker-compose.yml)
 const TOOLS_URL = process.env.TOOLS_URL || "";
@@ -514,7 +516,15 @@ app.use(cors({ origin: CORS_ORIGINS }));
 type Middleware = (req: Request, res: Response, next: NextFunction) => void;
 const jsonBody = express.json({ limit: "40mb" }) as Middleware;
 const assetBody = express.json({ limit: "120mb" }) as Middleware;
-app.use((req: Request, res: Response, next: NextFunction) => (req.method === "POST" && (req.url ?? "").split("?")[0] === "/api/assets" ? assetBody : jsonBody)(req, res, next));
+// Songs added to the studio: up to 100 MB of audio; clips for its videos: up to 200 MB (base64)
+const studioBody = express.json({ limit: "140mb" }) as Middleware;
+const studioMediaBody = express.json({ limit: "285mb" }) as Middleware;
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const p = (req.url ?? "").split("?")[0];
+  const parser =
+    req.method !== "POST" ? jsonBody : p === "/api/assets" ? assetBody : p === "/api/studio/songs" ? studioBody : p === "/api/studio/media" ? studioMediaBody : jsonBody;
+  return parser(req, res, next);
+});
 
 function requireToken(req: Request, res: Response, next: NextFunction) {
   if (!HARNESS_TOKEN || req.headers.authorization === `Bearer ${HARNESS_TOKEN}`) return next();
@@ -2810,6 +2820,62 @@ app.post("/api/books/:id/kdp", requireToken, async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+// --- Music studio (studio/: its own container; songs and GPU stems through ComfyUI) --------
+// The dashboard talks to the studio through here, so the studio itself is never published.
+// Reading is open like the rest of the API; changes need the token.
+const STUDIO_ROUTES: { method: string; path: RegExp }[] = [
+  { method: "GET", path: /^\/(health|songs|jobs|outputs|media)$/ },
+  { method: "POST", path: /^\/media$/ },
+  { method: "GET", path: /^\/(songs|jobs)\/[a-f0-9]{12}$/ },
+  { method: "GET", path: /^\/files\/[A-Za-z0-9._/-]+$/ },
+  { method: "POST", path: /^\/(songs|jobs)$/ },
+  { method: "POST", path: /^\/jobs\/[a-f0-9]{12}\/cancel$/ },
+  { method: "DELETE", path: /^\/songs\/[a-f0-9]{12}$/ },
+];
+
+app.use("/api/studio", async (req: Request, res: Response) => {
+  const [sub, query = ""] = (req.url ?? "/").split("?");
+  if (!STUDIO_ROUTES.some((r) => r.method === req.method && r.path.test(sub)) || sub.includes("..")) return res.status(404).json({ error: "Not found" });
+  if (!STUDIO_URL) return res.status(503).json({ error: "The music studio isn't set up (STUDIO_URL); start it with docker compose" });
+  if (req.method !== "GET" && HARNESS_TOKEN && req.headers.authorization !== `Bearer ${HARNESS_TOKEN}`) return res.status(401).json({ error: "Missing or invalid bearer token" });
+  const isFile = sub.startsWith("/files/");
+  // A file stream (an audio player) lives as long as the browser keeps it open: it's cancelled when
+  // the browser lets go (seeking, pausing, leaving the page), never on a timer mid-stream
+  const gone = new AbortController();
+  res.on("close", () => gone.abort());
+  try {
+    const r = await fetch(`${STUDIO_URL}${sub}`, {
+      method: req.method,
+      headers: { "Content-Type": "application/json", ...(req.headers.range ? { Range: String(req.headers.range) } : {}) },
+      body: req.method === "GET" ? undefined : JSON.stringify(req.body ?? {}),
+      // An upload is converted before the answer comes back
+      signal: isFile ? gone.signal : AbortSignal.any([gone.signal, AbortSignal.timeout(req.method === "POST" && (sub === "/songs" || sub === "/media") ? 10 * 60_000 : 30_000)]),
+    });
+    if (isFile) {
+      res.status(r.status);
+      for (const h of ["content-type", "content-length", "content-range", "accept-ranges"]) {
+        const v = r.headers.get(h);
+        if (v) res.setHeader(h, v);
+      }
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      if (/(^|&)download=1(&|$)/.test(query)) res.setHeader("Content-Disposition", `attachment; filename="${sub.split("/").pop()!.replace(/[^A-Za-z0-9._-]/g, "_")}"`);
+      if (!r.body) return res.end();
+      const { Readable, pipeline } = await import("node:stream");
+      // pipeline() handles a cancelled or broken stream; a bare pipe() would leave the error
+      // unhandled and take the whole harness down
+      pipeline(Readable.fromWeb(r.body as import("node:stream/web").ReadableStream), res, () => {});
+      return;
+    }
+    const data = await r.json().catch(() => ({ error: `The studio answered ${r.status}` }));
+    if (req.method === "POST" && r.ok && sub === "/jobs") hive.log("studio", "job", String((data as { title?: string }).title ?? "studio job"));
+    if (req.method === "POST" && r.ok && sub === "/songs") hive.log("studio", "song", `added “${String((data as { title?: string }).title ?? "a song")}”`);
+    res.status(r.status).json(data);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    res.status(502).json({ error: /fetch failed|ECONNREFUSED|ENOTFOUND/i.test(msg) ? "The music studio isn't answering (docker compose up -d studio)" : msg });
   }
 });
 
