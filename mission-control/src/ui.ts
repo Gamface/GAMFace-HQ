@@ -2842,13 +2842,17 @@ app.use("/api/studio", async (req: Request, res: Response) => {
   if (!STUDIO_URL) return res.status(503).json({ error: "The music studio isn't set up (STUDIO_URL); start it with docker compose" });
   if (req.method !== "GET" && HARNESS_TOKEN && req.headers.authorization !== `Bearer ${HARNESS_TOKEN}`) return res.status(401).json({ error: "Missing or invalid bearer token" });
   const isFile = sub.startsWith("/files/");
+  // A file stream (an audio player) lives as long as the browser keeps it open: it's cancelled when
+  // the browser lets go (seeking, pausing, leaving the page), never on a timer mid-stream
+  const gone = new AbortController();
+  res.on("close", () => gone.abort());
   try {
     const r = await fetch(`${STUDIO_URL}${sub}`, {
       method: req.method,
       headers: { "Content-Type": "application/json", ...(req.headers.range ? { Range: String(req.headers.range) } : {}) },
       body: req.method === "GET" ? undefined : JSON.stringify(req.body ?? {}),
       // An upload is converted before the answer comes back
-      signal: AbortSignal.timeout(req.method === "POST" && (sub === "/songs" || sub === "/media") ? 10 * 60_000 : isFile ? 5 * 60_000 : 30_000),
+      signal: isFile ? gone.signal : AbortSignal.any([gone.signal, AbortSignal.timeout(req.method === "POST" && (sub === "/songs" || sub === "/media") ? 10 * 60_000 : 30_000)]),
     });
     if (isFile) {
       res.status(r.status);
@@ -2859,8 +2863,11 @@ app.use("/api/studio", async (req: Request, res: Response) => {
       res.setHeader("X-Content-Type-Options", "nosniff");
       if (/(^|&)download=1(&|$)/.test(query)) res.setHeader("Content-Disposition", `attachment; filename="${sub.split("/").pop()!.replace(/[^A-Za-z0-9._-]/g, "_")}"`);
       if (!r.body) return res.end();
-      const { Readable } = await import("node:stream");
-      return Readable.fromWeb(r.body as import("node:stream/web").ReadableStream).pipe(res);
+      const { Readable, pipeline } = await import("node:stream");
+      // pipeline() handles a cancelled or broken stream; a bare pipe() would leave the error
+      // unhandled and take the whole harness down
+      pipeline(Readable.fromWeb(r.body as import("node:stream/web").ReadableStream), res, () => {});
+      return;
     }
     const data = await r.json().catch(() => ({ error: `The studio answered ${r.status}` }));
     if (req.method === "POST" && r.ok && sub === "/jobs") hive.log("studio", "job", String((data as { title?: string }).title ?? "studio job"));

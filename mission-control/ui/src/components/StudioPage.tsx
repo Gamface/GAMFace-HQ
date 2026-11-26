@@ -120,7 +120,7 @@ function StemsMixer({ song }: { song: Song }) {
     return () => Object.values(els).forEach((a) => a.pause());
   }, []);
   useEffect(() => {
-    for (const [s, a] of Object.entries(players.current)) a.volume = solo ? (s === solo ? 1 : 0) : levels[s] ?? 1;
+    for (const [s, a] of Object.entries(players.current)) a.volume = Math.min(1, Math.max(0, solo ? (s === solo ? 1 : 0) : levels[s] ?? 1));
   }, [levels, solo]);
   const all = () => Object.values(players.current);
   const toggle = async () => {
@@ -168,7 +168,7 @@ function StemsMixer({ song }: { song: Song }) {
           <button onClick={() => setSolo((x) => (x === s ? null : s))} className={`${btn} border ${solo === s ? "border-amber-600 text-amber-300" : "border-slate-700 text-slate-400"}`}>
             S
           </button>
-          <input type="range" min={0} max={1.5} step={0.05} value={levels[s] ?? 1} onChange={(e) => setLevels((l) => ({ ...l, [s]: Number(e.target.value) }))} className="flex-1" aria-label={`${s} level`} />
+          <input type="range" min={0} max={1} step={0.05} value={levels[s] ?? 1} onChange={(e) => setLevels((l) => ({ ...l, [s]: Number(e.target.value) }))} className="flex-1" aria-label={`${s} level`} />
           <a href={fileUrl(`library/${song.id}/stems/${s}.wav`, true)} className="text-[11px] text-cyan-400 hover:text-cyan-300">
             WAV
           </a>
