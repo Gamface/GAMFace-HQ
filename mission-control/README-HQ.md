@@ -196,11 +196,12 @@ for finished work), and each job's files play or download from the page.
 
 1. **Build and start it:** `docker compose up -d --build studio` (the first build downloads
    about 2 GB: CPU PyTorch, ffmpeg, MuseScore and the Demucs weights).
-2. **ACE-Step 1.5 in ComfyUI:** update Comfy Desktop, then either open *Template Library →
-   Audio → ACE-Step 1.5* once and let it download the model, or put
-   `ace_step_1.5_turbo_aio.safetensors` (Hugging Face: `Comfy-Org/ace_step_1.5_ComfyUI_files`)
-   in ComfyUI's `models/checkpoints`. The Studio page shows **ACE-Step songs** in green once
-   ComfyUI has it.
+2. **ACE-Step 1.5 in ComfyUI:** open ComfyUI in your browser (http://127.0.0.1:8188, the
+   background copy Mission Control uses; don't press Start in the Desktop app while it runs),
+   pick *Templates → Audio → ACE-Step 1.5* and download its models. Either version works: the
+   all-in-one `ace_step_1.5_turbo_aio.safetensors`, or the split files (`acestep_v1.5_turbo`,
+   `qwen_0.6b_ace15`, `qwen_1.7b_ace15`, `ace_1.5_vae`, about 9 GB). The Studio page shows
+   **ACE-Step songs** in green once ComfyUI has them.
 3. **Stems on the graphics card:** copy `tools/comfyui/custom_nodes/mission_control_stems` into
    ComfyUI's `custom_nodes` folder
    (`%LOCALAPPDATA%\Comfy-Desktop\ComfyUI-Installs\GAMFace\ComfyUI\custom_nodes`) and restart

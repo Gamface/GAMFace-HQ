@@ -83,11 +83,34 @@ class Comfy:
         except (KeyError, IndexError, TypeError):
             return []
 
+    def options(self, node: str, field: str) -> list[str]:
+        """The files a loader node offers for one of its inputs."""
+        info = self.node_info(node) or {}
+        try:
+            return list(info["input"]["required"][field][0])
+        except (KeyError, IndexError, TypeError):
+            return []
+
+    def ace_models(self) -> dict | None:
+        """ACE-Step 1.5 as installed in ComfyUI: the all-in-one checkpoint, or the split files
+        (diffusion model, two Qwen text encoders, VAE) the split template downloads. Turbo first."""
+        turbo_first = lambda xs: sorted(xs, key=lambda c: (0 if "turbo" in c.lower() else 1, c))  # noqa: E731
+        aio = turbo_first([c for c in self.checkpoints() if "ace_step" in c.lower() and "1.5" in c])
+        if aio:
+            return {"mode": "aio", "ckpt": aio[0], "label": aio[0]}
+        unet = turbo_first([u for u in self.options("UNETLoader", "unet_name") if "acestep" in u.lower().replace("_", "") and ("1.5" in u or "15" in u)])
+        encoders = [t for t in self.options("DualCLIPLoader", "clip_name1") if "ace15" in t.lower()]
+        small = next((t for t in encoders if "0.6b" in t.lower()), None)
+        large = next((t for t in encoders if "1.7b" in t.lower() or "4b" in t.lower()), None)
+        vae = next((v for v in self.options("VAELoader", "vae_name") if "ace" in v.lower() and "1.5" in v), None)
+        if unet and small and large and vae:
+            return {"mode": "split", "unet": unet[0], "clip1": small, "clip2": large, "vae": vae, "label": unet[0]}
+        return None
+
     def ace_checkpoint(self) -> str | None:
-        """The ACE-Step 1.5 checkpoint installed in ComfyUI, if any (turbo first)."""
-        found = [c for c in self.checkpoints() if "ace_step" in c.lower() and "1.5" in c]
-        found.sort(key=lambda c: (0 if "turbo" in c.lower() else 1, c))
-        return found[0] if found else None
+        """A name for the ACE-Step 1.5 model ComfyUI has, if any."""
+        m = self.ace_models()
+        return m["label"] if m else None
 
     def upload(self, path: Path, subfolder: str = "mission-control") -> str:
         """Puts a file in ComfyUI's input folder; returns the name LoadAudio takes."""
@@ -144,8 +167,21 @@ def audio_files(outputs: dict) -> dict[str, list[dict]]:
     return {nid: o.get("audio", []) for nid, o in outputs.items() if o.get("audio")}
 
 
-def song_workflow(ckpt: str, tags: str, lyrics: str, seconds: float, bpm: int, key: str, timesig: str, language: str, seed: int, prefix: str, steps: int = 8) -> dict:
-    """ComfyUI's ACE-Step 1.5 template (audio_ace_step_1_5_checkpoint) in API form."""
+def song_workflow(models: str | dict, tags: str, lyrics: str, seconds: float, bpm: int, key: str, timesig: str, language: str, seed: int, prefix: str, steps: int = 8) -> dict:
+    """ComfyUI's ACE-Step 1.5 templates in API form: audio_ace_step_1_5_checkpoint (one file) or
+    audio_ace_step_1_5_split (model, text encoders and VAE). `models` is ace_models() or a checkpoint name."""
+    if isinstance(models, str):
+        models = {"mode": "aio", "ckpt": models}
+    if models["mode"] == "split":
+        loaders = {
+            "1": {"class_type": "UNETLoader", "inputs": {"unet_name": models["unet"], "weight_dtype": "default"}},
+            "1b": {"class_type": "DualCLIPLoader", "inputs": {"clip_name1": models["clip1"], "clip_name2": models["clip2"], "type": "ace", "device": "default"}},
+            "1c": {"class_type": "VAELoader", "inputs": {"vae_name": models["vae"]}},
+        }
+        model, clip, vae = ["1", 0], ["1b", 0], ["1c", 0]
+    else:
+        loaders = {"1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": models["ckpt"]}}}
+        model, clip, vae = ["1", 0], ["1", 1], ["1", 2]
     if key not in KEYS:
         key = "C major"
     if language not in LANGUAGES:
@@ -153,12 +189,12 @@ def song_workflow(ckpt: str, tags: str, lyrics: str, seconds: float, bpm: int, k
     if timesig not in ("2", "3", "4", "6"):
         timesig = "4"
     return {
-        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
-        "2": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["1", 0], "shift": 3}},
+        **loaders,
+        "2": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": model, "shift": 3}},
         "3": {
             "class_type": "TextEncodeAceStepAudio1.5",
             "inputs": {
-                "clip": ["1", 1], "tags": tags, "lyrics": lyrics or "[Instrumental]", "seed": seed, "bpm": bpm, "duration": seconds,
+                "clip": clip, "tags": tags, "lyrics": lyrics or "[Instrumental]", "seed": seed, "bpm": bpm, "duration": seconds,
                 "timesignature": timesig, "language": language, "keyscale": key, "generate_audio_codes": True,
                 "cfg_scale": 2.0, "temperature": 0.85, "top_p": 0.9, "top_k": 0, "min_p": 0.0,
             },
@@ -169,7 +205,7 @@ def song_workflow(ckpt: str, tags: str, lyrics: str, seconds: float, bpm: int, k
             "class_type": "KSampler",
             "inputs": {"model": ["2", 0], "positive": ["3", 0], "negative": ["4", 0], "latent_image": ["5", 0], "seed": seed, "steps": steps, "cfg": 1, "sampler_name": "euler", "scheduler": "simple", "denoise": 1},
         },
-        "7": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["6", 0], "vae": ["1", 2]}},
+        "7": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["6", 0], "vae": vae}},
         "8": {"class_type": "SaveAudio", "inputs": {"audio": ["7", 0], "filename_prefix": prefix}},
     }
 

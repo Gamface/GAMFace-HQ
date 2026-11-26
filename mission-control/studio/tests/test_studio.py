@@ -137,9 +137,10 @@ class SheetTests(unittest.TestCase):
 class FakeComfy:
     """Enough of ComfyUI's API: object_info, upload, prompt, history, view."""
 
-    def __init__(self, with_stems=True, ace="ace_step_1.5_turbo_aio.safetensors"):
+    def __init__(self, with_stems=True, ace="ace_step_1.5_turbo_aio.safetensors", split=False):
         self.with_stems = with_stems
         self.ace = ace
+        self.split = split
         self.prompts: list[dict] = []
         self.uploads: list[str] = []
         self.files: dict[str, bytes] = {}
@@ -166,6 +167,14 @@ class FakeComfy:
                         return self.reply(200, {STEM_NODE: {"input": {}}} if outer.with_stems else {})
                     if node == "CheckpointLoaderSimple":
                         return self.reply(200, {node: {"input": {"required": {"ckpt_name": [[x for x in ["sdxl.safetensors", outer.ace] if x]]}}}})
+                    split = {
+                        "UNETLoader": ("unet_name", ["z_image_turbo_bf16.safetensors", "acestep_v1.5_turbo.safetensors"]),
+                        "DualCLIPLoader": ("clip_name1", ["qwen_3_4b.safetensors", "qwen_0.6b_ace15.safetensors", "qwen_1.7b_ace15.safetensors"]),
+                        "VAELoader": ("vae_name", ["ae.safetensors", "ace_1.5_vae.safetensors"]),
+                    }
+                    if node in split and outer.split:
+                        field, files = split[node]
+                        return self.reply(200, {node: {"input": {"required": {field: [files]}}}})
                     return self.reply(200, {})
                 if self.path.startswith("/history/"):
                     pid = self.path.split("/")[-1]
@@ -340,6 +349,18 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(any(f.endswith("night-drive.mp3") for f in j["result"]["files"]))
         queued = self.jobs.next_queued()
         self.assertEqual((queued["type"], queued["params"]["song"]), ("split", new["id"]), "a new song is split next")
+
+    def test_split_ace_step_files_from_the_split_template(self):
+        fake = FakeComfy(ace=None, split=True)
+        comfy = Comfy(fake.url)
+        self.assertEqual(comfy.ace_models(), {"mode": "split", "unet": "acestep_v1.5_turbo.safetensors", "clip1": "qwen_0.6b_ace15.safetensors", "clip2": "qwen_1.7b_ace15.safetensors", "vae": "ace_1.5_vae.safetensors", "label": "acestep_v1.5_turbo.safetensors"})
+        w = Worker(self.lib, self.jobs, comfy, None, self.tmp)
+        j = self.run_job(w, "song", prompt="synthwave", seconds=12, split=False)
+        self.assertEqual(j["status"], "done", j.get("error"))
+        wf = fake.prompts[-1]
+        self.assertEqual((wf["1"]["class_type"], wf["1b"]["class_type"], wf["1c"]["class_type"]), ("UNETLoader", "DualCLIPLoader", "VAELoader"))
+        self.assertEqual(wf["1b"]["inputs"]["type"], "ace")
+        self.assertEqual((wf["3"]["inputs"]["clip"], wf["7"]["inputs"]["vae"], wf["2"]["inputs"]["model"]), (["1b", 0], ["1c", 0], ["1", 0]))
 
     def test_missing_ace_step_says_how_to_get_it(self):
         fake = FakeComfy(ace=None)

@@ -365,7 +365,7 @@ function NewSong({ health, onJob }: { health: Health | null; onJob: () => void }
         <p className="text-xs text-amber-300">ComfyUI isn't running on the PC. Start it with Start-ScheduledTask "Mission Control ComfyUI" in PowerShell.</p>
       ) : !health.aceStep ? (
         <p className="text-xs text-amber-300">
-          ACE-Step 1.5 isn't in ComfyUI yet: download ace_step_1.5_turbo_aio.safetensors (Comfy-Org/ace_step_1.5_ComfyUI_files on Hugging Face) into ComfyUI's models/checkpoints folder, or open the ACE-Step 1.5 template in ComfyUI once.
+          ACE-Step 1.5 isn't in ComfyUI yet: open http://127.0.0.1:8188, pick Templates → Audio → ACE-Step 1.5 and download its models (the all-in-one file or the split files both work).
         </p>
       ) : (
         <p className="text-[11px] text-slate-500">Model: {health.aceStep}, on the graphics card.</p>

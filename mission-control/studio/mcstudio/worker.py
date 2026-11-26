@@ -129,17 +129,17 @@ class Worker:
     def do_song(self, job: dict, prompt: str, title: str = "", lyrics: str = "", seconds: float = 60, bpm: int = 100, key: str = "C major", timesig: str = "4", language: str = "en", seed: int | None = None, split: bool = True) -> dict:
         if not self.comfy:
             raise ValueError("Songs are made by ACE-Step in ComfyUI: set COMFY_URL for the studio service")
-        ckpt = self.comfy.ace_checkpoint()
-        if not ckpt:
+        models = self.comfy.ace_models()
+        if not models:
             if not self.comfy.running():
                 raise ComfyError("ComfyUI isn't running on the PC")
-            raise ValueError(f"ACE-Step 1.5 isn't in ComfyUI yet. Download ace_step_1.5_turbo_aio.safetensors into ComfyUI's models/checkpoints folder ({'https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files'}) or load the ACE-Step 1.5 template in ComfyUI once, then try again.")
+            raise ValueError("ACE-Step 1.5 isn't in ComfyUI yet: open ComfyUI (http://127.0.0.1:8188), pick Templates > Audio > ACE-Step 1.5 and let it download the models (either the all-in-one checkpoint or the split files), then try again.")
         seed = int(seed) if seed is not None else random.randrange(1, 2**31)
         seconds = max(10.0, min(600.0, float(seconds)))
         title = title.strip() or prompt.strip()[:60] or "New song"
         self.progress(job, "writing the song on the graphics card (ACE-Step 1.5)")
         outputs = self.comfy.run(
-            song_workflow(ckpt, prompt, lyrics, seconds, int(bpm), key, str(timesig), language, seed, f"mission-control/songs/{slug(title)}"),
+            song_workflow(models, prompt, lyrics, seconds, int(bpm), key, str(timesig), language, seed, f"mission-control/songs/{slug(title)}"),
             timeout=3600,
             cancelled=self.cancelled(job),
             progress=lambda t: self.progress(job, f"writing the song: {t}"),
@@ -155,7 +155,7 @@ class Worker:
         self.library.update(meta["id"], duration=dur)
         out = self.out_dir("songs", title, job)
         mp3 = audio.to_mp3(self.library.original(meta["id"]), out / f"{slug(title)}.mp3", loudness=-14)
-        (out / f"{slug(title)}.txt").write_text(f"{title}\n\nStyle: {prompt}\nBPM: {bpm}  Key: {key}  Time: {timesig}/4  Seed: {seed}  Model: {ckpt}\n\n{lyrics or '[Instrumental]'}\n")
+        (out / f"{slug(title)}.txt").write_text(f"{title}\n\nStyle: {prompt}\nBPM: {bpm}  Key: {key}  Time: {timesig}/4  Seed: {seed}  Model: {models['label']}\n\n{lyrics or '[Instrumental]'}\n")
         result = {"message": f"Made “{title}” ({dur:.0f} s)", "song": meta["id"], "files": self.rel(mp3, out / f"{slug(title)}.txt")}
         if split:
             self.jobs.add("split", {"song": meta["id"]}, f"Split {title}")
