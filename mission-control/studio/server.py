@@ -28,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from mcstudio import sheet
 from mcstudio.comfy import STEM_NODE, Comfy
 from mcstudio.store import DATA, Jobs, Library, outputs
-from mcstudio import videojobs
+from mcstudio import stock, videojobs
 from mcstudio.worker import Worker, check_params, job_title, save_upload
 
 MAX_UPLOAD = 150 * 1024 * 1024
@@ -74,6 +74,8 @@ def health() -> dict:
         "musescore": bool(sheet.musescore()),
         "rubberband": bool(shutil.which("rubberband")),
         "voice": bool(VOICE_URL),
+        # Free stock footage for themed music videos
+        "stock": stock.keys(),
     }
     health_cache.update(at=time.time(), value=value)
     return value

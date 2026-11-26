@@ -8,15 +8,17 @@ import re
 import time
 from pathlib import Path
 
+from . import stock
 from .store import DATA, slug
 
 MEDIA_EXT = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".jpg", ".jpeg", ".png", ".webp", ".wav", ".mp3", ".m4a", ".flac", ".ogg", ".txt"}
 FOLDER = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
 MAX_MEDIA = 200 * 1024 * 1024
 
-VIDEO_KINDS = ("music_video", "beat_edit", "shorts", "narrated", "captions", "performance", "explainer")
+VIDEO_KINDS = ("themed_video", "music_video", "beat_edit", "shorts", "narrated", "captions", "performance", "explainer")
 
 ALLOWED = {
+    "themed_video": {"song", "theme", "sources", "media", "aspect", "pace", "count", "title", "start", "max_len", "lyrics", "video_share"},
     "music_video": {"song", "style", "aspect", "title", "lyrics", "start", "end", "background"},
     "beat_edit": {"media", "song", "aspect", "pace", "title", "start", "max_len", "lyrics"},
     "shorts": {"source", "song", "platforms", "length", "start", "caption", "title"},
@@ -26,7 +28,7 @@ ALLOWED = {
     "explainer": {"title", "script", "aspect", "voice", "voice_speed", "music", "style", "captions", "transition", "motion", "intro", "sfx", "seed"},
 }
 
-LABELS = {"music_video": "Music video", "beat_edit": "Beat-cut edit", "shorts": "Shorts", "narrated": "Narrated video", "captions": "Captions", "performance": "Performance video", "explainer": "Explainer"}
+LABELS = {"themed_video": "Themed music video", "music_video": "Music video", "beat_edit": "Beat-cut edit", "shorts": "Shorts", "narrated": "Narrated video", "captions": "Captions", "performance": "Performance video", "explainer": "Explainer"}
 
 
 def media_root(root: Path | None = None) -> Path:
@@ -126,6 +128,15 @@ def check(kind: str, p: dict, library) -> str | None:
             if len(str(p.get("script", "")).strip()) < 20:
                 return "Write the script: one paragraph per scene, '# Chapter' lines for chapters"
             return song_ok("music", False)
+        if kind == "themed_video":
+            sources = p.get("sources") or ["stock"]
+            if not isinstance(sources, list) or not set(sources) <= {"stock", "ai", "media"}:
+                return "Sources are stock, ai and media"
+            if "media" in sources:
+                mp(str(p.get("media", "")), folder=True)
+            if sources == ["stock"] and not any(stock.keys().values()):
+                return "Stock footage needs a free Pexels or Pixabay API key (PEXELS_API_KEY or PIXABAY_API_KEY in .env), or pick AI photos or your media"
+            return song_ok("song", True)
     except ValueError as e:
         return str(e)
     return f"Unknown video job {kind}"
@@ -188,9 +199,13 @@ def run(kind: str, p: dict, data: Path, progress) -> dict:
                          str(p["music"]) if p.get("music") else None, p.get("style") or None, _int(p.get("seed")), bool(p.get("intro", True)),
                          p.get("captions") or None, p.get("transition") or None, p.get("motion") or None, bool(p.get("sfx", True)))
         report = explainer.build(title, lambda step, frac=None: progress(f"explainer: {step}" + (f" ({int(frac * 100)}%)" if frac is not None else "")))
+    elif kind == "themed_video":
+        report, extra = themed(p, data, progress)
     else:
         raise ValueError(f"Unknown video job {kind}")
     files = _finished(base, before, data)
+    if kind == "themed_video":
+        files += [f for f in extra if f not in files]
     message = str(report).replace(str(data) + "/", "")
     first = message.strip().splitlines()[0] if message.strip() else f"{LABELS[kind]} done"
     return {"message": f"{first} ({time.time() - started:.0f} s)", "report": message[:4000], "files": files}
@@ -202,3 +217,69 @@ def _num(v):
 
 def _int(v):
     return None if v in (None, "") else int(v)
+
+
+def themed(p: dict, data: Path, progress) -> tuple[str, list[str]]:
+    """A music video from real footage that fits the song: stock photos and clips (Pexels,
+    Pixabay), photo-real AI pictures (ComfyUI) and/or your media, cut to the beat."""
+    import random
+    import shutil
+
+    from .js import context
+    from .js import images
+    from .js.video import workflows as vw
+
+    meta = context.library.get(str(p["song"])) or {}
+    title = str(p.get("title") or meta.get("title") or "Music video")[:80]
+    theme = str(p.get("theme") or "").strip() or str(meta.get("prompt") or "").strip() or title
+    sources = p.get("sources") or ["stock"]
+    aspect = p.get("aspect") or "16:9"
+    count = max(4, min(60, int(p.get("count") or 16)))
+    folder = media_root(data) / f"themed-{slug(title)}"
+    if folder.exists():
+        shutil.rmtree(folder)
+    folder.mkdir(parents=True)
+    notes: list[str] = []
+    got: list[tuple[stock.Item, Path]] = []
+    n = 0
+    if "media" in sources and p.get("media"):
+        for f in sorted(media_path(str(p["media"]), data, True).iterdir()):
+            if f.suffix.lower() in MEDIA_EXT - {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".txt"}:
+                n += 1
+                shutil.copyfile(f, folder / f"{n:02d}-mine-{f.name}")
+    if "stock" in sources:
+        progress(f"searching stock footage for “{theme[:60]}”")
+        want = count - n if "ai" not in sources else max(0, round((count - n) * 0.7))
+        items = stock.find(theme, aspect, want, float(p.get("video_share") or 0.6), notes) if want else []
+        for i, it in enumerate(items):
+            progress(f"downloading footage {i + 1} of {len(items)} ({it.credit})")
+            try:
+                n += 1
+                got.append((it, stock.download(it, folder, n)))
+            except Exception as e:  # noqa: BLE001
+                notes.append(f"Skipped {it.page or it.url}: {e}")
+        if not items and not notes:
+            notes.append("No stock footage found for that theme: try simpler words (one idea per comma)")
+    ai_prompts: list[str] = []
+    if "ai" in sources:
+        missing = max(0, count - n)
+        size = {"16:9": "768x512", "9:16": "512x768"}.get(aspect, "512x512")
+        qs = stock.queries(theme)
+        for i in range(missing):
+            q = qs[i % len(qs)]
+            prompt = f"{q}, realistic photograph, natural light, 35mm lens, candid, high detail"
+            progress(f"AI photo {i + 1} of {missing} on the graphics card")
+            n += 1
+            (folder / f"{n:02d}-ai-{slug(q)[:30]}.png").write_bytes(images.generate_png(prompt, size, None, random.randrange(1, 2**31)))
+            ai_prompts.append(prompt)
+    if n == 0:
+        raise ValueError("No footage: " + ("; ".join(notes) if notes else "add stock keys, pick AI photos or a media folder"))
+    progress(f"cutting {n} shots to the beat")
+    report = vw.auto_edit(str(folder), str(p["song"]), aspect, p.get("pace") or "medium", title, None, _num(p.get("start")), _num(p.get("max_len")), bool(p.get("lyrics", True)))
+    out = data / "outputs" / "themed-videos" / slug(title)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "credits.txt").write_text(stock.credits(got, ai_prompts))
+    summary = f"Themed music video “{title}” from {len(got)} stock shots, {len(ai_prompts)} AI photos and {n - len(got) - len(ai_prompts)} of yours (theme: {theme[:80]})"
+    if notes:
+        summary += "\nNotes: " + " · ".join(notes[:5])
+    return f"{summary}\n{report}", [str((out / 'credits.txt').relative_to(data))]

@@ -155,6 +155,9 @@ services:
     environment:
       COMFY_URL: ${COMFY_URL:-http://host.docker.internal:8188}
       VOICE_URL: http://voice:3030
+      # Free stock photos and clips for themed music videos (pexels.com/api, pixabay.com/api/docs)
+      PEXELS_API_KEY: ${PEXELS_API_KEY:-}
+      PIXABAY_API_KEY: ${PIXABAY_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
