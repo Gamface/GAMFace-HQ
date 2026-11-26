@@ -235,7 +235,8 @@ Songs come from the music library; upload clips, photos and recordings into **me
 
 | Workflow | What you get |
 |---|---|
-| **Music video** | A moving waveform lane per part, spectrum bars or one big waveform; title card, lyrics, thumbnail; 16:9, 9:16 or 1:1; a section by start and end |
+| **Themed music video** | Real photos and video clips that fit the song's theme ("open road, sunset over the sea", or the song's own style when left empty), cut to the beat with lyrics and a title. Footage comes from **free stock** (Pexels and Pixabay: get free keys at pexels.com/api and pixabay.com/api/docs and put them in `PEXELS_API_KEY` / `PIXABAY_API_KEY` in `.env`), **photo-real AI pictures** from ComfyUI on the graphics card, and/or **your media folder**, in any mix. Every stock shot's photographer and page goes in `credits.txt`; the footage is kept as a media folder (`themed-<title>`) so you can reuse or trim it |
+| **Visualizer** (music video) | A moving waveform lane per part, spectrum bars or one big waveform; title card, lyrics, thumbnail; 16:9, 9:16 or 1:1; a section by start and end |
 | **Shorts** | 9:16, 1:1 and 16:9 clips of a song (its loudest part) or of your video, with captions and -14 LUFS audio. Never posts anywhere |
 | **Beat-cut edit** | A media folder cut every 2, 4 or 8 beats of a song, plus an `.otio` timeline for Kdenlive |
 | **Narrated video** | Kokoro reads your script, one slide or photo per paragraph, captions from the script, music ducked under the voice |

@@ -15,6 +15,7 @@ interface Health {
   musescore: boolean;
   rubberband: boolean;
   voice: boolean;
+  stock?: { pexels: boolean; pixabay: boolean };
 }
 
 interface Song {
@@ -546,7 +547,7 @@ export default function StudioPage() {
         </div>
 
         {mode === "video" ? (
-          <VideoStudio songs={songs} onJob={load} comfy={Boolean(health?.comfy)} voice={Boolean(health?.voice)} />
+          <VideoStudio songs={songs} onJob={load} comfy={Boolean(health?.comfy)} voice={Boolean(health?.voice)} stockKeys={health?.stock} />
         ) : selected === "new" ? (
           <NewSong health={health} onJob={load} />
         ) : song ? (

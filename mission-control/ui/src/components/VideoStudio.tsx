@@ -16,10 +16,11 @@ interface MediaFolder {
   files: { name: string; path: string; bytes: number }[];
 }
 
-type Flow = "music_video" | "shorts" | "beat_edit" | "narrated" | "explainer" | "captions" | "performance";
+type Flow = "themed_video" | "music_video" | "shorts" | "beat_edit" | "narrated" | "explainer" | "captions" | "performance";
 
 const FLOWS: { key: Flow; label: string; what: string }[] = [
-  { key: "music_video", label: "Music video", what: "A moving waveform lane per part, a spectrum or one big waveform, with a title card, lyrics and a thumbnail." },
+  { key: "themed_video", label: "Themed music video", what: "Real photos and video clips that fit the song: free stock footage (Pexels, Pixabay), photo-real AI pictures from ComfyUI and/or your own media, cut to the beat with lyrics and a title. Credits go in credits.txt." },
+  { key: "music_video", label: "Visualizer", what: "A moving waveform lane per part, a spectrum or one big waveform, with a title card, lyrics and a thumbnail." },
   { key: "shorts", label: "Shorts", what: "9:16, 1:1 and 16:9 clips of a song (its loudest part) or of your video, with captions and -14 LUFS audio. Never posts." },
   { key: "beat_edit", label: "Beat-cut edit", what: "A folder of your clips and photos cut every 2, 4 or 8 beats of a song, plus an .otio timeline for Kdenlive." },
   { key: "narrated", label: "Narrated video", what: "Kokoro reads your script, one slide or photo per paragraph, captions from the script, music ducked under the voice." },
@@ -48,11 +49,12 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-export default function VideoStudio({ songs, onJob, comfy, voice }: { songs: SongLite[]; onJob: () => void; comfy: boolean; voice: boolean }) {
+export default function VideoStudio({ songs, onJob, comfy, voice, stockKeys }: { songs: SongLite[]; onJob: () => void; comfy: boolean; voice: boolean; stockKeys?: { pexels: boolean; pixabay: boolean } }) {
   const ready = songs.filter((s) => s.status === "ready");
-  const [flow, setFlow] = useState<Flow>("music_video");
+  const [flow, setFlow] = useState<Flow>("themed_video");
+  const hasStock = Boolean(stockKeys?.pexels || stockKeys?.pixabay);
   const [media, setMedia] = useState<MediaFolder[]>([]);
-  const [f, setF] = useState<Record<string, unknown>>({ aspect: "16:9", style: "stems", lyrics: true, pace: "medium", platforms: ["shorts", "square"], length: 30, caption: "auto", voice: "af_heart", burn: true, capstyle: "bottom", exstyle: "cinematic" });
+  const [f, setF] = useState<Record<string, unknown>>({ aspect: "16:9", style: "stems", lyrics: true, pace: "medium", platforms: ["shorts", "square"], length: 30, caption: "auto", voice: "af_heart", burn: true, capstyle: "bottom", exstyle: "cinematic", sources: ["stock"], count: 16, share: 60 });
   const [folder, setFolder] = useState("my-clips");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -93,6 +95,8 @@ export default function VideoStudio({ songs, onJob, comfy, voice }: { songs: Son
   const num = (k: string) => (f[k] === "" || f[k] === undefined ? undefined : Number(f[k]));
   const body = (): Record<string, unknown> => {
     switch (flow) {
+      case "themed_video":
+        return { type: flow, song: s("song"), theme: s("theme") || undefined, sources: f.sources, media: (f.sources as string[]).includes("media") ? s("mediaFolder") || undefined : undefined, aspect: s("aspect"), pace: s("pace"), count: num("count") ?? 16, title: s("title") || undefined, start: num("start"), max_len: num("maxLen"), lyrics: Boolean(f.lyrics), video_share: (num("share") ?? 60) / 100 };
       case "music_video":
         return { type: flow, song: s("song"), style: s("style"), aspect: s("aspect"), title: s("title") || undefined, lyrics: Boolean(f.lyrics), start: num("start"), end: num("end"), background: s("background") || undefined };
       case "shorts":
@@ -172,8 +176,11 @@ export default function VideoStudio({ songs, onJob, comfy, voice }: { songs: Son
       </select>
     </Field>
   );
+  const srcs = (f.sources as string[]) ?? [];
   const ok =
-    flow === "music_video" ? Boolean(f.song) : flow === "shorts" ? Boolean(f.source || f.song) : flow === "beat_edit" ? Boolean(f.song && f.mediaFolder) : flow === "narrated" ? s("script").trim().length >= 10 : flow === "explainer" ? Boolean(s("title").trim() && s("script").trim().length >= 20) : flow === "captions" ? Boolean(f.source) : Boolean(f.source && f.song);
+    flow === "themed_video"
+      ? Boolean(f.song) && srcs.length > 0 && (!srcs.includes("media") || Boolean(f.mediaFolder)) && (srcs.some((x) => x !== "stock") || hasStock)
+      : flow === "music_video" ? Boolean(f.song) : flow === "shorts" ? Boolean(f.source || f.song) : flow === "beat_edit" ? Boolean(f.song && f.mediaFolder) : flow === "narrated" ? s("script").trim().length >= 10 : flow === "explainer" ? Boolean(s("title").trim() && s("script").trim().length >= 20) : flow === "captions" ? Boolean(f.source) : Boolean(f.source && f.song);
   const needsVoice = flow === "narrated" || flow === "explainer" || flow === "captions";
 
   return (
@@ -211,6 +218,56 @@ export default function VideoStudio({ songs, onJob, comfy, voice }: { songs: Son
       {flow === "explainer" && !comfy && <p className="text-xs text-amber-300">Pictures come from ComfyUI, which isn't running: start it first.</p>}
 
       <div className="grid sm:grid-cols-2 gap-3 max-w-3xl">
+        {flow === "themed_video" && (
+          <>
+            {songPick()}
+            <Field label="Theme (comma-separated ideas; empty uses the song's style)">
+              <input value={s("theme")} onChange={(e) => set("theme", e.target.value)} className={input} placeholder="open road, sunset over the sea, friends laughing" />
+            </Field>
+            <div className="sm:col-span-2">
+              <Field label="Footage from">
+                <div className="flex flex-wrap gap-4 text-slate-300">
+                  {[
+                    ["stock", `Free stock photos and clips${hasStock ? "" : " (needs a Pexels or Pixabay key)"}`],
+                    ["ai", `Photo-real AI pictures (ComfyUI)${comfy ? "" : " (ComfyUI isn't running)"}`],
+                    ["media", "My media folder"],
+                  ].map(([k, label]) => (
+                    <label key={k} className="flex items-center gap-1.5">
+                      <input type="checkbox" checked={srcs.includes(k)} onChange={(e) => set("sources", e.target.checked ? [...srcs, k] : srcs.filter((x) => x !== k))} />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+              </Field>
+            </div>
+            {srcs.includes("media") && folderPick("Your clips and photos")}
+            {aspectPick}
+            <Field label="Pace">
+              <select value={s("pace")} onChange={(e) => set("pace", e.target.value)} className={input}>
+                <option value="fast">Fast (cut every 2 beats)</option>
+                <option value="medium">Medium (every 4)</option>
+                <option value="slow">Slow (every 8)</option>
+              </select>
+            </Field>
+            <Field label="Shots to gather">
+              <input type="number" min={4} max={60} value={s("count")} onChange={(e) => set("count", e.target.value)} className={input} />
+            </Field>
+            <Field label={`Video clips vs photos: ${s("share") || 60}% clips`}>
+              <input type="range" min={0} max={100} step={10} value={s("share") || "60"} onChange={(e) => set("share", e.target.value)} className="w-full" />
+            </Field>
+            <Field label="Title (optional)">
+              <input value={s("title")} onChange={(e) => set("title", e.target.value)} className={input} />
+            </Field>
+            <Field label="Longest (seconds, optional)">
+              <input value={s("maxLen")} onChange={(e) => set("maxLen", e.target.value)} className={input} placeholder="the whole song" inputMode="decimal" />
+            </Field>
+            {!hasStock && (
+              <p className="sm:col-span-2 text-[11px] text-amber-300">
+                For real stock footage, get a free key at pexels.com/api (and/or pixabay.com/api/docs), put it in PEXELS_API_KEY or PIXABAY_API_KEY in mission-control/.env, then docker compose up -d studio.
+              </p>
+            )}
+          </>
+        )}
         {flow === "music_video" && (
           <>
             {songPick()}
@@ -332,7 +389,7 @@ export default function VideoStudio({ songs, onJob, comfy, voice }: { songs: Son
             {songPick("The song you performed")}
           </>
         )}
-        {(flow === "music_video" || flow === "beat_edit" || flow === "performance") && (
+        {(flow === "themed_video" || flow === "music_video" || flow === "beat_edit" || flow === "performance") && (
           <label className="flex items-center gap-2 text-xs text-slate-300">
             <input type="checkbox" checked={Boolean(f.lyrics)} onChange={(e) => set("lyrics", e.target.checked)} />
             Lyrics on screen (Whisper listens to the vocals once)
