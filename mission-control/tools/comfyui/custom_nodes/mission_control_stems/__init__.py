@@ -11,10 +11,39 @@ import torch
 
 import comfy.model_management as mm
 
+import os
+
 SOURCES = ["vocals", "drums", "bass", "other"]
 SEGMENT = 10.0
 OVERLAP = 0.1
+# Safe mode (default): the FFTs (torch.stft/istft) and the LSTM layers, the parts AMD's ROCm on
+# Windows most often crashes on, run on the CPU; the convolutions still run on the graphics card.
+# MC_STEMS_SAFE=0 runs everything on the graphics card.
+SAFE = os.environ.get("MC_STEMS_SAFE", "1") != "0"
 _model = None
+
+
+def make_safe(model, device):
+    """Moves the model to `device`, keeping its FFTs and LSTMs on the CPU (see SAFE)."""
+    model.to(device)
+    if not SAFE or str(device) == "cpu":
+        return model
+    if not hasattr(model, "_mc_spec"):
+        model._mc_spec, model._mc_ispec = model._spec, model._ispec
+        model._spec = lambda x: model._mc_spec(x.cpu()).to(x.device)
+        model._ispec = lambda z, length=None: model._mc_ispec(z.cpu(), length).to(z.device)
+    for m in model.modules():
+        if isinstance(m, torch.nn.LSTM):
+            m.to("cpu")
+            if not hasattr(m, "_mc_forward"):
+                m._mc_forward = m.forward
+
+                def forward(x, *args, _m=m, **kwargs):
+                    out, state = _m._mc_forward(x.cpu(), *args, **kwargs)
+                    return out.to(x.device), state
+
+                m.forward = forward
+    return model
 
 
 def _load():
@@ -87,7 +116,7 @@ class MissionControlStemSplit:
         ref = wav.mean(1)
         mean, std = ref.mean(), ref.std() + 1e-8
         try:
-            model.to(device)
+            make_safe(model, device)
             out = _separate(model, ((wav - mean) / std).to(device), sr)
         finally:
             model.to("cpu")

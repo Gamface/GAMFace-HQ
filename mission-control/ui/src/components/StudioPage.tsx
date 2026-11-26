@@ -12,6 +12,7 @@ interface Health {
   comfyUrl: string;
   aceStep: string | null;
   gpuStems: boolean;
+  gpuStemsError?: string | null;
   musescore: boolean;
   rubberband: boolean;
   voice: boolean;
@@ -528,7 +529,7 @@ export default function StudioPage() {
             <>
               <Chip ok={health.comfy} label="ComfyUI (graphics card)" title={health.comfyUrl} />
               <Chip ok={Boolean(health.aceStep)} label="ACE-Step songs" title={health.aceStep ?? "Not installed in ComfyUI"} />
-              <Chip ok={health.gpuStems} label={health.gpuStems ? "Stems on the GPU" : "Stems on the CPU"} title="Install tools/comfyui/custom_nodes/mission_control_stems in ComfyUI for the graphics card" />
+              <Chip ok={health.gpuStems} label={health.gpuStems ? "Stems on the GPU" : health.gpuStemsError ? "Stems on the CPU (GPU failed)" : "Stems on the CPU"} title={health.gpuStemsError ? `GPU stems are off until the studio restarts: ${health.gpuStemsError}` : "Install tools/comfyui/custom_nodes/mission_control_stems in ComfyUI for the graphics card"} />
               <Chip ok={health.musescore} label="MuseScore" />
               <Chip ok={health.voice} label="Lyrics (Whisper)" />
             </>

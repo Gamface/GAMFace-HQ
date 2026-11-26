@@ -137,7 +137,8 @@ class SheetTests(unittest.TestCase):
 class FakeComfy:
     """Enough of ComfyUI's API: object_info, upload, prompt, history, view."""
 
-    def __init__(self, with_stems=True, ace="ace_step_1.5_turbo_aio.safetensors", split=False):
+    def __init__(self, with_stems=True, ace="ace_step_1.5_turbo_aio.safetensors", split=False, stems_crash=False):
+        self.stems_crash = stems_crash
         self.with_stems = with_stems
         self.ace = ace
         self.split = split
@@ -179,6 +180,8 @@ class FakeComfy:
                 if self.path.startswith("/history/"):
                     pid = self.path.split("/")[-1]
                     wf = outer.prompts[int(pid)]
+                    if outer.stems_crash and any(n["class_type"] == STEM_NODE for n in wf.values()):
+                        return self.reply(200, {pid: {"status": {"status_str": "error", "completed": False, "messages": [["execution_error", {"node_type": STEM_NODE, "exception_message": "HIP error: invalid device function"}]]}, "outputs": {}}})
                     outs = {}
                     for nid, node in wf.items():
                         if node["class_type"] == "SaveAudio":
@@ -350,6 +353,21 @@ class WorkerTests(unittest.TestCase):
         queued = self.jobs.next_queued()
         self.assertEqual((queued["type"], queued["params"]["song"]), ("split", new["id"]), "a new song is split next")
 
+    def test_gpu_crash_finishes_on_the_cpu_and_turns_gpu_stems_off(self):
+        fake = FakeComfy(stems_crash=True)
+        w = Worker(self.lib, self.jobs, Comfy(fake.url), None, self.tmp, cpu_model=small_demucs())
+        song = self.upload()
+        j = self.run_job(w, "split", song=song["id"])
+        self.assertEqual(j["status"], "done", j.get("error"))
+        self.assertEqual(self.lib.get(song["id"])["splitBy"], "cpu")
+        self.assertIn("The graphics card failed", j["result"]["message"])
+        self.assertIn("HIP error", w.gpu_stems_failed)
+        self.assertFalse(w.gpu_stems(), "no more GPU stem jobs until a restart")
+        before = len(fake.prompts)
+        song2 = self.upload()
+        self.assertEqual(self.run_job(w, "split", song=song2["id"])["status"], "done")
+        self.assertEqual(len(fake.prompts), before, "the second split never touched ComfyUI")
+
     def test_split_ace_step_files_from_the_split_template(self):
         fake = FakeComfy(ace=None, split=True)
         comfy = Comfy(fake.url)
@@ -367,7 +385,7 @@ class WorkerTests(unittest.TestCase):
         w = Worker(self.lib, self.jobs, Comfy(fake.url), None, self.tmp)
         j = self.run_job(w, "song", prompt="anything")
         self.assertEqual(j["status"], "failed")
-        self.assertIn("ace_step_1.5_turbo_aio.safetensors", j["error"])
+        self.assertIn("Templates > Audio > ACE-Step 1.5", j["error"])
 
     def test_checks_and_restart(self):
         self.assertEqual(check_params("nope", {}, self.lib)[:16], "Unknown job type")

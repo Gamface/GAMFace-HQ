@@ -3,6 +3,7 @@ CPU core, so two at once would only slow both down)."""
 
 from __future__ import annotations
 
+import os
 import random
 import shutil
 import tempfile
@@ -28,6 +29,8 @@ class Worker:
         self.voice_url = voice_url
         self.data = data or DATA
         self.cpu_model = cpu_model  # tests pass a small model; normally loaded on first CPU split
+        # Set when a GPU split crashed ComfyUI; stems then stay on the CPU until a restart
+        self.gpu_stems_failed: str | None = None if os.environ.get("STUDIO_GPU_STEMS", "on") != "off" else "turned off (STUDIO_GPU_STEMS=off)"
         # The video workflows reach the library, ComfyUI and the voice service through here
         js_context.library, js_context.comfy, js_context.voice_url = library, comfy, voice_url
         self.wake = threading.Event()
@@ -90,41 +93,56 @@ class Worker:
         return stems
 
     def gpu_stems(self) -> bool:
-        return bool(self.comfy and self.comfy.node_info(STEM_NODE))
+        """The ComfyUI stems node is installed, and hasn't crashed ComfyUI in this run."""
+        return not self.gpu_stems_failed and bool(self.comfy and self.comfy.node_info(STEM_NODE))
 
     # --- jobs ----------------------------------------------------------------------------
+
+    def split_on_gpu(self, job: dict, song: str, src: Path, out: Path) -> None:
+        self.progress(job, "splitting on the graphics card (ComfyUI)")
+        name = self.comfy.upload(src, "mission-control")
+        outputs = self.comfy.run(split_workflow(name, f"mission-control/stems/{song}"), timeout=3600, cancelled=self.cancelled(job), progress=lambda t: self.progress(job, t))
+        files = audio_files(outputs)
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, stem in enumerate(STEMS):
+                got = files.get(str(10 + i))
+                if not got:
+                    raise ComfyError(f"ComfyUI made no {stem} stem")
+                raw = self.comfy.fetch(got[0], Path(tmp) / f"{stem}.flac")
+                audio.to_wav(raw, out / f"{stem}.wav")
+
+    def split_on_cpu(self, job: dict, src: Path, out: Path, why: str) -> None:
+        self.progress(job, f"splitting on the CPU ({why})")
+        if self.cpu_model is None:
+            self.cpu_model = separate.load_model()
+        separate.split(src, out, self.cpu_model, progress=lambda f: self.progress(job, f"splitting on the CPU ({why}): {int(f * 100)}%"), cancelled=self.cancelled(job))
 
     def do_split(self, job: dict, song: str) -> dict:
         meta = self.song(song)
         src = self.library.original(song)
         out = self.library.dir(song) / "stems"
         self.library.update(song, status="splitting", error=None)
+        note = ""
         try:
+            device = "cpu"
             if self.gpu_stems():
-                self.progress(job, "splitting on the graphics card (ComfyUI)")
-                name = self.comfy.upload(src, "mission-control")
-                outputs = self.comfy.run(split_workflow(name, f"mission-control/stems/{song}"), timeout=3600, cancelled=self.cancelled(job), progress=lambda t: self.progress(job, t))
-                files = audio_files(outputs)
-                with tempfile.TemporaryDirectory() as tmp:
-                    for i, stem in enumerate(STEMS):
-                        got = files.get(str(10 + i))
-                        if not got:
-                            raise ComfyError(f"ComfyUI made no {stem} stem")
-                        raw = self.comfy.fetch(got[0], Path(tmp) / f"{stem}.flac")
-                        audio.to_wav(raw, out / f"{stem}.wav")
-                device = "gpu"
+                try:
+                    self.split_on_gpu(job, song, src, out)
+                    device = "gpu"
+                except ComfyError as e:
+                    # A crash in ComfyUI (often the AMD driver) shouldn't lose the split: finish it on
+                    # the CPU, and don't send stems to the graphics card again until the studio restarts
+                    self.gpu_stems_failed = str(e)[:300]
+                    note = f" The graphics card failed ({str(e)[:160]}), so it was split on the CPU; GPU stems are off until the studio restarts."
+                    self.split_on_cpu(job, src, out, "the graphics card failed")
             else:
-                self.progress(job, "splitting on the CPU (install the stems node in ComfyUI for the graphics card)")
-                if self.cpu_model is None:
-                    self.cpu_model = separate.load_model()
-                separate.split(src, out, self.cpu_model, progress=lambda f: self.progress(job, f"splitting on the CPU: {int(f * 100)}%"), cancelled=self.cancelled(job))
-                device = "cpu"
+                self.split_on_cpu(job, src, out, "GPU stems are off" if self.gpu_stems_failed else "install the stems node in ComfyUI for the graphics card")
         except BaseException as e:
             self.library.update(song, status="failed" if not isinstance(e, InterruptedError) else "new", error=str(e)[:400])
             raise
         stems = [s for s in STEMS if (out / f"{s}.wav").exists()]
         self.library.update(song, status="ready", stems=stems, splitBy=device, error=None)
-        return {"message": f"Split “{meta['title']}” into {', '.join(stems)} on the {'graphics card' if device == 'gpu' else 'CPU'}", "song": song, "files": self.rel(*(out / f"{s}.wav" for s in stems))}
+        return {"message": f"Split “{meta['title']}” into {', '.join(stems)} on the {'graphics card' if device == 'gpu' else 'CPU'}.{note}", "song": song, "files": self.rel(*(out / f"{s}.wav" for s in stems))}
 
     def do_song(self, job: dict, prompt: str, title: str = "", lyrics: str = "", seconds: float = 60, bpm: int = 100, key: str = "C major", timesig: str = "4", language: str = "en", seed: int | None = None, split: bool = True) -> dict:
         if not self.comfy:
