@@ -119,6 +119,8 @@ test("images: a Z-Image Turbo workflow with the prompt, size and seed", () => {
   assert.equal(wf[8].inputs.seed, 7);
   assert.equal(wf[8].inputs.steps, 8);
   assert.deepEqual([workflow({ prompt: "x", size: "nope", seed: 1 })[7].inputs.width], [1024]);
+  const cover = workflow({ prompt: "x", size: "cover", seed: 1 })[7].inputs;
+  assert.deepEqual([cover.width, cover.height], [896, 1344]);
   assert.equal(runError({ status: { status_str: "error", messages: [["execution_error", { node_type: "KSampler", exception_message: "out of memory\nmore" }]] } }), "KSampler failed: out of memory");
 });
 test("a server that won't start reports its own error line", () => {

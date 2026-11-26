@@ -52,11 +52,15 @@ import { Uploads } from "./hq/uploads";
 import { parseWav, splitWav } from "./hq/wav";
 import { closeRound, historyMessages } from "./hq/thread";
 import { FILE_ID, Files, buildReport, fileType, pdfInstructions, printPdf, renderImage, wantsPdf } from "./hq/pdf";
-import { BookStore, TRIMS, addSource, setCoverColors, bookDetail, bookEpub, bookFileName, bookHtml, bookMarkdown, bookSummary, describeStep, editBook, failed, newBook, nextStep, removeSource, rewriteChapter, runStep, settle, trimOf } from "./hq/books";
+import { BookStore, TRIMS, addSource, setCoverColors, coverDesignFor, requestCoverArt, setCoverDesign, stopCoverArt, MAX_COVER_OPTIONS, bookDetail, bookEpub, bookFileName, bookHtml, bookMarkdown, bookSummary, describeStep, editBook, failed, newBook, nextStep, removeSource, rewriteChapter, runStep, settle, trimOf } from "./hq/books";
 import type { Book, BookModel, BookStep, ImageLoader, Trim } from "./hq/books";
-import { EBOOK_COVER_PX, MIN_PAGES, MAX_PAGES, coverHtml, coverSpec, ebookCoverHtml, gutterFor } from "./hq/kdp";
+import { EBOOK_COVER_PX, MIN_PAGES, MAX_PAGES, TRIM_INCHES, coverHtml, coverSpec, ebookCoverHtml, gutterFor } from "./hq/kdp";
 import { BAND_STYLES, automatic, colorsFor, decodePng, ensureReadable, normalizeHex, paletteFromPixels, paletteLibrary, suggestPalettes } from "./hq/palettes";
 import type { BandStyle, Palette } from "./hq/palettes";
+import { COVER_STYLES, printPixels } from "./hq/coverart";
+import { LAYOUTS, LAYOUT_LABEL, fontPairById, fontPairList } from "./hq/coverfonts";
+import type { Layout } from "./hq/coverfonts";
+import type { CoverInput } from "./hq/kdp";
 import type { Paper } from "./hq/kdp";
 import { docxToText, fetchSource } from "./hq/sources";
 import { COMPETITION_CHECKS, ResearchStore, competitionOf, conceptsPrompt, etsyKeyHeader, isBlockedPage, mineEtsy, mineKeywords, newResearch, parseConcepts, parseResults, renderPage, scoreKeywords, searchUrl } from "./hq/research";
@@ -1714,6 +1718,15 @@ const bookModel: BookModel = {
   // Picture books: one illustration per page from the images server (ComfyUI on this PC)
   ...(tools
     ? {
+        coverPicture: async (prompt: string, seed: number) => {
+          let out = await tools!.call("images", "generate_image", { prompt, seed, size: "cover" }, { timeoutMs: 12 * 60_000 });
+          // An images server from before the cover size: draw it portrait (a little smaller)
+          if (out.isError && /size|enum|invalid/i.test(out.text)) out = await tools!.call("images", "generate_image", { prompt, seed, size: "portrait" }, { timeoutMs: 12 * 60_000 });
+          const pic = out.media?.find((m) => m.mimeType.startsWith("image/"));
+          if (out.isError || !pic) throw new Error(out.text.slice(0, 300) || "The picture tool made no picture");
+          const saved = files.save("book-cover-option", Buffer.from(pic.data, "base64"), pic.mimeType === "image/jpeg" ? "jpg" : pic.mimeType === "image/webp" ? "webp" : "png");
+          return { name: saved.name };
+        },
         illustrate: async (prompt: string, seed: number, size: "square" | "portrait" | "landscape") => {
           const out = await tools!.call("images", "generate_image", { prompt, seed, size }, { timeoutMs: 10 * 60_000 });
           const pic = out.media?.find((m) => m.mimeType.startsWith("image/"));
@@ -1740,6 +1753,9 @@ async function runBookJob() {
     book.error = undefined;
     book.failures = 0;
     settle(book);
+    if (step.kind === "coverArt" && book.coverArt && !book.coverArt.pending) {
+      notices.add("book", `book:${book.id}:cover`, book.coverArt.error ? `Cover art for ${name} stopped: ${book.coverArt.error}` : `Cover options for ${name} are ready: pick one on the Books page.`);
+    }
     if (book.stage === "review") notices.add("book", `book:${book.id}`, `The outline for ${name} is ready: check it on the Books page, then approve it to start writing.`);
     if (book.stage === "done") {
       const words = book.chapters.reduce((n, c) => n + (c.words ?? 0), 0);
@@ -2627,12 +2643,29 @@ async function matchPictureColors(b: Book): Promise<boolean> {
   return true;
 }
 
+/** What a cover is printed from: the book's text, picture, colours, fonts and layout (with overrides for previews). */
+function coverInput(b: Book, over: { colors?: Palette & { band: BandStyle }; fonts?: string; layout?: Layout; image?: string | null } = {}): CoverInput {
+  const colors = over.colors ?? colorsFor(b);
+  const design = coverDesignFor(b);
+  return {
+    title: b.title || "Untitled",
+    subtitle: b.subtitle,
+    author: b.author,
+    blurb: b.listing?.backCover || b.brief,
+    image: over.image === null ? undefined : (over.image ?? frontPicture(b)),
+    palette: colors,
+    band: colors.band,
+    fonts: fontPairById(over.fonts) ?? design.pair,
+    layout: over.layout ?? design.layout,
+  };
+}
+
 /** Draws the ebook cover (1600 × 2560 JPEG) in the book's colours and keeps it with the book. */
 async function makeEbookCover(b: Book): Promise<{ name: string; bytes: number; colors: Palette & { band: BandStyle } }> {
   const image = frontPicture(b);
   if (image && (await matchPictureColors(b).catch(() => false))) books.save(b);
   const colors = colorsFor(b);
-  const html = ebookCoverHtml({ title: b.title || "Untitled", subtitle: b.subtitle, author: b.author, blurb: "", image, palette: colors, band: colors.band });
+  const html = ebookCoverHtml(coverInput(b, { colors, image: image ?? null }));
   const jpg = await renderImage(html, BROWSER_CDP_URL, { width: EBOOK_COVER_PX[0], height: EBOOK_COVER_PX[1], format: "jpeg", quality: 92 });
   const saved = files.save(`${b.title || "book"}-ebook-cover`, jpg, "jpg");
   b.ebookCover = saved.name;
@@ -2645,7 +2678,8 @@ async function makeEbookCover(b: Book): Promise<{ name: string; bytes: number; c
 /** What the ebook cover shows: when this changes, the saved ebook cover is out of date. */
 const coverKey = (b: Book) => {
   const c = colorsFor(b);
-  return `${b.title}|${b.subtitle ?? ""}|${b.author}|${b.cover ?? ""}|${c.bg}|${c.fg}|${c.accent}|${c.band}`;
+  const d = coverDesignFor(b);
+  return `${b.title}|${b.subtitle ?? ""}|${b.author}|${b.cover ?? ""}|${c.bg}|${c.fg}|${c.accent}|${c.band}|${d.pair.id}|${d.layout}`;
 };
 
 /** Rough page count for a preview cover's spine, from the words written or planned. */
@@ -2654,6 +2688,15 @@ const previewPages = (b: Book) => {
   const words = b.chapters.reduce((n, c) => n + (c.words ?? 0), 0) || b.chapterCount * b.chapterWords;
   return Math.max(24, Math.min(828, Math.round(words / 300) + 8));
 };
+
+/** Fonts, layout and a cover option to try in a preview, from the query string. */
+function previewOver(q: Request["query"], colors: Palette & { band: BandStyle }): { colors: Palette & { band: BandStyle }; fonts?: string; layout?: Layout; image?: string } {
+  const layout = typeof q.layout === "string" && (LAYOUTS as readonly string[]).includes(q.layout) ? (q.layout as Layout) : undefined;
+  const fonts = typeof q.fonts === "string" && fontPairById(q.fonts) ? q.fonts : undefined;
+  // Try a cover art option on the cover before choosing it
+  const option = typeof q.option === "string" && FILE_ID.test(q.option) ? bookImageUri(q.option) : null;
+  return { colors, fonts, layout, ...(option ? { image: option } : {}) };
+}
 
 /** Colours from a query string (a live preview of colours not saved yet). */
 function queryColors(q: Request["query"], b: Book): (Palette & { band: BandStyle }) {
@@ -2692,7 +2735,17 @@ app.get("/api/books", (req, res) => {
 /** The palette library, grouped, with the general brand kit's colours when one is set up. */
 app.get("/api/books/palettes", (req, res) => {
   const project = typeof req.query.project === "string" && req.query.project && req.query.project !== "general" ? projects.idOf(req.query.project) : null;
-  res.json({ groups: paletteLibrary(), bands: BAND_STYLES, brand: brandColors(project ?? null) ?? null, pictures: Boolean(BROWSER_CDP_URL) });
+  res.json({
+    groups: paletteLibrary(),
+    bands: BAND_STYLES,
+    brand: brandColors(project ?? null) ?? null,
+    pictures: Boolean(BROWSER_CDP_URL),
+    fonts: fontPairList(),
+    layouts: LAYOUTS.map((id) => ({ id, label: LAYOUT_LABEL[id] })),
+    styles: COVER_STYLES.map(({ id, name }) => ({ id, name })),
+    art: Boolean(tools),
+    maxOptions: MAX_COVER_OPTIONS,
+  });
 });
 
 app.get("/api/books/:id", (req, res) => {
@@ -2715,7 +2768,7 @@ app.patch("/api/books/:id", requireToken, (req, res) => {
   if (!b) return;
   const body = (req.body ?? {}) as Record<string, unknown>;
   const edits = Object.keys(body).filter((k) => k !== "paused");
-  if (edits.length && isRunning(b)) return res.status(409).json({ error: `Wait for “${bookRun!.label}” to finish, or pause the book first` });
+  if (edits.length && isRunning(b) && !["coverArt", "coverBrief"].includes(bookRun!.step.kind)) return res.status(409).json({ error: `Wait for “${bookRun!.label}” to finish, or pause the book first` });
   if (typeof body.cover === "string" && body.cover && !uploads.exists(body.cover)) return res.status(400).json({ error: "Unknown picture: upload it first" });
   const coverChanged = typeof body.cover === "string" && body.cover !== b.cover;
   const err = editBook(b, body, brandColors(b.project));
@@ -2883,6 +2936,7 @@ app.get("/api/books/:id/colors", (req, res) => {
     suggestions: suggestPalettes(b, 12).map(({ tags, ...x }) => x),
     brand: brandColors(b.project) ?? null,
     picture: Boolean(frontPicture(b)),
+    design: (({ pair, layout, auto }) => ({ fonts: pair.id, layout, auto }))(coverDesignFor(b)),
     ebookCover: b.ebookCover ? { name: b.ebookCover, url: `/api/files/${b.ebookCover}`, stale: Boolean(b.ebookCoverOf && b.ebookCoverOf !== coverKey(b)) } : null,
   });
 });
@@ -2932,12 +2986,10 @@ app.get("/api/books/:id/cover-preview", (req, res) => {
   const pages = previewPages(b);
   const spec = coverSpec(trim, pages, b.kind === "picture" ? "color" : "white");
   const html =
-    req.query.kind === "ebook"
-      ? ebookCoverHtml({ title: b.title || "Untitled", subtitle: b.subtitle, author: b.author, blurb: "", image: frontPicture(b), palette: colors, band: colors.band })
-      : coverHtml(spec, { title: b.title || "Untitled", subtitle: b.subtitle, author: b.author, blurb: b.listing?.backCover || b.brief, image: frontPicture(b), palette: colors, band: colors.band });
+    req.query.kind === "ebook" ? ebookCoverHtml(coverInput(b, previewOver(req.query, colors))) : coverHtml(spec, coverInput(b, previewOver(req.query, colors)));
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'");
+  res.setHeader("Content-Security-Policy", "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'");
   res.end(html);
 });
 
@@ -2949,6 +3001,91 @@ app.post("/api/books/:id/ebook-cover", requireToken, async (req, res) => {
   try {
     const { colors, ...saved } = await makeEbookCover(b);
     res.json({ ...saved, url: `/api/files/${saved.name}`, width: EBOOK_COVER_PX[0], height: EBOOK_COVER_PX[1], colors, book: bookView(b) });
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+/** The cover's type: {fonts, layout} ("auto" goes back to the genre's choice). */
+app.put("/api/books/:id/design", requireToken, (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  const err = setCoverDesign(b, req.body?.design === null ? null : (req.body ?? {}));
+  if (err) return res.status(400).json({ error: err });
+  books.save(b);
+  res.json(bookView(b));
+});
+
+/**
+ * AI cover art: {style, note, count (1–6), useColors, prompt}. The Writer writes the art
+ * brief (unless you send your own prompt) and the picture tool draws the options, one book
+ * step each, in the background. Earlier options are kept.
+ */
+app.post("/api/books/:id/cover-art", requireToken, (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  if (!tools) return res.status(400).json({ error: "Cover art is drawn by the picture tool: set up the tools service with ComfyUI (see README-HQ, Pictures)" });
+  if (isRunning(b) && ["coverArt", "coverBrief"].includes(bookRun!.step.kind)) return res.status(409).json({ error: "Cover options are being drawn: wait for them, or stop them first" });
+  const err = requestCoverArt(b, (req.body ?? {}) as Record<string, unknown>);
+  if (err) return res.status(400).json({ error: err });
+  books.save(b);
+  hive.log("writer", "book", `cover art asked for “${b.title || "Untitled"}”: ${b.coverArt!.round} option(s), ${b.coverArt!.style}`);
+  void pump();
+  res.json(bookView(b));
+});
+
+/** Stops drawing cover options ({forget: true} also drops the ones made). */
+app.post("/api/books/:id/cover-art/stop", requireToken, (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  stopCoverArt(b, req.body?.forget === true);
+  if (isRunning(b) && ["coverArt", "coverBrief"].includes(bookRun!.step.kind)) bookRun!.controller.abort();
+  books.save(b);
+  res.json(bookView(b));
+});
+
+/** Drops one cover option. */
+app.delete("/api/books/:id/cover-art/options/:name", requireToken, (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  if (b.coverArt) b.coverArt.options = b.coverArt.options.filter((o) => o.name !== req.params.name);
+  books.save(b);
+  res.json(bookView(b));
+});
+
+/**
+ * Uses a cover option as the cover picture. With the browser sidecar it is first scaled to
+ * 300 dpi for the book's trim (the front plus bleed) and saved as a JPEG, so KDP's
+ * resolution check passes; colours picked automatically then follow the picture.
+ */
+app.post("/api/books/:id/cover-art/pick", requireToken, async (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  const name = String(req.body?.name ?? "");
+  const option = b.coverArt?.options.find((o) => o.name === name);
+  const data = option ? files.read(name) : null;
+  if (!option || !data) return res.status(400).json({ error: "Unknown cover option" });
+  try {
+    const mime = fileType(name);
+    let upload = `data:${mime};base64,${data.toString("base64")}`;
+    let note = "";
+    if (BROWSER_CDP_URL) {
+      const [w, h] = printPixels([...TRIM_INCHES[trimOf(b)]] as [number, number]);
+      const html = `<!DOCTYPE html><html><head><style>html,body{margin:0;width:${w}px;height:${h}px;overflow:hidden;background:#000}img{display:block;width:${w}px;height:${h}px;object-fit:cover}</style></head><body><img src="${upload}" alt=""></body></html>`;
+      const jpg = await renderImage(html, BROWSER_CDP_URL, { width: w, height: h, format: "jpeg", quality: 93 });
+      upload = `data:image/jpeg;base64,${jpg.toString("base64")}`;
+      note = `Scaled to ${w} × ${h} px (300 dpi for ${trimOf(b)} with bleed).`;
+    }
+    const saved = uploads.save(upload, "image");
+    if ("error" in saved) return res.status(400).json(saved);
+    b.cover = saved.id;
+    b.coverArt!.picked = name;
+    // Colours picked automatically follow the new picture
+    if (automatic(b.coverColors) && b.coverColors?.source === "picture") b.coverColors = { ...b.coverColors, source: "auto" };
+    await matchPictureColors(b).catch(() => false);
+    books.save(b);
+    hive.log("writer", "book", `cover picture chosen for “${b.title || "Untitled"}”`);
+    res.json({ ...bookView(b), note });
   } catch (e) {
     res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
   }
@@ -2994,7 +3131,7 @@ app.post("/api/books/:id/kdp", requireToken, async (req, res) => {
     const colors = colorsFor(b);
     if (b.coverColors) for (const n of ensureReadable(b.coverColors).notes) notes.push(n);
     const coverPdf = await printPdf(
-      coverHtml(spec, { title: b.title || "Untitled", subtitle: b.subtitle, author: b.author, blurb: b.listing?.backCover || b.brief, image, palette: colors, band: colors.band }),
+      coverHtml(spec, coverInput(b, { colors, image: image ?? null })),
       BROWSER_CDP_URL,
       { footer: "none" },
     );

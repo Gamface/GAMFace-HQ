@@ -83,6 +83,20 @@ export interface Book {
   /** The colours the cover prints with */
   colors?: { bg: string; fg: string; accent: string; band: string };
   ebookCover?: string;
+  coverArt?: {
+    style: string;
+    note?: string;
+    useColors?: boolean;
+    prompt?: string;
+    own?: boolean;
+    concept?: string;
+    pending: number;
+    round: number;
+    options: { name: string; seed: number; prompt: string; at: number }[];
+    picked?: string;
+    error?: string;
+  };
+  coverDesign?: { fonts?: string; layout?: string };
 }
 
 export const errText = (e: unknown) => (e instanceof Error ? e.message : String(e)).replace(/^\d+ /, "").replace(/^\{"error":"(.*)"\}$/, "$1");

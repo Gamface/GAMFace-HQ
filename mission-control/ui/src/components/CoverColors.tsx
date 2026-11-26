@@ -27,6 +27,8 @@ interface Library {
   bands: Band[];
   brand: { background: string; text: string; accent: string } | null;
   pictures: boolean;
+  fonts: { id: string; name: string; title: string; text: string }[];
+  layouts: { id: string; label: string }[];
 }
 interface ColorInfo {
   colors: Colors & { band: Band };
@@ -35,6 +37,7 @@ interface ColorInfo {
   suggestions: NamedPalette[];
   brand: { background: string; text: string; accent: string } | null;
   picture: boolean;
+  design: { fonts: string; layout: string; auto: boolean };
   ebookCover: { name: string; url: string; stale?: boolean } | null;
 }
 
@@ -286,6 +289,33 @@ export default function CoverColors({ book, onChange, busy }: { book: Book; onCh
                   {lib.bands.map((b) => (
                     <option key={b} value={b}>
                       {BAND_LABEL[b]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                Fonts
+                <select
+                  value={info.design.auto ? "auto" : info.design.fonts}
+                  disabled={disabled}
+                  onChange={(e) => void apply("fonts", { fonts: e.target.value }, "design")}
+                  className="bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-[11px] text-slate-200"
+                >
+                  <option value="auto">For the genre ({lib.fonts.find((f) => f.id === info.design.fonts)?.name ?? info.design.fonts})</option>
+                  {lib.fonts.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.name} — {f.title}
+                      {f.text !== f.title ? ` + ${f.text}` : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-2 text-[11px] text-slate-400">
+                Layout over a picture
+                <select value={info.design.layout} disabled={disabled} onChange={(e) => void apply("layout", { layout: e.target.value }, "design")} className="bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-[11px] text-slate-200 max-w-[14rem]">
+                  {lib.layouts.map((l) => (
+                    <option key={l.id} value={l.id}>
+                      {l.label}
                     </option>
                   ))}
                 </select>

@@ -447,14 +447,56 @@ Picture matching and ebook covers use the browser sidecar (`BROWSER_CDP_URL`), l
 PDFs. Books made before this keep the colours they had (picked from the title) until you
 choose others.
 
+### Cover art and type
+
+**Cover art** on a book's page draws AI pictures for the front with the picture tool
+(Z-Image Turbo in ComfyUI on your graphics card, about 1.5 minutes each):
+
+- Choose a style: best for the book, photographic, painted, illustrated, graphic poster,
+  minimal symbol, dark and atmospheric, vintage paperback, watercolour, or storybook. Say
+  what it should show if you like ("a lighthouse in a storm"), and tick **In the cover
+  colours** to ask for the book's palette.
+- The Writer reads the book (brief, plan, back cover; for picture books, the art style and
+  characters) and writes an art brief: one strong image, with calm space where the layout puts
+  the title. Or tick **Write the prompt myself**. If the Writer can't be reached, a quick brief
+  is made from the book, so the pictures still get drawn.
+- Each option is a background step, so you can keep working. They run even while the book's
+  writing is paused, and a failed picture stops only the cover art, never the book. You get a
+  notice when they're ready. Asking again with the same settings draws more from the same
+  brief; earlier options are kept.
+- Click an option to try it on the cover with your title, fonts and layout, then **Use this**.
+  The picked option is scaled to 300 dpi for the trim with bleed (1838 × 2775 px for 6 × 9) and
+  saved as a JPEG, so KDP's resolution check passes. Colours picked automatically then follow
+  it.
+- Pictures never contain lettering: every prompt forbids text, and the title, subtitle and
+  author are set in real type, so they're spelled right and inside KDP's margins. KDP asks
+  whether a cover is AI-generated: say yes for these.
+- The images server draws covers at 896 × 1344 (2:3, its new `cover` size). Rebuild the tools
+  container to get it (`docker compose up -d --build tools`). An older images server draws
+  them portrait (832 × 1216) instead.
+
+**Type.** Each cover uses a **font pair** embedded in the cover, so the browser sidecar prints
+it exactly with no network. There are ten, all SIL Open Font License so they're fine for books
+you sell: Classic serif (Playfair Display + Lora), Elegant (Cormorant Garamond), Romantic
+script (Great Vibes), Thriller (Oswald), Bold display (Bebas Neue), Epic (Cinzel), Modern sans
+(Montserrat), Playful (Fredoka), Typewriter (Special Elite) and Literary italic. Until you
+choose, the pair follows the genre or the chosen palette's group. There are five **layouts**
+for a front with a picture: a title band at the top, a big title at the bottom, a big title at
+the top over a fade, a framed title panel, or the picture above a title block. Picture books
+default to the big title at the bottom.
+
 **API.** `GET /api/books/palettes` lists the library. `GET /api/books/:id/colors` returns a
 book's colours, where they came from, and suggestions. `PUT /api/books/:id/colors` with
 `{"colors": …}` sets them. It takes a palette id (`"mystery-noir"`), `"auto"`, `"brand"`,
 `{"bg", "fg", "accent"}`, or `[background, accent, text]` (the order Jarvis's book studio
 uses), plus optional `"band"` and `"locked"`; `null` goes back to the title's colours.
 Other routes: `POST /api/books/:id/colors/picture` (match the picture; `{"preview": true}`
-to only look), `GET /api/books/:id/cover-preview?bg=&fg=&accent=&band=` (`&kind=ebook` for
-the ebook cover), and `POST /api/books/:id/ebook-cover`. `coverColors` can also be sent when
+to only look), `GET /api/books/:id/cover-preview?bg=&fg=&accent=&band=&fonts=&layout=&option=`
+(`&kind=ebook` for the ebook cover; `option` tries a cover art option), `POST /api/books/:id/ebook-cover`,
+`PUT /api/books/:id/design` (`{"fonts", "layout"}`, `"auto"` for the genre's choice),
+`POST /api/books/:id/cover-art` (`{"style", "note", "count", "useColors", "prompt"}`),
+`POST /api/books/:id/cover-art/pick` (`{"name"}`), `POST /api/books/:id/cover-art/stop`, and
+`DELETE /api/books/:id/cover-art/options/:name`. `coverColors` can also be sent when
 creating a book or with `PATCH /api/books/:id`.
 
 ### Listing kit

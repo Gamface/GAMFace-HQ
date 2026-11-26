@@ -5,6 +5,7 @@ import { useProjects } from "../project";
 import { KIND_LABEL, KdpPanel, ListingPanel, SourcePicker, SourcesPanel, addSource, btn, errText, input, num, pendingName, primary, quiet, trimLabel } from "./BookParts";
 import type { Book, Chapter, Kind, PendingSource, Stage } from "./BookParts";
 import BookResearch from "./BookResearch";
+import CoverArt from "./CoverArt";
 import CoverColors from "./CoverColors";
 import type { Concept } from "./BookResearch";
 
@@ -560,7 +561,7 @@ function BookView({ id, meta, onGone, onChanged }: { id: string; meta: ListReply
     load();
   }, [load]);
   // Poll while the Writer is working on it, more slowly otherwise
-  const active = Boolean(book?.running) || Boolean(book?.wantListing) || ((book?.stage === "planning" || book?.stage === "writing") && !book?.paused);
+  const active = Boolean(book?.running) || Boolean(book?.wantListing) || Boolean(book?.coverArt?.pending && !book.coverArt.error) || ((book?.stage === "planning" || book?.stage === "writing") && !book?.paused);
   useEffect(() => {
     const t = setInterval(load, book?.running ? 1500 : active ? 5000 : 20000);
     return () => clearInterval(t);
@@ -727,7 +728,8 @@ function BookView({ id, meta, onGone, onChanged }: { id: string; meta: ListReply
         </section>
       )}
 
-      <CoverColors book={book} onChange={update} busy={busy} />
+      <CoverArt book={book} onChange={update} />
+      <CoverColors book={book} onChange={update} busy={busy && !/cover/i.test(book.running?.label ?? "")} />
       {hasText && <KdpPanel book={book} trims={meta?.trims ?? ["6x9"]} available={meta?.pdf !== false} />}
       {book.bible && <ListingPanel book={book} onChange={update} />}
       {book.kind !== "puzzle" && <SourcesPanel book={book} onChange={update} busy={busy} />}

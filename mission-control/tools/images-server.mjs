@@ -20,6 +20,8 @@ const SIZES = {
   square: [1024, 1024],
   landscape: [1216, 832],
   portrait: [832, 1216],
+  // 2:3, the shape of a 6 × 9 in book cover (Mission Control scales the chosen one to 300 dpi)
+  cover: [896, 1344],
   wide: [1344, 768],
   small: [768, 768],
 };
@@ -125,7 +127,7 @@ server.registerTool(
       "The picture is attached to the card automatically.",
     inputSchema: {
       prompt: z.string().min(3).max(1500).describe("Detailed description of the picture"),
-      size: z.enum(["square", "landscape", "portrait", "wide", "small"]).optional().describe("Shape: square 1024×1024 (default), landscape, portrait, wide, or small (faster)"),
+      size: z.enum(["square", "landscape", "portrait", "cover", "wide", "small"]).optional().describe("Shape: square 1024×1024 (default), landscape, portrait, cover (2:3 book cover, 896×1344), wide, or small (faster)"),
       seed: z.number().int().min(0).max(2 ** 31).optional().describe("Same seed and prompt give the same picture"),
     },
     annotations: { readOnlyHint: true, openWorldHint: false },

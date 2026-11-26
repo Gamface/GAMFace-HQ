@@ -324,13 +324,17 @@ test("Covers: the book's colours print on the back, spine and front; the band fo
   assert.match(plain, /\.spine \{[^}]*background: #f2aa4c;/);
   assert.match(plain, /\.spine-text \{[^}]*color: #101820;/);
   const pic = (band?: "palette" | "dark" | "none") => coverHtml(spec, { title: "T", author: "A", blurb: "B", image: "data:image/png;base64,AAAA", palette: pal, band });
-  assert.match(pic(), /\.band \{[^}]*background: rgba\(16,24,32,0\.82\); color: #ffffff;/);
-  assert.match(pic("dark"), /\.band \{[^}]*background: rgba\(0,0,0,0\.38\); color: #fff;/);
-  assert.match(pic("none"), /\.band \{[^}]*background: transparent;[^}]*text-shadow/);
+  assert.match(pic(), /\.zone \{[^}]*color: #ffffff;/);
+  assert.match(pic(), /\.band \{[^}]*background: rgba\(16,24,32,0\.84\);/);
+  assert.match(pic("dark"), /\.band \{[^}]*background: rgba\(0,0,0,0\.38\);/);
+  assert.match(pic("dark"), /\.zone \{[^}]*color: #fff;/);
+  assert.match(pic("none"), /\.band \{[^}]*background: transparent;/);
+  assert.match(pic("none"), /\.zone \{[^}]*text-shadow/);
   // No colours given: the title's palette and the old dark band, exactly as before
   const legacy = coverHtml(spec, { title: "Tide & Time", author: "A", blurb: "B", image: "data:image/png;base64,AAAA" });
   assert.match(legacy, new RegExp(`background: ${paletteFor("Tide & Time").bg};`));
   assert.match(legacy, /rgba\(0,0,0,0\.38\)/);
+  assert.doesNotMatch(legacy, /@font-face/);
 });
 
 test("Covers: the ebook cover is the front alone, laid out at 6 × 9.6 in and zoomed to 1600 × 2560 px", () => {
