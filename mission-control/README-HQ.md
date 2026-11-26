@@ -407,8 +407,55 @@ Under **Start from my own content** (or **Your content** on a book's page), add:
   in per page). It has spine text only from 80 pages, as KDP requires.
   - The back cover has the listing's back-cover text, with the barcode area left clear.
   - The front uses your cover picture (picture books: the first illustration), or a
-    typographic design in colours chosen from the title.
+    typographic design in the book's cover colours (see below).
 - KDP's previewer has the final word: check both files there before publishing.
+
+### Cover colours
+
+Every book has three cover colours: the **background** (back cover, plain front, spine
+text), the **accent** (spine, headings, rules) and the **text**. The **Cover colours**
+panel on a book's page shows a live preview of the paperback (back, spine and front) or the
+ebook cover as you change them.
+
+- **107 named palettes** in 25 groups (romance, thriller, cozy mystery, fantasy, sci-fi,
+  horror, children's, business, cookbook, holidays, vintage, pastels and more), with
+  search and a **Suggested** row ranked for the book.
+- **Your own colours** with colour pickers or hex codes, an **Invert** button (light cover
+  ⇄ dark cover), and contrast readouts. Text needs 4.5:1 and the accent 3:1; colours that
+  fall short are made lighter or darker when the cover prints, and you get a note saying so.
+- **Brand kit**: the project's brand colours (Assets page), when a brand is set up.
+- **Title band** over a cover picture: tinted with the book's colours, the old dark band,
+  or no band (shadowed text).
+- **Ebook cover**: a 1600 × 2560 JPEG for KDP and the ebook stores. It's also the EPUB's
+  cover when you haven't uploaded a picture. The panel tells you when it's out of date.
+
+**Automation.** Colours picked for you keep following the book until you choose a palette,
+set your own, or tick **Lock**:
+
+1. A new book gets colours that suit its genre, brief, audience and kind (picture books
+   lean to children's palettes, puzzle books to bold ones). They're picked again when you
+   change the genre or brief, and when the outline gives the book its title.
+2. When the Writer makes the listing kit, it picks a palette from a shortlist for the book,
+   having read the whole plan.
+3. When you add a cover picture, and when you make KDP files or the ebook cover, the colours
+   are taken from the picture: its main colour for the back and its most vivid colour for
+   the spine, so the wraparound matches the front. You can also press **Match the cover
+   picture** yourself.
+4. When the Writer finishes a book, it makes the ebook cover.
+
+Picture matching and ebook covers use the browser sidecar (`BROWSER_CDP_URL`), like the
+PDFs. Books made before this keep the colours they had (picked from the title) until you
+choose others.
+
+**API.** `GET /api/books/palettes` lists the library. `GET /api/books/:id/colors` returns a
+book's colours, where they came from, and suggestions. `PUT /api/books/:id/colors` with
+`{"colors": …}` sets them. It takes a palette id (`"mystery-noir"`), `"auto"`, `"brand"`,
+`{"bg", "fg", "accent"}`, or `[background, accent, text]` (the order Jarvis's book studio
+uses), plus optional `"band"` and `"locked"`; `null` goes back to the title's colours.
+Other routes: `POST /api/books/:id/colors/picture` (match the picture; `{"preview": true}`
+to only look), `GET /api/books/:id/cover-preview?bg=&fg=&accent=&band=` (`&kind=ebook` for
+the ebook cover), and `POST /api/books/:id/ebook-cover`. `coverColors` can also be sent when
+creating a book or with `PATCH /api/books/:id`.
 
 ### Listing kit
 

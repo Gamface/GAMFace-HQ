@@ -152,8 +152,11 @@ export async function buildReport(
   return { html, title, pictures: [...markdown.matchAll(IMAGE_PATTERN)].filter((m) => found.has(m[2])).length, missing };
 }
 
-/** Prints HTML to PDF in a throwaway browser profile with no network access. */
-export async function printPdf(html: string, cdpBase: string, opts: { footer?: "pages" | "number" | "none" } = {}): Promise<Buffer> {
+/**
+ * Opens HTML in a throwaway browser profile with no network access and no scripts, waits
+ * for it to load, and hands the page session to `use`. The tab and profile are always closed.
+ */
+async function withPage<T>(html: string, cdpBase: string, use: (cdp: Cdp, session: string) => Promise<T>, viewport?: { width: number; height: number }): Promise<T> {
   const cdp = await Cdp.connect(await resolveCdpUrl(cdpBase));
   let targetId = "";
   let contextId = "";
@@ -171,37 +174,65 @@ export async function printPdf(html: string, cdpBase: string, opts: { footer?: "
     });
     await cdp.send("Fetch.enable", { patterns: [{ urlPattern: "*" }] }, s);
     await cdp.send("Emulation.setScriptExecutionDisabled", { value: true }, s);
+    if (viewport) await cdp.send("Emulation.setDeviceMetricsOverride", { width: viewport.width, height: viewport.height, deviceScaleFactor: 1, mobile: false }, s);
     await cdp.send("Page.enable", {}, s);
     const { frameTree } = await cdp.send("Page.getFrameTree", {}, s);
     await cdp.send("Page.setDocumentContent", { frameId: frameTree.frame.id, html }, s);
     await Promise.race([load, new Promise((r) => setTimeout(r, 5000))]);
     await new Promise((r) => setTimeout(r, 250));
-    const { data } = await cdp.send(
-      "Page.printToPDF",
-      {
-        printBackground: true,
-        preferCSSPageSize: true,
-        displayHeaderFooter: opts.footer !== "none",
-        headerTemplate: "<span></span>",
-        // Reports say "Page 3 of 12"; books just carry the number
-        footerTemplate:
-          opts.footer === "number"
-            ? '<div style="font-size:8px;width:100%;text-align:center;color:#555;font-family:Georgia,serif"><span class="pageNumber"></span></div>'
-            : '<div style="font-size:8px;width:100%;text-align:center;color:#8794a1;font-family:Arial">Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>',
-      },
-      s,
-      90000,
-    );
-    return Buffer.from(data, "base64");
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (/not implemented|PrintToPDF/i.test(msg)) throw new Error("This Chrome can't print PDFs (only headless Chrome can). Point BROWSER_CDP_URL at the browser sidecar.");
-    throw e;
+    return await use(cdp, s);
   } finally {
     if (targetId) await cdp.send("Target.closeTarget", { targetId }).catch(() => {});
     if (contextId) await cdp.send("Target.disposeBrowserContext", { browserContextId: contextId }).catch(() => {});
     cdp.close();
   }
+}
+
+/** Prints HTML to PDF in a throwaway browser profile with no network access. */
+export async function printPdf(html: string, cdpBase: string, opts: { footer?: "pages" | "number" | "none" } = {}): Promise<Buffer> {
+  try {
+    return await withPage(html, cdpBase, async (cdp, s) => {
+      const { data } = await cdp.send(
+        "Page.printToPDF",
+        {
+          printBackground: true,
+          preferCSSPageSize: true,
+          displayHeaderFooter: opts.footer !== "none",
+          headerTemplate: "<span></span>",
+          // Reports say "Page 3 of 12"; books just carry the number
+          footerTemplate:
+            opts.footer === "number"
+              ? '<div style="font-size:8px;width:100%;text-align:center;color:#555;font-family:Georgia,serif"><span class="pageNumber"></span></div>'
+              : '<div style="font-size:8px;width:100%;text-align:center;color:#8794a1;font-family:Arial">Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>',
+        },
+        s,
+        90000,
+      );
+      return Buffer.from(data, "base64");
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/not implemented|PrintToPDF/i.test(msg)) throw new Error("This Chrome can't print PDFs (only headless Chrome can). Point BROWSER_CDP_URL at the browser sidecar.");
+    throw e;
+  }
+}
+
+/** Renders HTML to a picture exactly width × height pixels (ebook covers, colour sampling). */
+export async function renderImage(html: string, cdpBase: string, opts: { width: number; height: number; format?: "png" | "jpeg"; quality?: number }): Promise<Buffer> {
+  return withPage(
+    html,
+    cdpBase,
+    async (cdp, s) => {
+      const { data } = await cdp.send(
+        "Page.captureScreenshot",
+        { format: opts.format ?? "png", ...(opts.format === "jpeg" ? { quality: opts.quality ?? 92 } : {}), clip: { x: 0, y: 0, width: opts.width, height: opts.height, scale: 1 }, captureBeyondViewport: true },
+        s,
+        60000,
+      );
+      return Buffer.from(data, "base64");
+    },
+    { width: opts.width, height: opts.height },
+  );
 }
 
 export const FILE_ID = /^[a-z0-9][a-z0-9-]{0,70}-[a-f0-9]{8}\.(pdf|mp4|png|jpg|webp)$/;

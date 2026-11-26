@@ -5,6 +5,7 @@ import { useProjects } from "../project";
 import { KIND_LABEL, KdpPanel, ListingPanel, SourcePicker, SourcesPanel, addSource, btn, errText, input, num, pendingName, primary, quiet, trimLabel } from "./BookParts";
 import type { Book, Chapter, Kind, PendingSource, Stage } from "./BookParts";
 import BookResearch from "./BookResearch";
+import CoverColors from "./CoverColors";
 import type { Concept } from "./BookResearch";
 
 // Books: novels, nonfiction ebooks, children's picture books and puzzle books, written from
@@ -25,6 +26,7 @@ interface Summary {
   written: number;
   chapterTotal: number;
   running: string | null;
+  colors?: { bg: string; fg: string; accent: string };
 }
 
 interface ListReply {
@@ -611,7 +613,15 @@ function BookView({ id, meta, onGone, onChanged }: { id: string; meta: ListReply
         {book.cover ? (
           <img src={imageUrl(book.cover)} alt="Cover" className="w-20 h-28 object-cover rounded border border-slate-700 shrink-0" />
         ) : (
-          <div className="w-20 h-28 rounded border border-dashed border-slate-700 shrink-0 flex items-center justify-center text-[10px] text-slate-600 text-center p-1">No cover</div>
+          <div
+            className="w-20 h-28 rounded border border-slate-700 shrink-0 flex flex-col items-center justify-center gap-1 text-center p-1.5 font-serif overflow-hidden"
+            style={book.colors ? { background: book.colors.bg, color: book.colors.fg } : undefined}
+            title="The cover in its colours (no picture yet)"
+          >
+            <span className="h-px w-8" style={{ background: book.colors?.accent }} />
+            <span className="text-[9px] leading-tight line-clamp-3">{book.title || "Untitled"}</span>
+            <span className="h-px w-8" style={{ background: book.colors?.accent }} />
+          </div>
         )}
         <div className="flex-1 min-w-0 space-y-1">
           <h2 className="text-xl font-semibold text-slate-100 truncate">{book.title || "Untitled"}</h2>
@@ -717,6 +727,7 @@ function BookView({ id, meta, onGone, onChanged }: { id: string; meta: ListReply
         </section>
       )}
 
+      <CoverColors book={book} onChange={update} busy={busy} />
       {hasText && <KdpPanel book={book} trims={meta?.trims ?? ["6x9"]} available={meta?.pdf !== false} />}
       {book.bible && <ListingPanel book={book} onChange={update} />}
       {book.kind !== "puzzle" && <SourcesPanel book={book} onChange={update} busy={busy} />}
@@ -822,6 +833,7 @@ export default function BooksPage() {
               className={`w-full text-left px-3 py-2.5 border-t border-slate-800/70 space-y-1.5 ${selected === b.id ? "bg-cyan-950/40" : "hover:bg-slate-900"}`}
             >
               <div className="flex items-center gap-2">
+                {b.colors && <span className="w-2.5 h-3.5 rounded-[2px] shrink-0 border border-slate-700" style={{ background: `linear-gradient(90deg, ${b.colors.accent} 30%, ${b.colors.bg} 30%)` }} aria-hidden />}
                 <span className="flex-1 text-sm text-slate-200 truncate">{b.title || b.brief.slice(0, 50)}</span>
                 <span className="text-[10px] text-slate-500 uppercase">{KIND_LABEL[b.kind]}</span>
               </div>

@@ -51,10 +51,12 @@ import { carriedPrivate, hasPrivate, privateBlock, resolvePrivate, sanitize, spl
 import { Uploads } from "./hq/uploads";
 import { parseWav, splitWav } from "./hq/wav";
 import { closeRound, historyMessages } from "./hq/thread";
-import { FILE_ID, Files, buildReport, fileType, pdfInstructions, printPdf, wantsPdf } from "./hq/pdf";
-import { BookStore, TRIMS, addSource, bookDetail, bookEpub, bookFileName, bookHtml, bookMarkdown, bookSummary, describeStep, editBook, failed, newBook, nextStep, removeSource, rewriteChapter, runStep, settle, trimOf } from "./hq/books";
+import { FILE_ID, Files, buildReport, fileType, pdfInstructions, printPdf, renderImage, wantsPdf } from "./hq/pdf";
+import { BookStore, TRIMS, addSource, setCoverColors, bookDetail, bookEpub, bookFileName, bookHtml, bookMarkdown, bookSummary, describeStep, editBook, failed, newBook, nextStep, removeSource, rewriteChapter, runStep, settle, trimOf } from "./hq/books";
 import type { Book, BookModel, BookStep, ImageLoader, Trim } from "./hq/books";
-import { MIN_PAGES, MAX_PAGES, coverHtml, coverSpec, gutterFor } from "./hq/kdp";
+import { EBOOK_COVER_PX, MIN_PAGES, MAX_PAGES, coverHtml, coverSpec, ebookCoverHtml, gutterFor } from "./hq/kdp";
+import { BAND_STYLES, automatic, colorsFor, decodePng, ensureReadable, normalizeHex, paletteFromPixels, paletteLibrary, suggestPalettes } from "./hq/palettes";
+import type { BandStyle, Palette } from "./hq/palettes";
 import type { Paper } from "./hq/kdp";
 import { docxToText, fetchSource } from "./hq/sources";
 import { COMPETITION_CHECKS, ResearchStore, competitionOf, conceptsPrompt, etsyKeyHeader, isBlockedPage, mineEtsy, mineKeywords, newResearch, parseConcepts, parseResults, renderPage, scoreKeywords, searchUrl } from "./hq/research";
@@ -1743,6 +1745,10 @@ async function runBookJob() {
       const words = book.chapters.reduce((n, c) => n + (c.words ?? 0), 0);
       hive.log("writer", "book", `finished ${name}: ${book.chapters.length} chapters, ${words.toLocaleString("en-US")} words`);
       notices.add("book", `book:${book.id}`, `${name} is finished (${words.toLocaleString("en-US")} words): download it from the Books page.`);
+      // A finished book gets its ebook cover, in its colours, ready for the stores and the EPUB
+      if (BROWSER_CDP_URL && step.kind !== "listing" && (!book.ebookCover || book.ebookCoverOf !== coverKey(book))) {
+        void makeEbookCover(book).catch((e) => hive.log("writer", "error", `ebook cover for ${name}: ${(e instanceof Error ? e.message : String(e)).slice(0, 200)}`));
+      }
     }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -2577,6 +2583,88 @@ function bookCover(b: Book): { data: Buffer; mime: "image/png" | "image/jpeg" | 
   return { data: up.buf, mime: up.type as "image/png" };
 }
 
+/** The EPUB's cover: your picture, else the ebook cover made from the book's colours. */
+function epubCover(b: Book): { data: Buffer; mime: "image/png" | "image/jpeg" | "image/webp" | "image/gif" } | undefined {
+  const own = bookCover(b);
+  if (own) return own;
+  const made = b.ebookCover ? files.read(b.ebookCover) : null;
+  return made ? { data: made, mime: "image/jpeg" } : undefined;
+}
+
+/** The project's brand kit colours, when a brand has been set up. */
+function brandColors(project: string | null): { background: string; text: string; accent: string } | undefined {
+  if (!assets.branded(project)) return undefined;
+  const br = assets.brand(project);
+  return { background: br.background, text: br.text, accent: br.accent };
+}
+
+/** The picture on the front: your upload, or a picture book's first illustration. */
+function frontPicture(b: Book): string | undefined {
+  const front = bookCover(b);
+  if (front) return `data:${front.mime};base64,${front.data.toString("base64")}`;
+  const first = b.kind === "picture" ? b.chapters.find((c) => c.image)?.image : undefined;
+  return first ? (bookImageUri(first) ?? undefined) : undefined;
+}
+
+/** Colours taken from the front picture, sampled small by the browser sidecar. */
+async function pictureColors(image: string): Promise<Palette> {
+  const html = `<!DOCTYPE html><html><head><style>html,body{margin:0;width:32px;height:48px;overflow:hidden;background:#fff}img{display:block;width:32px;height:48px;object-fit:cover}</style></head><body><img src="${image.replace(/"/g, "&quot;")}" alt=""></body></html>`;
+  const png = await renderImage(html, BROWSER_CDP_URL, { width: 32, height: 48, format: "png" });
+  const { width, pixels } = decodePng(png);
+  return paletteFromPixels(pixels, width);
+}
+
+/**
+ * Takes the book's colours from its cover picture when they were picked automatically
+ * (not by you). Returns whether they changed. Quietly does nothing without the sidecar.
+ */
+async function matchPictureColors(b: Book): Promise<boolean> {
+  if (!BROWSER_CDP_URL || !automatic(b.coverColors) || b.coverColors?.source === "picture") return false;
+  const image = frontPicture(b);
+  if (!image) return false;
+  const c = await pictureColors(image);
+  b.coverColors = { ...b.coverColors, ...c, source: "picture", palette: undefined };
+  return true;
+}
+
+/** Draws the ebook cover (1600 × 2560 JPEG) in the book's colours and keeps it with the book. */
+async function makeEbookCover(b: Book): Promise<{ name: string; bytes: number; colors: Palette & { band: BandStyle } }> {
+  const image = frontPicture(b);
+  if (image && (await matchPictureColors(b).catch(() => false))) books.save(b);
+  const colors = colorsFor(b);
+  const html = ebookCoverHtml({ title: b.title || "Untitled", subtitle: b.subtitle, author: b.author, blurb: "", image, palette: colors, band: colors.band });
+  const jpg = await renderImage(html, BROWSER_CDP_URL, { width: EBOOK_COVER_PX[0], height: EBOOK_COVER_PX[1], format: "jpeg", quality: 92 });
+  const saved = files.save(`${b.title || "book"}-ebook-cover`, jpg, "jpg");
+  b.ebookCover = saved.name;
+  b.ebookCoverOf = coverKey(b);
+  if (books.get(b.id) === b) books.save(b);
+  hive.log("writer", "book", `ebook cover for “${b.title || "Untitled"}”`);
+  return { ...saved, colors };
+}
+
+/** What the ebook cover shows: when this changes, the saved ebook cover is out of date. */
+const coverKey = (b: Book) => {
+  const c = colorsFor(b);
+  return `${b.title}|${b.subtitle ?? ""}|${b.author}|${b.cover ?? ""}|${c.bg}|${c.fg}|${c.accent}|${c.band}`;
+};
+
+/** Rough page count for a preview cover's spine, from the words written or planned. */
+const previewPages = (b: Book) => {
+  if (b.kind === "picture") return Math.max(24, b.chapterCount + 4);
+  const words = b.chapters.reduce((n, c) => n + (c.words ?? 0), 0) || b.chapterCount * b.chapterWords;
+  return Math.max(24, Math.min(828, Math.round(words / 300) + 8));
+};
+
+/** Colours from a query string (a live preview of colours not saved yet). */
+function queryColors(q: Request["query"], b: Book): (Palette & { band: BandStyle }) {
+  const base = colorsFor(b);
+  const bg = normalizeHex(q.bg) ?? base.bg;
+  const fg = normalizeHex(q.fg) ?? base.fg;
+  const accent = normalizeHex(q.accent) ?? base.accent;
+  const band = typeof q.band === "string" && (BAND_STYLES as string[]).includes(q.band) ? (q.band as BandStyle) : base.band;
+  return { ...ensureReadable({ bg, fg, accent }).colors, band };
+}
+
 /** A book's saved illustrations, for the EPUB and the PDFs. */
 const bookImage: ImageLoader = (name) => {
   const buf = files.read(name);
@@ -2601,6 +2689,12 @@ app.get("/api/books", (req, res) => {
   });
 });
 
+/** The palette library, grouped, with the general brand kit's colours when one is set up. */
+app.get("/api/books/palettes", (req, res) => {
+  const project = typeof req.query.project === "string" && req.query.project && req.query.project !== "general" ? projects.idOf(req.query.project) : null;
+  res.json({ groups: paletteLibrary(), bands: BAND_STYLES, brand: brandColors(project ?? null) ?? null, pictures: Boolean(BROWSER_CDP_URL) });
+});
+
 app.get("/api/books/:id", (req, res) => {
   const b = bookOr404(req, res);
   if (b) res.json(bookView(b));
@@ -2623,8 +2717,19 @@ app.patch("/api/books/:id", requireToken, (req, res) => {
   const edits = Object.keys(body).filter((k) => k !== "paused");
   if (edits.length && isRunning(b)) return res.status(409).json({ error: `Wait for “${bookRun!.label}” to finish, or pause the book first` });
   if (typeof body.cover === "string" && body.cover && !uploads.exists(body.cover)) return res.status(400).json({ error: "Unknown picture: upload it first" });
-  const err = editBook(b, body);
+  const coverChanged = typeof body.cover === "string" && body.cover !== b.cover;
+  const err = editBook(b, body, brandColors(b.project));
   if (err) return res.status(400).json({ error: err });
+  // A new cover picture: colours that were picked automatically follow the picture
+  if (coverChanged && automatic(b.coverColors)) {
+    if (b.coverColors?.source === "picture") b.coverColors = { ...b.coverColors, source: "auto" };
+    const id = b.id;
+    void matchPictureColors(b)
+      .then((changed) => {
+        if (changed && books.get(id)) books.save(b);
+      })
+      .catch(() => {});
+  }
   if (body.paused === true && b.stage !== "done") {
     b.paused = true;
     if (isRunning(b)) bookRun!.controller.abort();
@@ -2765,6 +2870,90 @@ app.post("/api/books/:id/listing", requireToken, (req, res) => {
   res.json(bookView(b));
 });
 
+// --- Cover colours ------------------------------------------------------------------------
+
+/** A book's colours as they print, what they came from, and palettes that suit it. */
+app.get("/api/books/:id/colors", (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  res.json({
+    colors: colorsFor(b),
+    coverColors: b.coverColors ?? null,
+    notes: b.coverColors ? ensureReadable(b.coverColors).notes : [],
+    suggestions: suggestPalettes(b, 12).map(({ tags, ...x }) => x),
+    brand: brandColors(b.project) ?? null,
+    picture: Boolean(frontPicture(b)),
+    ebookCover: b.ebookCover ? { name: b.ebookCover, url: `/api/files/${b.ebookCover}`, stale: Boolean(b.ebookCoverOf && b.ebookCoverOf !== coverKey(b)) } : null,
+  });
+});
+
+/**
+ * Sets the colours: {colors: "mystery-noir" | "auto" | "brand" | {bg, fg, accent} |
+ * [background, accent, text] | null}, optionally with band and locked.
+ */
+app.put("/api/books/:id/colors", requireToken, (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  let input: unknown = body.colors;
+  if (input && typeof input === "object" && !Array.isArray(input)) input = { ...(input as object), ...("band" in body ? { band: body.band } : {}), ...("locked" in body ? { locked: body.locked } : {}) };
+  else if (typeof input === "string" && ("band" in body || "locked" in body)) input = { palette: input, band: body.band, locked: body.locked };
+  else if (input === undefined && ("band" in body || "locked" in body)) input = { band: body.band, locked: body.locked };
+  const err = setCoverColors(b, input, brandColors(b.project));
+  if (err) return res.status(400).json({ error: err });
+  books.save(b);
+  res.json(bookView(b));
+});
+
+/** Takes the colours from the cover picture (sets them, or just suggests them with {preview: true}). */
+app.post("/api/books/:id/colors/picture", requireToken, async (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  if (!BROWSER_CDP_URL) return res.status(400).json({ error: "Reading a picture's colours uses the browser sidecar: set BROWSER_CDP_URL (see README-HQ)" });
+  const image = frontPicture(b);
+  if (!image) return res.status(400).json({ error: b.kind === "picture" ? "Add a cover picture or illustrate a page first" : "Add a cover picture first" });
+  try {
+    const c = await pictureColors(image);
+    if (req.body?.preview === true) return res.json({ colors: c });
+    b.coverColors = { ...c, source: "picture", band: b.coverColors?.band, locked: req.body?.locked === true || undefined };
+    books.save(b);
+    res.json(bookView(b));
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+/** A preview of the paperback cover (about 6×9, spine from the words so far), with ?bg=&fg=&accent=&band= to try colours before saving. */
+app.get("/api/books/:id/cover-preview", (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  const colors = queryColors(req.query, b);
+  const trim = trimOf(b);
+  const pages = previewPages(b);
+  const spec = coverSpec(trim, pages, b.kind === "picture" ? "color" : "white");
+  const html =
+    req.query.kind === "ebook"
+      ? ebookCoverHtml({ title: b.title || "Untitled", subtitle: b.subtitle, author: b.author, blurb: "", image: frontPicture(b), palette: colors, band: colors.band })
+      : coverHtml(spec, { title: b.title || "Untitled", subtitle: b.subtitle, author: b.author, blurb: b.listing?.backCover || b.brief, image: frontPicture(b), palette: colors, band: colors.band });
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'");
+  res.end(html);
+});
+
+/** The ebook cover (1600 × 2560 JPEG for KDP and ebook stores) in the book's colours; also the EPUB's cover when you haven't uploaded one. */
+app.post("/api/books/:id/ebook-cover", requireToken, async (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  if (!BROWSER_CDP_URL) return res.status(400).json({ error: "Ebook covers are drawn by the browser sidecar: set BROWSER_CDP_URL (see README-HQ)" });
+  try {
+    const { colors, ...saved } = await makeEbookCover(b);
+    res.json({ ...saved, url: `/api/files/${saved.name}`, width: EBOOK_COVER_PX[0], height: EBOOK_COVER_PX[1], colors, book: bookView(b) });
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
 /**
  * KDP paperback files: the interior, printed until its gutter matches its page count and
  * padded to KDP's 24-page minimum, and the full cover sized from that page count.
@@ -2796,11 +2985,16 @@ app.post("/api/books/:id/kdp", requireToken, async (req, res) => {
     }
     if (pages > MAX_PAGES) return res.status(400).json({ error: `${pages} pages is over KDP's paperback limit of ${MAX_PAGES}: use a larger trim size` });
     const spec = coverSpec(trim, pages, paper);
-    const front = bookCover(b);
-    const firstPicture = b.kind === "picture" ? b.chapters.find((c) => c.image)?.image : undefined;
-    const image = front ? `data:${front.mime};base64,${front.data.toString("base64")}` : firstPicture ? (bookImageUri(firstPicture) ?? undefined) : undefined;
+    const image = frontPicture(b);
+    // Colours picked automatically follow the cover picture, so the back and spine match it
+    if (image && (await matchPictureColors(b).catch(() => false))) {
+      books.save(b);
+      notes.push("The cover colours were taken from the cover picture (choose your own on the Books page to keep them).");
+    }
+    const colors = colorsFor(b);
+    if (b.coverColors) for (const n of ensureReadable(b.coverColors).notes) notes.push(n);
     const coverPdf = await printPdf(
-      coverHtml(spec, { title: b.title || "Untitled", subtitle: b.subtitle, author: b.author, blurb: b.listing?.backCover || b.brief, image }),
+      coverHtml(spec, { title: b.title || "Untitled", subtitle: b.subtitle, author: b.author, blurb: b.listing?.backCover || b.brief, image, palette: colors, band: colors.band }),
       BROWSER_CDP_URL,
       { footer: "none" },
     );
@@ -2814,6 +3008,7 @@ app.post("/api/books/:id/kdp", requireToken, async (req, res) => {
     res.json({
       interior: { ...interior, url: `/api/files/${interior.name}`, pages },
       cover: { ...cover, url: `/api/files/${cover.name}`, ...spec },
+      colors,
       trim,
       paper,
       notes,
@@ -3028,7 +3223,7 @@ app.get("/api/books/:id/export/:fmt", (req, res) => {
   if (!b.chapters.some((c) => c.text)) return res.status(400).json({ error: "No chapters are written yet" });
   const out =
     fmt === "epub"
-      ? { type: "application/epub+zip", body: bookEpub(b, bookCover(b), bookImage) }
+      ? { type: "application/epub+zip", body: bookEpub(b, epubCover(b), bookImage) }
       : fmt === "md"
         ? { type: "text/markdown; charset=utf-8", body: Buffer.from(bookMarkdown(b)) }
         : fmt === "html"

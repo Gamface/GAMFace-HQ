@@ -78,6 +78,11 @@ export interface Book {
   trim?: string;
   listing?: Listing;
   wantListing?: boolean;
+  /** The cover's colours as the book set them (left out: picked from the title) */
+  coverColors?: { bg: string; fg: string; accent: string; source: string; palette?: string; locked?: boolean; band?: string };
+  /** The colours the cover prints with */
+  colors?: { bg: string; fg: string; accent: string; band: string };
+  ebookCover?: string;
 }
 
 export const errText = (e: unknown) => (e instanceof Error ? e.message : String(e)).replace(/^\d+ /, "").replace(/^\{"error":"(.*)"\}$/, "$1");
