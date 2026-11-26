@@ -179,6 +179,7 @@ and everything else runs in the new **`studio` container**.
 
 | What | Where it runs |
 |---|---|
+| **Add vocals**: lyrics sung over your instrumental, in its tempo and key (found automatically). ACE-Step sings it, its vocals are split out and laid over your original; you also get ACE-Step's own take and the vocals alone. **✍ Write lyrics for me** writes them from a theme | Graphics card (ComfyUI); lyrics by the lead's model |
 | **New songs**: ACE-Step 1.5, sung (with your lyrics, marked `[verse]`, `[chorus]`, `[bridge]`) or instrumental, 10 s to 10 min, with BPM, key, time signature and language | Graphics card (ComfyUI) |
 | **Stems**: vocals, drums, bass and other (Hybrid Demucs) | Graphics card with the stems node below; otherwise the CPU (same model, slower) |
 | **Stems mixer**: play every part in sync in the browser, mute, solo, levels | Your browser |
@@ -191,6 +192,27 @@ Add audio with **+ Add audio** (MP3, WAV, FLAC, M4A, OGG, or a video's sound; up
 20 minutes): it's split into stems straight away. Only use audio you have the right to use.
 Everything lands in `mission-control/data/studio` (`library/` for songs and stems, `outputs/`
 for finished work), and each job's files play or download from the page.
+
+### Jarvis and your Music folder
+
+Jarvis can work the studio for you: *"add lyrics to C:\Users\you\Music\My Beat.mp3 about
+loyalty, male rapper"* finds the file in your Music folder, adds it, writes the lyrics and sings
+them over the beat. He can also write lyrics on their own, make a new song, and tell you how
+studio jobs are going. These are **studio tools** (`studio.find_music`, `import_song`,
+`write_lyrics`, `add_vocals`, `make_song`, `list_songs`, `job_status`) that run inside the
+harness; adding a song and starting a job ask you first, like other tools that change things.
+
+To let him (and the Studio page's **Find in Music folder** box) see your music, share the folder
+read-only: in `mission-control/.env` set
+
+```
+MUSIC_DIR=/mnt/c/Users/<you>/Music
+```
+
+(that's the WSL form, for `docker compose` run in WSL; use `C:\Users\<you>\Music` if you run it
+in PowerShell) and run `docker compose up -d studio harness`. The **Music folder** chip turns
+green. Paths can be typed either way (`C:\Users\...` or `/mnt/c/...`); nothing outside the folder
+can be read.
 
 ### Setting it up on the PC
 

@@ -7,7 +7,9 @@ Windows (COMFY_URL); everything else runs here on the CPU.
   GET  /songs, /songs/<id>            the library
   POST /songs {title, filename, data} add audio (base64); it's split into stems straight away
   DELETE /songs/<id>
-  POST /jobs {type, ...}              split | song | practice | karaoke | sheet | daw
+  GET  /import?q=words                files in the shared music folder (MUSIC_DIR) that match
+  POST /songs/import {path, title?, split?}   add one of them by its path on the PC
+  POST /jobs {type, ...}              split | song | vocals | practice | karaoke | sheet | daw
   GET  /jobs, /jobs/<id>; POST /jobs/<id>/cancel
   GET  /outputs                       finished work, newest first
   GET  /files/<path>                  any file under the data folder (byte ranges for players)
@@ -28,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from mcstudio import sheet
 from mcstudio.comfy import STEM_NODE, Comfy
 from mcstudio.store import DATA, Jobs, Library, outputs
-from mcstudio import stock, videojobs
+from mcstudio import imports, stock, videojobs
 from mcstudio.worker import Worker, check_params, job_title, save_upload
 
 MAX_UPLOAD = 150 * 1024 * 1024
@@ -77,6 +79,8 @@ def health() -> dict:
         "voice": bool(VOICE_URL),
         # Free stock footage for themed music videos
         "stock": stock.keys(),
+        # The shared music folder songs can be added from by path
+        "importFolder": imports.available(),
     }
     health_cache.update(at=time.time(), value=value)
     return value
@@ -132,6 +136,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, {"outputs": outputs(DATA)})
             if p == ["media"]:
                 return self.send(200, {"media": videojobs.list_media(DATA)})
+            if p == ["import"]:
+                from urllib.parse import parse_qs, urlparse
+
+                if not imports.available():
+                    return self.send(200, {"files": [], "error": "No music folder is shared with the studio: set MUSIC_DIR in mission-control/.env"})
+                q = parse_qs(urlparse(self.path).query).get("q", [""])[0][:200]
+                return self.send(200, {"files": imports.find(q)})
             if len(p) >= 2 and p[0] == "files":
                 return self.file("/".join(p[1:]))
             return self.send(404, {"error": "Not found"})
@@ -206,6 +217,15 @@ class Handler(BaseHTTPRequestHandler):
                     jobs.add("split", {"song": meta["id"]}, f"Split: {meta['title']}")
                     worker.wake.set()
                 return self.send(201, meta)
+            if p == ["songs", "import"]:
+                src = imports.resolve(str(body.get("path") or ""))
+                if src.stat().st_size > MAX_UPLOAD:
+                    return self.send(413, {"error": f"Files can be at most {MAX_UPLOAD // 1024 // 1024} MB"})
+                meta = save_upload(library, str(body.get("title") or "") or src.stem, src.read_bytes(), src.name)
+                if body.get("split", True):
+                    jobs.add("split", {"song": meta["id"]}, f"Split: {meta['title']}")
+                    worker.wake.set()
+                return self.send(201, {**meta, "importedFrom": str(src.relative_to(imports.IMPORT_DIR))})
             if p == ["jobs"]:
                 kind = str(body.pop("type", ""))
                 err = check_params(kind, body, library)
@@ -247,6 +267,7 @@ class Handler(BaseHTTPRequestHandler):
 ALLOWED = {
     "split": {"song"},
     "song": {"prompt", "title", "lyrics", "seconds", "bpm", "key", "timesig", "language", "seed", "split"},
+    "vocals": {"song", "lyrics", "prompt", "strength", "language", "seed", "title", "vocal_level", "split"},
     "practice": {"song", "gains", "speed", "semitones", "start", "end"},
     "karaoke": {"song", "semitones", "lyrics", "keep_backing_vocals"},
     "sheet": {"song", "parts"},

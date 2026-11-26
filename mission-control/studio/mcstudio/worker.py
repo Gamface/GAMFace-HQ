@@ -12,12 +12,12 @@ import time
 import traceback
 from pathlib import Path
 
-from . import audio, daw, karaoke, separate, sheet, videojobs
+from . import analyze, audio, daw, karaoke, separate, sheet, videojobs
 from .js import context as js_context
 from .comfy import STEM_NODE, STEMS, Comfy, ComfyError, audio_files, song_workflow, split_workflow
 from .store import DATA, Jobs, Library, slug
 
-MUSIC_KINDS = ("split", "song", "practice", "karaoke", "sheet", "daw")
+MUSIC_KINDS = ("split", "song", "vocals", "practice", "karaoke", "sheet", "daw")
 KINDS = MUSIC_KINDS + videojobs.VIDEO_KINDS
 
 
@@ -117,26 +117,29 @@ class Worker:
             self.cpu_model = separate.load_model()
         separate.split(src, out, self.cpu_model, progress=lambda f: self.progress(job, f"splitting on the CPU ({why}): {int(f * 100)}%"), cancelled=self.cancelled(job))
 
+    def separate(self, job: dict, name: str, src: Path, out: Path) -> tuple[str, str]:
+        """Splits `src` into stem files in `out`: on the graphics card when it can, else the CPU.
+        Returns the device ("gpu" or "cpu") and a note for the result message."""
+        if not self.gpu_stems():
+            self.split_on_cpu(job, src, out, "GPU stems are off" if self.gpu_stems_failed else "install the stems node in ComfyUI for the graphics card")
+            return "cpu", ""
+        try:
+            self.split_on_gpu(job, name, src, out)
+            return "gpu", ""
+        except ComfyError as e:
+            # A crash in ComfyUI (often the AMD driver) shouldn't lose the split: finish it on
+            # the CPU, and don't send stems to the graphics card again until the studio restarts
+            self.gpu_stems_failed = str(e)[:300]
+            self.split_on_cpu(job, src, out, "the graphics card failed")
+            return "cpu", f" The graphics card failed ({str(e)[:160]}), so it was split on the CPU; GPU stems are off until the studio restarts."
+
     def do_split(self, job: dict, song: str) -> dict:
         meta = self.song(song)
         src = self.library.original(song)
         out = self.library.dir(song) / "stems"
         self.library.update(song, status="splitting", error=None)
-        note = ""
         try:
-            device = "cpu"
-            if self.gpu_stems():
-                try:
-                    self.split_on_gpu(job, song, src, out)
-                    device = "gpu"
-                except ComfyError as e:
-                    # A crash in ComfyUI (often the AMD driver) shouldn't lose the split: finish it on
-                    # the CPU, and don't send stems to the graphics card again until the studio restarts
-                    self.gpu_stems_failed = str(e)[:300]
-                    note = f" The graphics card failed ({str(e)[:160]}), so it was split on the CPU; GPU stems are off until the studio restarts."
-                    self.split_on_cpu(job, src, out, "the graphics card failed")
-            else:
-                self.split_on_cpu(job, src, out, "GPU stems are off" if self.gpu_stems_failed else "install the stems node in ComfyUI for the graphics card")
+            device, note = self.separate(job, song, src, out)
         except BaseException as e:
             self.library.update(song, status="failed" if not isinstance(e, InterruptedError) else "new", error=str(e)[:400])
             raise
@@ -144,7 +147,8 @@ class Worker:
         self.library.update(song, status="ready", stems=stems, splitBy=device, error=None)
         return {"message": f"Split “{meta['title']}” into {', '.join(stems)} on the {'graphics card' if device == 'gpu' else 'CPU'}.{note}", "song": song, "files": self.rel(*(out / f"{s}.wav" for s in stems))}
 
-    def do_song(self, job: dict, prompt: str, title: str = "", lyrics: str = "", seconds: float = 60, bpm: int = 100, key: str = "C major", timesig: str = "4", language: str = "en", seed: int | None = None, split: bool = True) -> dict:
+    def ace(self):
+        """ACE-Step 1.5 in ComfyUI, or a clear error saying how to get it."""
         if not self.comfy:
             raise ValueError("Songs are made by ACE-Step in ComfyUI: set COMFY_URL for the studio service")
         models = self.comfy.ace_models()
@@ -152,6 +156,77 @@ class Worker:
             if not self.comfy.running():
                 raise ComfyError("ComfyUI isn't running on the PC")
             raise ValueError("ACE-Step 1.5 isn't in ComfyUI yet: open ComfyUI (http://127.0.0.1:8188), pick Templates > Audio > ACE-Step 1.5 and let it download the models (either the all-in-one checkpoint or the split files), then try again.")
+        return models
+
+    def do_vocals(self, job: dict, song: str, lyrics: str, prompt: str = "", strength: float = 0.55, language: str = "en", seed: int | None = None, title: str = "", vocal_level: float = 1.0, split: bool = True) -> dict:
+        """Sings lyrics over an instrumental. ACE-Step re-sings the track with the lyrics, starting
+        from the instrumental itself (so the timing and key carry over); its vocals are split out and
+        laid over the original instrumental. The ACE-Step take is kept too."""
+        meta = self.song(song)
+        models = self.ace()
+        src = self.library.original(song)
+        dur = float(meta.get("duration") or audio.duration(src))
+        if dur > 600:
+            raise ValueError("Vocals can be added to songs up to 10 minutes long")
+        bpm, key = meta.get("bpm"), meta.get("key")
+        if not bpm or not key:
+            self.progress(job, "finding the tempo and key")
+            found = analyze.tempo_key(src)
+            bpm, key = bpm or found.get("bpm") or 100, key or found.get("key") or "C major"
+            self.library.update(song, bpm=int(bpm), key=key)
+        seed = int(seed) if seed is not None else random.randrange(1, 2**31)
+        strength = max(0.2, min(0.95, float(strength)))
+        style = prompt.strip() or meta.get("prompt") or ""
+        tags = style if "vocal" in style.lower() or "sing" in style.lower() else ", ".join(x for x in ["lead vocals, clear singing", style] if x)
+        title = title.strip() or f"{meta['title']} (vocals)"
+        name = slug(title)
+        out = self.out_dir("vocals", title, job)
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            self.progress(job, "sending the instrumental to ComfyUI")
+            uploaded = self.comfy.upload(src, "mission-control")
+            self.progress(job, f"singing the lyrics on the graphics card (ACE-Step 1.5, {int(bpm)} BPM, {key})")
+            outputs = self.comfy.run(
+                song_workflow(models, tags, lyrics, round(dur, 2), int(bpm), key, "4", language, seed, f"mission-control/vocals/{name}", source=uploaded, denoise=strength),
+                timeout=3600,
+                cancelled=self.cancelled(job),
+                progress=lambda x: self.progress(job, f"singing the lyrics: {x}"),
+            )
+            files = next(iter(audio_files(outputs).values()), None)
+            if not files:
+                raise ComfyError("ACE-Step finished but saved no audio")
+            take = audio.to_wav(self.comfy.fetch(files[0], t / "take.flac"), t / "take.wav")
+            stems_dir = t / "stems"
+            device, note = self.separate(job, f"vocals-{song}", take, stems_dir)
+            vocals = stems_dir / "vocals.wav"
+            if not vocals.exists():
+                raise ValueError("Couldn't separate the new vocals")
+            self.progress(job, "laying the vocals over your instrumental")
+            loud = audio.mix({"music": src, "vocals": vocals}, {"music": 1.0, "vocals": max(0.1, min(2.0, float(vocal_level)))}, t / "loud.wav")
+            mixed = audio.to_wav(loud, t / "mixed.wav", end=dur)  # exactly as long as the instrumental
+            new = self.library.create(title, "vocals", fromSong=song, prompt=style, lyrics=lyrics, bpm=int(bpm), key=key, seed=seed, strength=strength)
+            shutil.copyfile(mixed, self.library.original(new["id"]))
+            self.library.update(new["id"], duration=audio.duration(mixed))
+            files_out = [
+                audio.to_mp3(mixed, out / f"{name}.mp3", loudness=-14),
+                audio.to_mp3(take, out / f"{name}-ace-step-take.mp3", loudness=-14),
+                shutil.copyfile(vocals, out / f"{name}-vocals-only.wav"),
+            ]
+        lyr = out / f"{name}-lyrics.txt"
+        lyr.write_text(f"{title}\n\nOver: {meta['title']}\nStyle: {tags}\nBPM: {int(bpm)}  Key: {key}  Strength: {strength}  Seed: {seed}  Model: {models['label']}\n\n{lyrics}\n")
+        files_out.append(lyr)
+        if split:
+            self.jobs.add("split", {"song": new["id"]}, f"Split {title}")
+            self.wake.set()
+        return {
+            "message": f"Added vocals to “{meta['title']}”: “{title}” is in the library ({int(bpm)} BPM, {key}). "
+            f"Also saved: ACE-Step's own take and the vocals on their own (split on the {'graphics card' if device == 'gpu' else 'CPU'}).{note}",
+            "song": new["id"],
+            "files": self.rel(*files_out),
+        }
+
+    def do_song(self, job: dict, prompt: str, title: str = "", lyrics: str = "", seconds: float = 60, bpm: int = 100, key: str = "C major", timesig: str = "4", language: str = "en", seed: int | None = None, split: bool = True) -> dict:
+        models = self.ace()
         seed = int(seed) if seed is not None else random.randrange(1, 2**31)
         seconds = max(10.0, min(600.0, float(seconds)))
         title = title.strip() or prompt.strip()[:60] or "New song"
@@ -265,7 +340,7 @@ class Worker:
 def job_title(kind: str, params: dict, library: Library) -> str:
     song = library.get(str(params.get("song", ""))) if params.get("song") else None
     name = str(params.get("title") or "") or (song["title"] if song else str(params.get("prompt") or "")[:60])
-    labels = {"split": "Split", "song": "New song", "practice": "Practice", "karaoke": "Karaoke", "sheet": "Sheet music", "daw": "DAW stems", **videojobs.LABELS}
+    labels = {"split": "Split", "song": "New song", "vocals": "Add vocals", "practice": "Practice", "karaoke": "Karaoke", "sheet": "Sheet music", "daw": "DAW stems", **videojobs.LABELS}
     return labels[kind] + (f": {name[:60]}" if name else "")
 
 
@@ -284,7 +359,13 @@ def check_params(kind: str, p: dict, library: Library) -> str | None:
     song = library.get(str(p.get("song", "")))
     if song is None:
         return "Pick a song from the library"
-    if kind != "split" and song.get("status") != "ready":
+    if kind == "vocals":
+        if not str(p.get("lyrics", "")).strip():
+            return "Write the lyrics to sing (or ask Jarvis to write them)"
+        if len(str(p.get("lyrics", ""))) > 4000:
+            return "The lyrics are too long (4000 characters at most)"
+        return None
+    if kind not in ("split", "vocals") and song.get("status") != "ready":
         return "That song hasn't been split into stems yet"
     return None
 

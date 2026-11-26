@@ -185,6 +185,9 @@ export async function routeTask(chat: JsonChat, model: string, prompt: string): 
           "Writing a document, report or PDF goes to planner, or to browser when it needs current facts or real pictures from the web; " +
           "file is only for reading or organizing the user's own notes. " +
           (toolsSummary ? "Pick tools when one of its installed tools clearly answers the request. " : "") +
+          (installedTools.has("studio.add_vocals")
+            ? "Anything about the music studio (finding or adding a track or audio file, writing lyrics for a song, adding vocals or lyrics to a track, making a song) goes to tools. "
+            : "") +
           'Reply with JSON only: {"agent": "<key>", "reason": "<a few words>"}',
       },
       { role: "user", content: prompt.slice(0, 2000) },

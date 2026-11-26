@@ -167,9 +167,11 @@ def audio_files(outputs: dict) -> dict[str, list[dict]]:
     return {nid: o.get("audio", []) for nid, o in outputs.items() if o.get("audio")}
 
 
-def song_workflow(models: str | dict, tags: str, lyrics: str, seconds: float, bpm: int, key: str, timesig: str, language: str, seed: int, prefix: str, steps: int = 8) -> dict:
+def song_workflow(models: str | dict, tags: str, lyrics: str, seconds: float, bpm: int, key: str, timesig: str, language: str, seed: int, prefix: str, steps: int = 8, source: str | None = None, denoise: float = 1.0) -> dict:
     """ComfyUI's ACE-Step 1.5 templates in API form: audio_ace_step_1_5_checkpoint (one file) or
-    audio_ace_step_1_5_split (model, text encoders and VAE). `models` is ace_models() or a checkpoint name."""
+    audio_ace_step_1_5_split (model, text encoders and VAE). `models` is ace_models() or a checkpoint name.
+    With `source` (a file in ComfyUI's input folder) it starts from that audio instead of silence:
+    `denoise` says how much is rewritten (0.5 keeps the arrangement and timing, 1.0 ignores it)."""
     if isinstance(models, str):
         models = {"mode": "aio", "ckpt": models}
     if models["mode"] == "split":
@@ -200,10 +202,20 @@ def song_workflow(models: str | dict, tags: str, lyrics: str, seconds: float, bp
             },
         },
         "4": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["3", 0]}},
-        "5": {"class_type": "EmptyAceStep1.5LatentAudio", "inputs": {"seconds": seconds, "batch_size": 1}},
+        **(
+            {
+                "5a": {"class_type": "LoadAudio", "inputs": {"audio": source}},
+                "5": {"class_type": "VAEEncodeAudio", "inputs": {"audio": ["5a", 0], "vae": vae}},
+            }
+            if source
+            else {"5": {"class_type": "EmptyAceStep1.5LatentAudio", "inputs": {"seconds": seconds, "batch_size": 1}}}
+        ),
         "6": {
             "class_type": "KSampler",
-            "inputs": {"model": ["2", 0], "positive": ["3", 0], "negative": ["4", 0], "latent_image": ["5", 0], "seed": seed, "steps": steps, "cfg": 1, "sampler_name": "euler", "scheduler": "simple", "denoise": 1},
+            "inputs": {
+                "model": ["2", 0], "positive": ["3", 0], "negative": ["4", 0], "latent_image": ["5", 0], "seed": seed, "steps": steps, "cfg": 1,
+                "sampler_name": "euler", "scheduler": "simple", "denoise": round(max(0.05, min(1.0, denoise)), 2) if source else 1,
+            },
         },
         "7": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["6", 0], "vae": vae}},
         "8": {"class_type": "SaveAudio", "inputs": {"audio": ["7", 0], "filename_prefix": prefix}},

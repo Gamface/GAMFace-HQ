@@ -19,6 +19,7 @@ import {
 import { BrowserSession, Frame, SEARCH_SITES } from "./hq/browser";
 import { runBrowserAgent } from "./hq/browser-agent";
 import { runToolAgent } from "./hq/tool-agent";
+import { studioTools, writeLyrics } from "./hq/studio-tools";
 import { StreamGuard, redact } from "./hq/guard";
 import { Hive } from "./hq/hive";
 import { Memory } from "./hq/memory";
@@ -188,7 +189,11 @@ const STUDIO_URL = (process.env.STUDIO_URL || "").replace(/\/+$/, "");
 const voice = VOICE_URL ? new VoiceClient(VOICE_URL.replace(/\/+$/, "")) : null;
 // Tools (MCP servers) for the agents: the tools service (tools/, docker-compose.yml)
 const TOOLS_URL = process.env.TOOLS_URL || "";
-const tools = TOOLS_URL ? new ToolsClient(TOOLS_URL.replace(/\/+$/, "")) : null;
+// The music studio's own tools for Jarvis (find and add tracks, lyrics, vocals, songs) run here
+const tools =
+  TOOLS_URL || STUDIO_URL
+    ? new ToolsClient(TOOLS_URL.replace(/\/+$/, ""), STUDIO_URL ? [studioTools({ studio: studioFetch, chat: roleJson("planner") })] : [])
+    : null;
 // Logos, pictures, clips, music and fonts the Coder may use, and the brand
 const assets = new Assets(DATA_DIR);
 const docCache = new DocCache(path.join(DATA_DIR, "uploads"));
@@ -2827,14 +2832,48 @@ app.post("/api/books/:id/kdp", requireToken, async (req, res) => {
 // The dashboard talks to the studio through here, so the studio itself is never published.
 // Reading is open like the rest of the API; changes need the token.
 const STUDIO_ROUTES: { method: string; path: RegExp }[] = [
-  { method: "GET", path: /^\/(health|songs|jobs|outputs|media)$/ },
-  { method: "POST", path: /^\/media$/ },
+  { method: "GET", path: /^\/(health|songs|jobs|outputs|media|import)$/ },
+  { method: "POST", path: /^\/(media|songs\/import)$/ },
   { method: "GET", path: /^\/(songs|jobs)\/[a-f0-9]{12}$/ },
   { method: "GET", path: /^\/files\/[A-Za-z0-9._/-]+$/ },
   { method: "POST", path: /^\/(songs|jobs)$/ },
   { method: "POST", path: /^\/jobs\/[a-f0-9]{12}\/cancel$/ },
   { method: "DELETE", path: /^\/songs\/[a-f0-9]{12}$/ },
 ];
+
+/** The harness's own calls to the studio (Jarvis's studio tools). Throws the studio's error. */
+async function studioFetch(sub: string, init: { method?: string; body?: unknown } = {}): Promise<unknown> {
+  if (!STUDIO_URL) throw new Error("The music studio isn't set up (STUDIO_URL)");
+  let r: globalThis.Response;
+  try {
+    r = await fetch(`${STUDIO_URL}${sub}`, {
+      method: init.method ?? "GET",
+      headers: { "Content-Type": "application/json" },
+      body: init.body === undefined ? undefined : JSON.stringify(init.body),
+      signal: AbortSignal.timeout(init.method === "POST" ? 5 * 60_000 : 30_000),
+    });
+  } catch (e) {
+    throw new Error(`The music studio isn't answering (docker compose up -d studio): ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const data = (await r.json().catch(() => ({}))) as { error?: string };
+  if (!r.ok) throw new Error(data.error ?? `The studio said ${r.status}`);
+  if (init.method === "POST" && sub === "/jobs") hive.log("studio", "job", String((data as { title?: string }).title ?? "studio job"));
+  if (init.method === "POST" && sub === "/songs/import") hive.log("studio", "song", `added “${String((data as { title?: string }).title ?? "a song")}” from the Music folder`);
+  return data;
+}
+
+// Lyrics for the Studio page's "Add vocals" form, written by the lead's model
+app.post("/api/studio/lyrics", requireToken, async (req: Request, res: Response) => {
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const s = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined);
+  try {
+    const lyrics = await writeLyrics(roleJson("planner"), { theme: s(b.theme, 600), style: s(b.style, 300), title: s(b.title, 120), seconds: n(b.seconds), bpm: n(b.bpm), key: s(b.key, 20), language: s(b.language, 8) });
+    res.json({ lyrics });
+  } catch (e) {
+    res.status(502).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
 
 app.use("/api/studio", async (req: Request, res: Response) => {
   const [sub, query = ""] = (req.url ?? "/").split("?");
