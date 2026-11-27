@@ -4,7 +4,11 @@
 // only writes the story around a puzzle, and it is never shown the answer, so it can't
 // give it away or contradict it.
 
-export type PuzzleType = "logic" | "mystery";
+import { ACTIVITY_CSS, makeSudoku, makeWordsearch, sudokuHtml, wordsearchHtml, type Placement } from "./activity";
+
+export type PuzzleType = "logic" | "mystery" | "wordsearch" | "sudoku";
+/** Word searches and sudoku: no clues or story-driven solving, just the grid */
+export const isActivity = (t: PuzzleType | undefined) => t === "wordsearch" || t === "sudoku";
 export type Difficulty = "easy" | "medium" | "hard";
 
 export interface Category {
@@ -47,6 +51,21 @@ export interface Puzzle {
   crime?: { place: number; item: number; culprit: number; victim: string };
   /** Short descriptions for the suspects (whodunits) */
   roles?: string[];
+  /** Word searches: the letter grid, the words to find, and where each one is */
+  grid?: string[];
+  words?: string[];
+  placed?: Placement[];
+  /** Sudoku: the cells you're given (0 = blank) and the full solution */
+  givens?: number[];
+  answer?: number[];
+}
+
+/** Whether a puzzle has been made (clues found, grid filled). */
+export function puzzleReady(p: Puzzle | undefined): boolean {
+  if (!p) return false;
+  if (p.type === "wordsearch") return Boolean(p.grid?.length && p.words?.length);
+  if (p.type === "sudoku") return Boolean(p.givens?.length === 81);
+  return p.clues.length > 0;
 }
 
 // --- Random numbers you can repeat ----------------------------------------------------
@@ -140,6 +159,8 @@ export function countSolutions(k: number, n: number, clues: Clue[], limit = 2): 
 const SIZES: Record<PuzzleType, Record<Difficulty, { k: number; n: number }>> = {
   logic: { easy: { k: 3, n: 4 }, medium: { k: 4, n: 4 }, hard: { k: 4, n: 5 } },
   mystery: { easy: { k: 3, n: 4 }, medium: { k: 4, n: 4 }, hard: { k: 4, n: 5 } },
+  wordsearch: { easy: { k: 1, n: 10 }, medium: { k: 1, n: 15 }, hard: { k: 1, n: 20 } },
+  sudoku: { easy: { k: 0, n: 0 }, medium: { k: 0, n: 0 }, hard: { k: 0, n: 0 } },
 };
 export const puzzleSize = (type: PuzzleType, d: Difficulty) => SIZES[type][d];
 
@@ -219,7 +240,16 @@ const breathe = () => new Promise<void>((r) => setImmediate(r));
  * Makes a puzzle with exactly one solution. A hard one takes a few seconds of solving,
  * so it pauses between solver runs to keep the server answering.
  */
-export async function makePuzzle(type: PuzzleType, difficulty: Difficulty, categories: Category[], seed: number, extra: { victim?: string; roles?: string[] } = {}): Promise<Puzzle> {
+export async function makePuzzle(type: PuzzleType, difficulty: Difficulty, categories: Category[], seed: number, extra: { victim?: string; roles?: string[]; words?: unknown[] } = {}): Promise<Puzzle> {
+  if (type === "wordsearch") {
+    const words = extra.words?.length ? extra.words : (categories[0]?.items ?? []);
+    const ws = makeWordsearch(words, difficulty, rng(seed));
+    return { type, difficulty, seed, categories: [{ name: "Words", items: ws.words }], solution: [], clues: [], ...ws };
+  }
+  if (type === "sudoku") {
+    await breathe();
+    return { type, difficulty, seed, categories: [], solution: [], clues: [], ...makeSudoku(difficulty, rng(seed)) };
+  }
   const cats = fitCategories(type, difficulty, categories, seed);
   const k = cats.length;
   const n = cats[0].items.length;
@@ -287,11 +317,14 @@ export function clueText(p: Puzzle, cl: Clue): string {
 
 /** The answer as rows: one per person, each with their item from every category. */
 export function answerRows(p: Puzzle): string[][] {
+  if (isActivity(p.type)) return [];
   return p.categories[0].items.map((_, e) => p.categories.map((c, ci) => c.items[p.solution[ci][e]]));
 }
 
 /** What the story writer may know: the setting and everyone in it, never the answer. */
 export function puzzleFacts(p: Puzzle): string {
+  if (p.type === "wordsearch") return `A word search. The hidden words: ${(p.words ?? []).join(", ")}`;
+  if (p.type === "sudoku") return "A sudoku.";
   const lines = p.categories.map((c, i) => `${i === 0 ? (p.type === "mystery" ? "Suspects" : "People") : c.name}: ${c.items.join(", ")}`);
   if (p.roles?.length) lines.push(`Who they are: ${p.categories[0].items.map((x, i) => `${x} (${p.roles![i] ?? "a guest"})`).join("; ")}`);
   if (p.crime) lines.push(`The crime: ${p.crime.victim} was found in ${p.categories[1].items[p.crime.place]}, killed with ${p.categories[2].items[p.crime.item]}.`);
@@ -327,6 +360,8 @@ export function gridHtml(p: Puzzle): string {
 
 /** The puzzle's page (after the story): what you're told, the clues and the grid. */
 export function puzzleHtml(p: Puzzle): string {
+  if (p.type === "wordsearch") return `<div class="puzzle"><p class="crime">Find the ${p.words?.length ?? 0} words: across, down${p.difficulty !== "easy" ? ", diagonally" : ""}${p.difficulty === "hard" ? " and backwards" : ""}.</p>${wordsearchHtml(p.grid ?? [], p.words ?? [])}</div>`;
+  if (p.type === "sudoku") return `<div class="puzzle"><p class="crime">Fill the grid so every row, column and 3×3 box has the numbers 1 to 9.</p>${sudokuHtml(p.givens ?? [])}</div>`;
   const crime = p.crime
     ? `<p class="crime"><strong>The facts:</strong> ${htmlEsc(p.crime.victim)} was found in ${htmlEsc(p.categories[1].items[p.crime.place])}, killed with ${htmlEsc(p.categories[2].items[p.crime.item])}. Each suspect was in a different place, had a different item${p.categories.length > 3 ? ` and ${htmlEsc(p.categories[3].verb ?? "")} at a different time` : ""}.</p>`
     : `<p class="crime">Each ${p.categories[0].name.toLowerCase()} matches exactly one item in every category.</p>`;
@@ -340,6 +375,8 @@ export function puzzleHtml(p: Puzzle): string {
 
 /** One answer in the answer key. */
 export function answerHtml(p: Puzzle, title: string, n: number): string {
+  if (p.type === "wordsearch") return `<div class="answer-small"><h3>${n}. ${htmlEsc(title)}</h3>${wordsearchHtml(p.grid ?? [], p.words ?? [], p.placed ?? [], true)}</div>`;
+  if (p.type === "sudoku") return `<div class="answer-small"><h3>${n}. ${htmlEsc(title)}</h3>${sudokuHtml(p.answer ?? [], true)}</div>`;
   const rows = answerRows(p);
   const culprit = p.crime ? `<p><strong>${htmlEsc(p.categories[0].items[p.crime.culprit])} did it</strong>, in ${htmlEsc(p.categories[1].items[p.crime.place])} with ${htmlEsc(p.categories[2].items[p.crime.item])}.</p>` : "";
   return (
@@ -349,7 +386,7 @@ export function answerHtml(p: Puzzle, title: string, n: number): string {
   );
 }
 
-export const PUZZLE_CSS = `
+export const PUZZLE_CSS = ACTIVITY_CSS + `
 .puzzle h3 { margin-top: 0.8em; }
 .crime, .question { text-indent: 0; margin: 0.6em 0; }
 ol.clues { margin: 0.4em 0 0.8em 1.4em; }

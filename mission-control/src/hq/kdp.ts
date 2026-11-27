@@ -88,8 +88,63 @@ export interface CoverInput {
   blurb: string;
   /** A data: URI for the front picture */
   image?: string;
-  /** Colours for a cover without a picture */
+  /** The cover's colours (back, spine, title band); else picked from the title */
   palette?: { bg: string; fg: string; accent: string };
+  /** The front picture is a finished cover with its own title and author: print it as it is */
+  finished?: boolean;
+}
+
+/** Width and height of a PNG, JPEG, GIF or WebP, read from its header. */
+export function imageSize(buf: Buffer): [number, number] | null {
+  if (buf.length > 24 && buf.readUInt32BE(0) === 0x89504e47) return [buf.readUInt32BE(16), buf.readUInt32BE(20)];
+  if (buf.length > 10 && buf.toString("ascii", 0, 3) === "GIF") return [buf.readUInt16LE(6), buf.readUInt16LE(8)];
+  if (buf.length > 30 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP") {
+    const kind = buf.toString("ascii", 12, 16);
+    if (kind === "VP8 ") return [buf.readUInt16LE(26) & 0x3fff, buf.readUInt16LE(28) & 0x3fff];
+    if (kind === "VP8L") {
+      const b = buf.readUInt32LE(21);
+      return [(b & 0x3fff) + 1, ((b >> 14) & 0x3fff) + 1];
+    }
+    if (kind === "VP8X") return [1 + buf.readUIntLE(24, 3), 1 + buf.readUIntLE(27, 3)];
+    return null;
+  }
+  if (buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < buf.length) {
+      if (buf[i] !== 0xff) return null;
+      const marker = buf[i + 1];
+      const len = buf.readUInt16BE(i + 2);
+      // SOF0..SOF15, except DHT (C4), JPG (C8) and DAC (CC)
+      if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) return [buf.readUInt16BE(i + 7), buf.readUInt16BE(i + 5)];
+      i += 2 + len;
+    }
+  }
+  return null;
+}
+
+/** The front panel (trim + bleed) in pixels at 300 dpi, and how many dpi a picture gives it. */
+export function frontDpi(spec: CoverSpec, size: [number, number]): { dpi: number; need: [number, number] } {
+  const [w, h] = spec.trim;
+  const panelW = w + BLEED;
+  const panelH = h + 2 * BLEED;
+  // The picture covers the panel (object-fit: cover), so the tighter side decides
+  const cover = Math.max(panelW / size[0], panelH / size[1]); // inches per pixel once it covers the panel
+  return { dpi: Math.floor(1 / cover), need: [Math.ceil(panelW * 300), Math.ceil(panelH * 300)] };
+}
+
+const HEX = /^#[0-9a-fA-F]{6}$/;
+/** Cover colours from what a person or Jarvis sent: #rgb widened, names refused. */
+export function cleanPalette(v: unknown): { bg: string; fg: string; accent: string } | null | "invalid" {
+  if (v === null || (Array.isArray(v) && v.length === 0)) return null;
+  const list = Array.isArray(v) ? v : v && typeof v === "object" ? [(v as Record<string, unknown>).bg, (v as Record<string, unknown>).accent, (v as Record<string, unknown>).fg] : null;
+  if (!list || list.length !== 3) return "invalid";
+  const out = list.map((c) => {
+    const s = String(c ?? "").trim();
+    const short = /^#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])$/.exec(s);
+    return short ? `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}`.toLowerCase() : HEX.test(s) ? s.toLowerCase() : null;
+  });
+  if (out.some((c) => !c)) return "invalid";
+  return { bg: out[0]!, accent: out[1]!, fg: out[2]! };
 }
 
 const PALETTES = [
@@ -120,7 +175,9 @@ export function coverHtml(spec: CoverSpec, c: CoverInput): string {
   const spineLeft = BLEED + w;
   const frontLeft = BLEED + w + spec.spine;
   const titleSize = c.title.length > 40 ? 26 : c.title.length > 22 ? 32 : 40;
-  const front = c.image
+  const front = c.image && c.finished
+    ? `<div class="front" style="left:${frontLeft}in;width:${w + BLEED}in"><img src="${xmlEsc(c.image)}" alt=""></div>`
+    : c.image
     ? `<div class="front" style="left:${frontLeft}in;width:${w + BLEED}in"><img src="${xmlEsc(c.image)}" alt="">` +
       `<div class="band top"><h1 style="font-size:${titleSize}pt">${xmlEsc(c.title)}</h1>${c.subtitle ? `<p class="sub">${xmlEsc(c.subtitle)}</p>` : ""}</div>` +
       `<div class="band bottom"><p class="author">${xmlEsc(c.author)}</p></div></div>`

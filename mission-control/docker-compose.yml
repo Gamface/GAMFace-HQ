@@ -158,10 +158,19 @@ services:
       # Free stock photos and clips for themed music videos (pexels.com/api, pixabay.com/api/docs)
       PEXELS_API_KEY: ${PEXELS_API_KEY:-}
       PIXABAY_API_KEY: ${PIXABAY_API_KEY:-}
+      # Your Music folder's path on the PC, so a path you type (C:\Users\you\Music\Song.mp3) finds the file
+      IMPORT_HOST_DIR: ${MUSIC_DIR:-}
+      PICTURES_HOST_DIR: ${PICTURES_DIR:-}
+      DOWNLOADS_HOST_DIR: ${DOWNLOADS_DIR:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./data/studio:/data
+      # The Music folder Jarvis and the Studio page can add songs from, read-only (MUSIC_DIR in .env)
+      - ${MUSIC_DIR:-./data/music}:/import:ro
+      # Pictures and Downloads, for the picture tools (PICTURES_DIR, DOWNLOADS_DIR in .env)
+      - ${PICTURES_DIR:-./data/shared-pictures}:/import-pictures:ro
+      - ${DOWNLOADS_DIR:-./data/shared-downloads}:/import-downloads:ro
     networks: [render, studio-out]
     restart: unless-stopped
 

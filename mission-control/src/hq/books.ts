@@ -23,7 +23,9 @@ import type { EpubInput } from "./epub";
 import { TRIM_INCHES, interiorPageCss, listingPrompt, parseListing } from "./kdp";
 import type { KdpTrim, Listing } from "./kdp";
 import { renderMarkdown } from "./markdown";
-import { PUZZLE_CSS, answerHtml, clueText, answerRows, makePuzzle, puzzleFacts, puzzleHtml, puzzleSize } from "./puzzles";
+import { cleanPalette } from "./kdp";
+import { PUZZLE_CSS, answerHtml, clueText, answerRows, isActivity, makePuzzle, puzzleFacts, puzzleHtml, puzzleReady, puzzleSize } from "./puzzles";
+import { WS_WORDS } from "./activity";
 import type { Category, Difficulty, Puzzle, PuzzleType } from "./puzzles";
 import { MAX_SOURCES_CHARS, chunkSources, rankChunks } from "./sources";
 import type { Chunk, Source } from "./sources";
@@ -87,6 +89,10 @@ export interface Book {
   failures?: number;
   /** An uploaded picture used as the cover */
   cover?: string;
+  /** The cover picture is a finished cover with its own title and author (nothing is printed over it) */
+  coverHasText?: boolean;
+  /** Colours for the paperback's back, spine and title band (else picked from the title) */
+  coverColors?: { bg: string; fg: string; accent: string };
   /** A stable id for the EPUB */
   uuid: string;
   createdAt: number;
@@ -187,9 +193,12 @@ export function newBook(input: Record<string, unknown>, now = Date.now()): Book 
   if (input.faithful !== undefined) book.faithful = input.faithful !== false;
   if (kind === "picture") book.art = { style: str(input.artStyle, 300), characters: "", seed: hash32(uuid) % 2 ** 31, off: input.pictures === false ? true : undefined };
   if (kind === "puzzle") {
-    const type: PuzzleType = input.puzzleType === "logic" ? "logic" : "mystery";
+    const type: PuzzleType = (["logic", "wordsearch", "sudoku"] as const).find((x) => x === input.puzzleType) ?? "mystery";
     const difficulty: Difficulty = (["easy", "medium", "hard"] as const).find((x) => x === input.difficulty) ?? "medium";
     book.puzzle = { type, difficulty };
+    // A word search opens with a short themed intro; a sudoku has no words at all
+    if (type === "wordsearch" && input.chapterWords === undefined) book.chapterWords = 60;
+    if (type === "sudoku") book.chapterWords = 0;
   }
   return book;
 }
@@ -232,6 +241,12 @@ export function editBook(book: Book, input: Record<string, unknown>): string | n
   if (input.chapterWords !== undefined) book.chapterWords = int(input.chapterWords, d.minWords, d.maxWords, book.chapterWords);
   if (input.cover === null || input.cover === "") book.cover = undefined;
   else if (typeof input.cover === "string") book.cover = input.cover;
+  if (typeof input.coverHasText === "boolean") book.coverHasText = input.coverHasText;
+  if (input.coverColors !== undefined) {
+    const c = cleanPalette(input.coverColors);
+    if (c === "invalid") return "Cover colours are three #rrggbb colours: background, accent, text";
+    book.coverColors = c ?? undefined;
+  }
   if (typeof input.faithful === "boolean") book.faithful = input.faithful;
   if (typeof input.trim === "string" && input.trim in TRIMS) book.trim = input.trim as Trim;
   if (input.art && typeof input.art === "object" && book.art) {
@@ -288,7 +303,7 @@ export function rewriteChapter(book: Book, n: number, note?: string, part: "text
   } else if (part === "puzzle") {
     if (book.kind !== "puzzle") return "Only puzzle books have puzzles";
     // A new seed gives a different puzzle with the same people and places
-    if (ch.puzzle) ch.puzzle = { ...ch.puzzle, seed: (ch.puzzle.seed * 31 + 7) % 2 ** 31, clues: [], solution: [] };
+    if (ch.puzzle) ch.puzzle = { ...ch.puzzle, seed: (ch.puzzle.seed * 31 + 7) % 2 ** 31, clues: [], solution: [], grid: undefined, placed: undefined, givens: undefined, answer: undefined };
     ch.text = undefined;
     ch.words = undefined;
   } else {
@@ -320,7 +335,8 @@ function stepFor(book: Book, c: Chapter, n: number): BookStep | null {
     if (!c.image && !book.art?.off) return { kind: "illustrate", n };
     return null;
   }
-  if (book.kind === "puzzle") return !c.text || !c.puzzle?.clues.length ? { kind: "chapter", n } : null;
+  // A sudoku is only its grid; every other puzzle has a story (or a word search's short intro)
+  if (book.kind === "puzzle") return (!c.text && book.puzzle?.type !== "sudoku") || !puzzleReady(c.puzzle) ? { kind: "chapter", n } : null;
   if (!c.text) return { kind: "chapter", n };
   if ((c.parts ?? 1) < MAX_PARTS && (c.words ?? countWords(c.text)) < book.chapterWords * SHORT) return { kind: "continue", n };
   if (!c.summary) return { kind: "summary", n };
@@ -374,7 +390,7 @@ export function describeStep(book: Book, step: BookStep): string {
 
 // --- Prompts ----------------------------------------------------------------------
 
-const label = (book: Book) => ({ novel: "novel", ebook: "nonfiction ebook", picture: "children's picture book", puzzle: `${book.puzzle?.type === "logic" ? "logic puzzle" : "murder mystery puzzle"} book` })[book.kind];
+const label = (book: Book) => ({ novel: "novel", ebook: "nonfiction ebook", picture: "children's picture book", puzzle: `${{ logic: "logic puzzle", mystery: "murder mystery puzzle", wordsearch: "word search", sudoku: "sudoku" }[book.puzzle?.type ?? "mystery"]} book` })[book.kind];
 const planName = (book: Book) => (book.kind === "novel" ? "STORY BIBLE" : book.kind === "picture" ? "CHARACTER AND STYLE SHEET" : "BOOK PLAN");
 
 function briefBlock(book: Book): string {
@@ -382,7 +398,7 @@ function briefBlock(book: Book): string {
     book.kind === "picture"
       ? `Length: ${book.chapterCount} illustrated pages, about ${book.chapterWords} words of text on each`
       : book.kind === "puzzle"
-        ? `Length: ${book.chapterCount} ${book.puzzle?.difficulty ?? "medium"} puzzles, each with a story of about ${book.chapterWords} words`
+        ? `Length: ${book.chapterCount} ${book.puzzle?.difficulty ?? "medium"} puzzles, ${book.puzzle?.type === "wordsearch" ? `each with a short themed intro of about ${book.chapterWords} words` : book.puzzle?.type === "sudoku" ? "one per page" : `each with a story of about ${book.chapterWords} words`}`
         : `Length: ${book.chapterCount} chapters of about ${book.chapterWords} words (${(book.chapterCount * book.chapterWords).toLocaleString("en-US")} words in all)`;
   return [
     book.title && `Working title: ${book.title}${book.subtitle ? ` — ${book.subtitle}` : ""}`,
@@ -425,7 +441,9 @@ export function biblePrompt(book: Book, budget = 16000): ChatMessage[] {
     book.kind === "novel"
       ? "## Logline (one sentence)\n## Characters (3–8: name — role, what they want, their flaw, how they talk)\n## Setting (time, place, rules of the world)\n## Themes\n## Style guide (point of view, tense, tone, prose rules to follow in every chapter)\n## Arc (beginning, midpoint, climax and how it ends: plan the ending now)"
       : book.kind === "puzzle"
-        ? `## Theme (the world the puzzles share)\n## Tone (cosy, gothic, comic, noir…)\n## ${book.puzzle?.type === "logic" ? "Host (who presents the puzzles, and how)" : "Detective (who investigates, how they talk)"}\n## Settings (ideas for ${book.chapterCount} different scenes, one line each)\n## Style guide (reading level, length and feel of each story)`
+        ? book.puzzle?.type === "wordsearch"
+          ? `## Theme (what the whole book is about)\n## Audience (age, reading level)\n## Topics (${book.chapterCount} different topics within the theme, one line each)\n## Style guide (tone of the short intros)`
+          : `## Theme (the world the puzzles share)\n## Tone (cosy, gothic, comic, noir…)\n## ${book.puzzle?.type === "logic" ? "Host (who presents the puzzles, and how)" : "Detective (who investigates, how they talk)"}\n## Settings (ideas for ${book.chapterCount} different scenes, one line each)\n## Style guide (reading level, length and feel of each story)`
         : "## Reader promise (what the reader can do or understand after reading)\n## Audience (who they are, what they already know, what they struggle with)\n## Voice and style (tone, reading level, how examples and exercises are used)\n## Key terms (the words this book uses, defined once)\n## Chapter pattern (what every chapter contains, in order)\n## Arc (how the chapters build from first steps to the outcome)";
   const src = sourceBlock(book, Math.max(3000, budget - 3000));
   return [
@@ -470,7 +488,9 @@ export function outlinePrompt(book: Book, budget = 16000): ChatMessage[] {
   if (book.kind === "puzzle") {
     const { n } = puzzleSize(book.puzzle?.type ?? "mystery", book.puzzle?.difficulty ?? "medium");
     const shape =
-      book.puzzle?.type === "logic"
+      book.puzzle?.type === "wordsearch"
+        ? `{"title": "the book's title", "puzzles": [{"title": "the topic", "theme": "one sentence", "words": [${WS_WORDS[book.puzzle.difficulty]} single words or short names on the topic, letters only, at most ${{ easy: 12, medium: 15, hard: 17 }[book.puzzle.difficulty]} letters each]}]}`
+        : book.puzzle?.type === "logic"
         ? `{"title": "the book's title", "puzzles": [{"title": "…", "scenario": "one sentence", "people": [${n} first names], "categories": [{"name": "e.g. Pet", "verb": "e.g. owns", "items": [${n} items]}, {"name": "…", "verb": "…", "items": [${n} items]}]}]}`
         : `{"title": "the book's title", "puzzles": [{"title": "…", "setting": "one sentence", "victim": "name and who they were", "suspects": [{"name": "…", "role": "a few words"}] (exactly ${n}), "places": [${n} rooms or places, each starting with "the"], "items": [${n} possible weapons, each starting with "the"]}]}`;
     return [
@@ -572,10 +592,17 @@ function writerSystem(book: Book): string {
         ? ["You write the text of children's picture books: simple, warm, rhythmic sentences that read aloud well.", "Write only the page's text: no labels, no picture descriptions."]
         : book.kind === "puzzle"
           ? [
-              "You write the short story that opens each puzzle in a puzzle book.",
-              "Write only the story in Markdown: no heading, no clues list, no solution, no grid (those are added for you).",
-              "Introduce the setting and every person named, in character. Don't state or hint at who did what: the reader works that out from the clues that follow.",
-              "End by inviting the reader to solve it.",
+              ...(book.puzzle?.type === "wordsearch"
+                ? [
+                    "You write the short, friendly introduction above each word search in a puzzle book: a fun fact or two about the topic.",
+                    "Write only the introduction in plain text: no heading, no word list, no grid (those are added for you).",
+                  ]
+                : [
+                    "You write the short story that opens each puzzle in a puzzle book.",
+                    "Write only the story in Markdown: no heading, no clues list, no solution, no grid (those are added for you).",
+                    "Introduce the setting and every person named, in character. Don't state or hint at who did what: the reader works that out from the clues that follow.",
+                    "End by inviting the reader to solve it.",
+                  ]),
             ]
           : [
               "You are an expert nonfiction author writing one chapter of an ebook at a time.",
@@ -642,8 +669,11 @@ export function chapterPrompt(book: Book, n: number, budget: number): ChatMessag
       {
         role: "user",
         content:
-          `PUZZLE ${n + 1}: ${ch.title}\nScene: ${ch.beats}\n${ch.puzzle ? puzzleFacts(ch.puzzle) : ""}\n\n` +
-          `Write the story that sets up this puzzle, about ${book.chapterWords} words.${ch.note ? ` Author's note: ${ch.note}` : ""}`,
+          `PUZZLE ${n + 1}: ${ch.title}\n${book.puzzle?.type === "wordsearch" ? "Topic" : "Scene"}: ${ch.beats}\n${ch.puzzle ? puzzleFacts(ch.puzzle) : ""}\n\n` +
+          (book.puzzle?.type === "wordsearch"
+            ? `Write the introduction, about ${book.chapterWords} words.`
+            : `Write the story that sets up this puzzle, about ${book.chapterWords} words.`) +
+          (ch.note ? ` Author's note: ${ch.note}` : ""),
       },
     ];
   }
@@ -784,6 +814,11 @@ export async function runStep(book: Book, step: BookStep, model: BookModel, sign
       return;
     }
     case "bible": {
+      if (book.kind === "puzzle" && book.puzzle?.type === "sudoku") {
+        // Nothing for a model to plan: the grids are made in code
+        book.bible = `## Sudoku\n${book.chapterCount} ${book.puzzle.difficulty} sudoku puzzles, one per page, with the answers at the back.\n\n## Brief\n${book.brief}`;
+        return;
+      }
       if (book.kind === "picture") {
         const out = await model.json(pictureBiblePrompt(book));
         const j = out.json;
@@ -805,6 +840,11 @@ export async function runStep(book: Book, step: BookStep, model: BookModel, sign
       return;
     }
     case "outline": {
+      if (book.kind === "puzzle" && book.puzzle?.type === "sudoku") {
+        book.chapters = Array.from({ length: book.chapterCount }, (_, i) => ({ title: `Sudoku ${i + 1}`, beats: "" }));
+        book.stage = "review";
+        return;
+      }
       const out = await model.json(outlinePrompt(book, budget));
       if (book.kind === "picture") {
         const parsed = parsePages(out.json, book.chapterCount);
@@ -816,10 +856,23 @@ export async function runStep(book: Book, step: BookStep, model: BookModel, sign
         if (!list.length) throw new Error("The model designed no puzzles");
         const chapters: Chapter[] = [];
         for (const [i, p] of list.entries()) {
+          const seed = hash32(`${book.uuid}:${i}`) % 2 ** 31;
+          if (book.puzzle!.type === "wordsearch") {
+            const words = Array.isArray(p?.words) ? p.words : [];
+            let puzzle;
+            try {
+              puzzle = await makePuzzle("wordsearch", book.puzzle!.difficulty, [], seed, { words });
+            } catch {
+              continue; // too few usable words: the outline keeps the others
+            }
+            chapters.push({ title: str(p?.title, 200) || `Word search ${i + 1}`, beats: str(p?.theme, 600), puzzle });
+            continue;
+          }
           const { cats, victim, roles } = puzzleCategories(book, p ?? {});
-          const puzzle = await makePuzzle(book.puzzle!.type, book.puzzle!.difficulty, cats, hash32(`${book.uuid}:${i}`) % 2 ** 31, { victim, roles });
+          const puzzle = await makePuzzle(book.puzzle!.type, book.puzzle!.difficulty, cats, seed, { victim, roles });
           chapters.push({ title: str(p?.title, 200) || `Puzzle ${i + 1}`, beats: str(p?.setting ?? p?.scenario, 600), puzzle });
         }
+        if (!chapters.length) throw new Error("The model's puzzles had too few usable words");
         book.chapters = chapters;
         if (!book.title && str(out.json.title, 200)) book.title = str(out.json.title, 200);
       } else {
@@ -836,16 +889,21 @@ export async function runStep(book: Book, step: BookStep, model: BookModel, sign
     case "chapter": {
       const ch = book.chapters[step.n];
       // A puzzle added by hand, or one asked to be made again, is made before its story
-      if (book.kind === "puzzle" && !ch.puzzle?.clues.length) {
+      if (book.kind === "puzzle" && !puzzleReady(ch.puzzle)) {
         const old = ch.puzzle;
         ch.puzzle = await makePuzzle(book.puzzle!.type, book.puzzle!.difficulty, old?.categories ?? [], old?.seed ?? hash32(`${book.uuid}:${step.n}:${Date.now()}`) % 2 ** 31, {
           victim: old?.crime?.victim,
           roles: old?.roles,
+          words: old?.words,
         });
+      }
+      if (book.kind === "puzzle" && book.puzzle?.type === "sudoku") {
+        Object.assign(ch, { text: ch.text ?? "", words: 0, parts: 1 });
+        return;
       }
       const out = await model.write(chapterPrompt(book, step.n, budget), signal, onToken);
       const text = cleanChapter(out.text, ch.title);
-      const min = book.kind === "picture" ? 1 : book.kind === "puzzle" ? 20 : 50;
+      const min = book.kind === "picture" ? 1 : book.kind === "puzzle" ? (book.puzzle?.type === "wordsearch" ? 8 : 20) : 50;
       if (countWords(text) < min) throw new Error(`${book.kind === "picture" ? "Page" : book.kind === "puzzle" ? "The story for puzzle" : "Chapter"} ${step.n + 1} came back empty`);
       Object.assign(ch, { text, words: countWords(text), parts: 1, summary: undefined, model: out.ref });
       return;
@@ -958,7 +1016,7 @@ export function bookSummary(book: Book) {
     ...rest,
     words,
     target: book.chapterCount * book.chapterWords,
-    written: chapters.filter((c, i) => c.text && !stepFor(book, c, i)).length,
+    written: chapters.filter((c, i) => (c.text || (c.puzzle && puzzleReady(c.puzzle))) && !stepFor(book, c, i)).length,
     chapterTotal: chapters.length,
     sourceCount: sources?.length ?? 0,
     next: step ? describeStep(book, step) : null,
@@ -972,10 +1030,11 @@ export function bookDetail(book: Book) {
     ...book,
     // Puzzles as the page shows them: the clues in words, and the answer
     chapters: book.chapters.map(({ puzzle, ...c }) =>
-      puzzle?.clues.length
+      puzzle && puzzleReady(puzzle)
         ? {
             ...c,
             puzzleView: {
+              ...(puzzle.type === "wordsearch" ? { grid: puzzle.grid, words: puzzle.words } : puzzle.type === "sudoku" ? { givens: puzzle.givens } : {}),
               categories: puzzle.categories.map((x) => `${x.name}: ${x.items.join(", ")}`),
               clues: puzzle.clues.map((cl) => clueText(puzzle, cl)),
               crime: puzzle.crime ? `${puzzle.crime.victim} was found in ${puzzle.categories[1].items[puzzle.crime.place]}, killed with ${puzzle.categories[2].items[puzzle.crime.item]}.` : undefined,
@@ -1005,16 +1064,25 @@ const slug = (s: string) =>
 
 export const bookFileName = (book: Book, ext: string) => `${slug(book.title || "untitled")}.${ext}`;
 
-const written = (book: Book) => book.chapters.map((c, i) => ({ ...c, i })).filter((c) => c.text?.trim() || c.image);
+const written = (book: Book) => book.chapters.map((c, i) => ({ ...c, i })).filter((c) => c.text?.trim() || c.image || (c.puzzle && puzzleReady(c.puzzle)));
+/** Whether any part of a book is made yet (text, a picture, or a puzzle) */
+export const hasContent = (book: Book) => written(book).length > 0;
 const unitLabel = (book: Book, i: number, title: string) => (book.kind === "novel" ? `Chapter ${i + 1}: ${title}` : book.kind === "puzzle" ? `${i + 1}. ${title}` : title);
 
 /** The whole manuscript as Markdown. */
+const sudokuText = (cells: number[]) =>
+  Array.from({ length: 9 }, (_, r) => Array.from({ length: 9 }, (_, c) => cells[r * 9 + c] || ".").join(" ").replace(/(\S \S \S) /g, "$1 | ").replace(/ \| $/, "")).map((l, r) => (r % 3 === 2 && r < 8 ? `${l}\n------+-------+------` : l)).join("\n");
+const dirName = (dr: number, dc: number) => ({ "0,1": "across", "1,0": "down", "1,1": "down-right", "-1,1": "up-right", "0,-1": "backwards", "-1,0": "up", "-1,-1": "up-left", "1,-1": "down-left" } as Record<string, string>)[`${dr},${dc}`] ?? "";
+
 export function bookMarkdown(book: Book): string {
   const head = [`# ${book.title || "Untitled"}`, book.subtitle ? `*${book.subtitle}*` : "", `by ${book.author}`].filter(Boolean).join("\n\n");
   const body = written(book).map((c) => {
     if (book.kind === "picture") return `## Page ${c.i + 1}\n\n${c.text ?? ""}\n\n*[Picture: ${c.beats}]*`;
     let md = `## ${unitLabel(book, c.i, c.title)}\n\n${(c.text ?? "").trim()}`;
-    if (c.puzzle?.clues.length) {
+    if (c.puzzle && puzzleReady(c.puzzle) && isActivity(c.puzzle.type)) {
+      const p = c.puzzle;
+      md += p.type === "wordsearch" ? `\n\n\`\`\`\n${(p.grid ?? []).map((r) => [...r].join(" ")).join("\n")}\n\`\`\`\n\nFind: ${(p.words ?? []).join(", ")}` : `\n\n\`\`\`\n${sudokuText(p.givens ?? [])}\n\`\`\``;
+    } else if (c.puzzle && puzzleReady(c.puzzle)) {
       const p = c.puzzle;
       md += `\n\n${puzzleFacts(p)
         .split("\n")
@@ -1025,11 +1093,13 @@ export function bookMarkdown(book: Book): string {
     return md;
   });
   let md = `${head}\n\n${body.join("\n\n")}\n`;
-  const answers = written(book).filter((c) => c.puzzle?.clues.length);
+  const answers = written(book).filter((c) => puzzleReady(c.puzzle));
   if (answers.length) {
     md += `\n## Answer key\n\n${answers
       .map((c) => {
         const p = c.puzzle!;
+        if (p.type === "sudoku") return `### ${c.i + 1}. ${c.title}\n\n\`\`\`\n${sudokuText(p.answer ?? [])}\n\`\`\``;
+        if (p.type === "wordsearch") return `### ${c.i + 1}. ${c.title}\n\n${(p.placed ?? []).map((w) => `- ${w.word}: row ${w.r + 1}, column ${w.c + 1}, ${dirName(w.dr, w.dc)}`).join("\n")}`;
         const rows = answerRows(p);
         return `### ${c.i + 1}. ${c.title}\n\n${p.crime ? `**${p.categories[0].items[p.crime.culprit]} did it.**\n\n` : ""}| ${p.categories.map((x) => x.name).join(" | ")} |\n| ${p.categories.map(() => "---").join(" | ")} |\n${rows.map((r) => `| ${r.join(" | ")} |`).join("\n")}`;
       })
@@ -1066,11 +1136,11 @@ export function bookEpub(book: Book, cover?: EpubInput["cover"], loadImage: Imag
       body += `<p class="page-text">${xmlEsc(c.text ?? "")}</p>`;
     } else {
       body += chapterHtml(c.text ?? "");
-      if (c.puzzle?.clues.length) body += puzzleHtml(c.puzzle);
+      if (c.puzzle && puzzleReady(c.puzzle)) body += puzzleHtml(c.puzzle);
     }
     return { title: book.kind === "picture" ? `Page ${c.i + 1}` : unitLabel(book, c.i, c.title), xhtml: toXhtml(body) };
   });
-  const answers = written(book).filter((c) => c.puzzle?.clues.length);
+  const answers = written(book).filter((c) => puzzleReady(c.puzzle));
   if (answers.length) chapters.push({ title: "Answer key", xhtml: toXhtml(`<h1>Answer key</h1>${answers.map((c) => answerHtml(c.puzzle!, c.title, c.i + 1)).join("")}`) });
   return buildEpub({
     title: book.title || "Untitled",
@@ -1152,7 +1222,7 @@ export function bookHtml(book: Book, opts: PrintOptions = {}): string {
     );
   }
 
-  const answers = chapters.filter((c) => c.puzzle?.clues.length);
+  const answers = chapters.filter((c) => puzzleReady(c.puzzle));
   return (
     head +
     coverPage +
@@ -1160,7 +1230,7 @@ export function bookHtml(book: Book, opts: PrintOptions = {}): string {
     (chapters.length > 1
       ? `<nav class="toc"><h1>Contents</h1><ol>${chapters.map((c) => `<li>${book.kind === "novel" || book.kind === "puzzle" ? `${c.i + 1}. ` : ""}${xmlEsc(c.title)}</li>`).join("")}${answers.length ? "<li>Answer key</li>" : ""}</ol></nav>`
       : "") +
-    chapters.map((c) => `<section class="chapter">${chapterHeading(book, c.i, c.title)}${chapterHtml(c.text ?? "")}${c.puzzle?.clues.length ? puzzleHtml(c.puzzle) : ""}</section>`).join("") +
+    chapters.map((c) => `<section class="chapter">${chapterHeading(book, c.i, c.title)}${chapterHtml(c.text ?? "")}${c.puzzle && puzzleReady(c.puzzle) ? puzzleHtml(c.puzzle) : ""}</section>`).join("") +
     (answers.length ? `<section class="chapter"><h1>Answer key</h1>${answers.map((c) => answerHtml(c.puzzle!, c.title, c.i + 1)).join("")}</section>` : "") +
     `<div class="blank"></div>`.repeat(pad) +
     `</body></html>`

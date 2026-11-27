@@ -139,6 +139,7 @@ class FakeComfy:
 
     def __init__(self, with_stems=True, ace="ace_step_1.5_turbo_aio.safetensors", split=False, stems_crash=False):
         self.stems_crash = stems_crash
+        self.upscale = True
         self.with_stems = with_stems
         self.ace = ace
         self.split = split
@@ -173,6 +174,8 @@ class FakeComfy:
                         "DualCLIPLoader": ("clip_name1", ["qwen_3_4b.safetensors", "qwen_0.6b_ace15.safetensors", "qwen_1.7b_ace15.safetensors"]),
                         "VAELoader": ("vae_name", ["ae.safetensors", "ace_1.5_vae.safetensors"]),
                     }
+                    if node == "UpscaleModelLoader" and outer.upscale:
+                        return self.reply(200, {node: {"input": {"required": {"model_name": [["RealESRGAN_x4plus.pth"]]}}}})
                     if node in split and outer.split:
                         field, files = split[node]
                         return self.reply(200, {node: {"input": {"required": {field: [files]}}}})

@@ -76,6 +76,11 @@ export function toolMedia(raw: unknown): ToolMedia[] {
     .slice(0, 4);
 }
 
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([p, new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`It took longer than ${Math.round(ms / 1000)} s`)), ms)))]).finally(() => clearTimeout(timer));
+}
+
 /** "demo.echo" → { server: "demo", tool: "echo" } */
 export function splitToolName(full: string): { server: string; tool: string } | null {
   const m = /^([a-z0-9][a-z0-9_-]{0,40})\.(.+)$/.exec(full.trim());
@@ -116,10 +121,41 @@ export function refuseFromHost(host: string, resolve: (h: string) => Promise<str
   return Object.assign(middleware, { ready });
 }
 
+/**
+ * Tools that run inside the harness itself instead of the tools service (the music studio's,
+ * which only the harness can reach). Same rules: read-only ones just run, the others only after
+ * the user approves the call.
+ */
+export interface LocalTool extends Omit<ToolInfo, "server" | "notes" | "timeoutMs"> {
+  run: (args: Record<string, unknown>) => Promise<{ text: string; isError?: boolean; media?: ToolMedia[] }>;
+}
+export interface LocalToolServer {
+  name: string;
+  description: string;
+  notes?: string;
+  timeoutMs?: number;
+  tools: LocalTool[];
+}
+
 export class ToolsClient {
   private cache: { at: number; servers: ToolServer[] } | null = null;
 
-  constructor(private base: string) {}
+  /** `base` is the tools service ("" for none); `local` are the harness's own tool servers */
+  constructor(
+    private base: string,
+    private local: LocalToolServer[] = [],
+  ) {}
+
+  private localServers(): ToolServer[] {
+    return this.local.map((s) => ({
+      name: s.name,
+      description: s.description,
+      ok: true,
+      ...(s.notes ? { notes: s.notes } : {}),
+      ...(s.timeoutMs ? { timeoutMs: s.timeoutMs } : {}),
+      tools: s.tools.map(({ run: _run, ...t }) => ({ ...t, server: s.name, ...(s.notes ? { notes: s.notes } : {}), ...(s.timeoutMs ? { timeoutMs: s.timeoutMs } : {}) })),
+    }));
+  }
 
   private async request<T>(route: string, init: RequestInit, timeoutMs: number): Promise<T> {
     let r: Response;
@@ -134,6 +170,7 @@ export class ToolsClient {
   }
 
   async health(): Promise<{ ok: boolean; servers: { name: string; ok: boolean; error?: string }[] } | null> {
+    if (!this.base) return this.local.length ? { ok: true, servers: this.local.map((s) => ({ name: s.name, ok: true })) } : null;
     try {
       return await this.request("/health", {}, 4000);
     } catch {
@@ -141,14 +178,26 @@ export class ToolsClient {
     }
   }
 
-  /** Every enabled server and its tools (kept for a minute). */
+  /** Every enabled server and its tools (kept for a minute). The harness's own come first. */
   async list(fresh = false): Promise<ToolServer[]> {
     if (!fresh && this.cache && Date.now() - this.cache.at < 60_000) return this.cache.servers;
-    const out = await this.request<{ servers: (Omit<ToolServer, "tools"> & { tools: Omit<ToolInfo, "server">[] })[] }>("/tools", {}, 45_000);
-    const servers = out.servers.map((s) => ({
-      ...s,
-      tools: s.tools.map((t) => ({ ...t, server: s.name, ...(s.notes ? { notes: s.notes } : {}), ...(s.timeoutMs ? { timeoutMs: s.timeoutMs } : {}) })),
-    }));
+    let remote: ToolServer[] = [];
+    if (this.base) {
+      try {
+        const out = await this.request<{ servers: (Omit<ToolServer, "tools"> & { tools: Omit<ToolInfo, "server">[] })[] }>("/tools", {}, 45_000);
+        remote = out.servers
+          .filter((s) => !this.local.some((l) => l.name === s.name))
+          .map((s) => ({
+            ...s,
+            tools: s.tools.map((t) => ({ ...t, server: s.name, ...(s.notes ? { notes: s.notes } : {}), ...(s.timeoutMs ? { timeoutMs: s.timeoutMs } : {}) })),
+          }));
+      } catch (e) {
+        // The harness's own tools still work while the tools service is down
+        if (!this.local.length) throw e;
+        return this.localServers();
+      }
+    }
+    const servers = [...this.localServers(), ...remote];
     this.cache = { at: Date.now(), servers };
     return servers;
   }
@@ -168,6 +217,17 @@ export class ToolsClient {
     const timeoutMs = opts.timeoutMs ?? info.timeoutMs ?? 60_000;
     const allowChange = !info.readOnly && opts.approved === true;
     if (!info.readOnly && !allowChange) throw new Error(`${server}.${tool} changes things, so it needs your approval first`);
+    const own = this.local.find((s) => s.name === server)?.tools.find((t) => t.name === tool);
+    if (own) {
+      const started = Date.now();
+      try {
+        const out = await withTimeout(own.run(args), timeoutMs);
+        const media = toolMedia(out.media);
+        return { text: cleanToolText(out.text), isError: Boolean(out.isError), ms: Date.now() - started, ...(media.length ? { media } : {}) };
+      } catch (e) {
+        return { text: cleanToolText(e instanceof Error ? e.message : String(e)), isError: true, ms: Date.now() - started };
+      }
+    }
     const out = await this.request<Omit<ToolResult, "media"> & { media?: unknown }>(
       "/call",
       { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server, tool, args, timeoutMs, ...(allowChange ? { allowChange } : {}) }) },

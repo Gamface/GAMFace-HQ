@@ -14,6 +14,11 @@ export interface PuzzleView {
   answer?: string;
   rows: string[][];
   difficulty: string;
+  /** Word searches */
+  grid?: string[];
+  words?: string[];
+  /** Sudoku (0 = blank) */
+  givens?: number[];
 }
 
 export interface Chapter {
@@ -68,13 +73,15 @@ export interface Book {
   bible: string;
   chapters: Chapter[];
   cover?: string;
+  coverHasText?: boolean;
+  coverColors?: { bg: string; fg: string; accent: string };
   running: { label: string; text: string; startedAt: number } | null;
   sources: SourceInfo[];
   sourceParts: number;
   digested: number;
   faithful?: boolean;
   art?: { style: string; characters: string; seed: number; off?: boolean };
-  puzzle?: { type: "logic" | "mystery"; difficulty: "easy" | "medium" | "hard" };
+  puzzle?: { type: "logic" | "mystery" | "wordsearch" | "sudoku"; difficulty: "easy" | "medium" | "hard" };
   trim?: string;
   listing?: Listing;
   wantListing?: boolean;

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getJson, send } from "../api";
 import { HARNESS_URL } from "../config";
+import PictureStudio from "./PictureStudio";
 import VideoStudio from "./VideoStudio";
 
 // The music studio: add songs (or write new ones with ACE-Step on the graphics card), split them
@@ -17,12 +18,15 @@ interface Health {
   rubberband: boolean;
   voice: boolean;
   stock?: { pexels: boolean; pixabay: boolean };
+  importFolder?: boolean;
+  sharedFolders?: string[];
+  upscaleModels?: string[];
 }
 
 interface Song {
   id: string;
   title: string;
-  source: "upload" | "ace-step";
+  source: "upload" | "ace-step" | "vocals";
   status: "new" | "splitting" | "ready" | "failed";
   stems: string[];
   splitBy?: "gpu" | "cpu";
@@ -31,6 +35,7 @@ interface Song {
   bpm?: number;
   key?: string;
   prompt?: string;
+  lyrics?: string;
   createdAt: number;
 }
 
@@ -181,7 +186,7 @@ function StemsMixer({ song }: { song: Song }) {
 
 // --- The tools for one song ---------------------------------------------------------------
 
-function SongTools({ song, health, onJob }: { song: Song; health: Health | null; onJob: () => void }) {
+function SongTools({ song, health, onJob, splitQueued }: { song: Song; health: Health | null; onJob: () => void; splitQueued: boolean }) {
   const [tab, setTab] = useState<Tab>("stems");
   const [muted, setMuted] = useState<string[]>([]);
   const [speed, setSpeed] = useState(100);
@@ -216,8 +221,15 @@ function SongTools({ song, health, onJob }: { song: Song; health: Health | null;
               Try again
             </button>
           </>
-        ) : (
+        ) : song.status === "splitting" || splitQueued ? (
           <p>{song.status === "splitting" ? "Splitting into stems…" : "Waiting to be split into stems…"} {health?.gpuStems ? "(graphics card)" : "(CPU)"}</p>
+        ) : (
+          <>
+            <p>Not split into stems yet. Stems are for the mixer, practice tracks, karaoke, sheet music and DAW exports; adding vocals doesn't need them.</p>
+            <button disabled={busy} onClick={() => void submit({ type: "split" })} className={quiet}>
+              Split into stems
+            </button>
+          </>
         )}
       </div>
     );
@@ -339,6 +351,128 @@ function SongTools({ song, health, onJob }: { song: Song; health: Health | null;
   );
 }
 
+// --- Add vocals: lyrics sung over an instrumental (ACE-Step 1.5) ---------------------------
+
+function AddVocals({ song, health, onJob }: { song: Song; health: Health | null; onJob: () => void }) {
+  const [theme, setTheme] = useState("");
+  const [style, setStyle] = useState("");
+  const [lyrics, setLyrics] = useState("");
+  const [strength, setStrength] = useState(0.55);
+  const [busy, setBusy] = useState<"" | "write" | "sing">("");
+  const [msg, setMsg] = useState<string | null>(null);
+  const write = async () => {
+    setBusy("write");
+    setMsg(null);
+    try {
+      const out = await send<{ lyrics: string }>("POST", "/api/studio/lyrics", { theme, style, title: song.title.replace(/[-_]+/g, " "), seconds: song.duration, bpm: song.bpm, key: song.key });
+      setLyrics(out.lyrics);
+    } catch (e) {
+      setMsg(errText(e));
+    } finally {
+      setBusy("");
+    }
+  };
+  const sing = async () => {
+    setBusy("sing");
+    setMsg(null);
+    try {
+      await send("POST", "/api/studio/jobs", { type: "vocals", song: song.id, lyrics, prompt: style, strength });
+      setMsg(`Singing it on the graphics card: see Jobs below. “${song.title} (vocals)” lands in the library when it's done.`);
+      onJob();
+    } catch (e) {
+      setMsg(errText(e));
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <details className="rounded border border-slate-800 p-3 space-y-3" open={!song.lyrics && song.source !== "ace-step"}>
+      <summary className="text-sm font-medium text-slate-200 cursor-pointer">🎤 Add vocals (lyrics over this track)</summary>
+      {!health?.aceStep && <p className="text-xs text-amber-300">Needs ACE-Step 1.5 in ComfyUI (see New song).</p>}
+      <div className="grid sm:grid-cols-2 gap-3">
+        <label className="block text-xs text-slate-400">
+          What it's about
+          <input value={theme} onChange={(e) => setTheme(e.target.value)} className={`${input} mt-1`} placeholder="loyalty, grinding, the crew that never folds" />
+        </label>
+        <label className="block text-xs text-slate-400">
+          Voice and style
+          <input value={style} onChange={(e) => setStyle(e.target.value)} className={`${input} mt-1`} placeholder="male rapper, gritty, confident" />
+        </label>
+      </div>
+      <label className="block text-xs text-slate-400">
+        <span className="flex items-center gap-2">
+          Lyrics, with [verse], [chorus], [bridge]
+          <button type="button" disabled={Boolean(busy)} onClick={() => void write()} className={`${quiet} ml-auto`}>
+            {busy === "write" ? "Writing…" : lyrics ? "Write new lyrics" : "✍ Write lyrics for me"}
+          </button>
+        </span>
+        <textarea value={lyrics} onChange={(e) => setLyrics(e.target.value)} rows={8} className={`${input} mt-1 font-mono text-xs`} placeholder={"[verse]\nYour words here\n\n[chorus]\nThe hook"} />
+      </label>
+      <label className="block text-xs text-slate-400">
+        How much ACE-Step may rework the music around the vocals: {Math.round(strength * 100)}%
+        <input type="range" min={0.3} max={0.8} step={0.05} value={strength} onChange={(e) => setStrength(Number(e.target.value))} className="w-full" />
+      </label>
+      <p className="text-[11px] text-slate-500">
+        ACE-Step sings the lyrics over this track ({song.bpm ? `${song.bpm} BPM` : "tempo found automatically"}{song.key ? `, ${song.key}` : ""}); its vocals are split out and laid over your original. You also get ACE-Step's own take and the vocals on their own. Lower keeps your beat closer; higher gives the vocals more room.
+      </p>
+      <button disabled={Boolean(busy) || !lyrics.trim() || !health?.aceStep} onClick={() => void sing()} className={primary}>
+        {busy === "sing" ? "Starting…" : "Sing it"}
+      </button>
+      {msg && <p className="text-xs text-slate-400">{msg}</p>}
+    </details>
+  );
+}
+
+// --- Songs from the shared Music folder (MUSIC_DIR) -----------------------------------------
+
+function MusicFolder({ onAdded }: { onAdded: (id: string) => void }) {
+  const [q, setQ] = useState("");
+  const [files, setFiles] = useState<{ path: string; sizeMB: number }[] | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const search = async () => {
+    setMsg(null);
+    try {
+      const out = await getJson<{ files: { path: string; sizeMB: number }[]; error?: string }>(`/api/studio/import?q=${encodeURIComponent(q)}`);
+      setFiles(out.files);
+      if (out.error) setMsg(out.error);
+      else if (!out.files.length) setMsg("Nothing matches.");
+    } catch (e) {
+      setMsg(errText(e));
+    }
+  };
+  const add = async (path: string) => {
+    setMsg(`Adding ${path}…`);
+    try {
+      const s = await send<Song>("POST", "/api/studio/songs/import", { path });
+      setMsg(null);
+      setFiles(null);
+      onAdded(s.id);
+    } catch (e) {
+      setMsg(errText(e));
+    }
+  };
+  return (
+    <div className="px-3 pb-3 space-y-1.5">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void search();
+        }}
+        className="flex gap-1.5"
+      >
+        <input value={q} onChange={(e) => setQ(e.target.value)} className={input} placeholder="Find in Music folder" aria-label="Find in Music folder" />
+        <button className={quiet}>Find</button>
+      </form>
+      {files?.slice(0, 30).map((f) => (
+        <button key={f.path} onClick={() => void add(f.path)} className="w-full text-left text-[11px] text-slate-300 hover:text-cyan-300 truncate" title={`Add ${f.path}`}>
+          + {f.path} <span className="text-slate-600">{f.sizeMB} MB</span>
+        </button>
+      ))}
+      {msg && <p className="text-[11px] text-slate-400">{msg}</p>}
+    </div>
+  );
+}
+
 // --- New song (ACE-Step 1.5 in ComfyUI) ------------------------------------------------
 
 function NewSong({ health, onJob }: { health: Health | null; onJob: () => void }) {
@@ -437,7 +571,7 @@ export default function StudioPage() {
   const [selected, setSelected] = useState<string | "new" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [upload, setUpload] = useState<string | null>(null);
-  const [mode, setMode] = useState<"music" | "video">("music");
+  const [mode, setMode] = useState<"music" | "video" | "pictures">("music");
   const load = useCallback(() => {
     Promise.all([getJson<Health>("/api/studio/health"), getJson<{ songs: Song[] }>("/api/studio/songs"), getJson<{ jobs: Job[] }>("/api/studio/jobs"), getJson<{ outputs: Output[] }>("/api/studio/outputs")])
       .then(([h, s, j, o]) => {
@@ -457,6 +591,8 @@ export default function StudioPage() {
     return () => clearInterval(t);
   }, [load, active]);
   const song = useMemo(() => songs.find((s) => s.id === selected), [songs, selected]);
+  // A split waiting or running for this song (imports can skip the split)
+  const splitting = (id: string) => jobs.some((j) => j.type === "split" && j.params.song === id && (j.status === "queued" || j.status === "running"));
 
   const addFiles = async (files: FileList | null) => {
     for (const file of [...(files ?? [])]) {
@@ -508,6 +644,14 @@ export default function StudioPage() {
           </div>
         </div>
         {upload && <p className="px-3 pb-2 text-xs text-cyan-300">{upload}</p>}
+        {health?.importFolder && (
+          <MusicFolder
+            onAdded={(id) => {
+              setSelected(id);
+              load();
+            }}
+          />
+        )}
         {songs.map((s) => (
           <button key={s.id} onClick={() => setSelected(s.id)} className={`w-full text-left px-3 py-2.5 border-t border-slate-800/70 ${selected === s.id ? "bg-cyan-950/40" : "hover:bg-slate-900"}`}>
             <div className="flex items-center gap-2">
@@ -515,8 +659,14 @@ export default function StudioPage() {
               <span className="text-[10px] text-slate-500">{mmss(s.duration)}</span>
             </div>
             <div className="flex items-center gap-1.5 mt-1">
-              {s.status === "ready" ? s.stems.map((x) => <span key={x} className={`h-1.5 w-4 rounded ${STEM_COLOR[x] ?? "bg-slate-500"}`} title={x} />) : <span className={`text-[11px] ${s.status === "failed" ? "text-rose-300" : "text-cyan-300"}`}>{s.status === "failed" ? "split failed" : "splitting…"}</span>}
-              <span className="text-[10px] text-slate-600 ml-auto">{s.source === "ace-step" ? "ACE-Step" : s.splitBy === "gpu" ? "GPU" : ""}</span>
+              {s.status === "ready" ? (
+                s.stems.map((x) => <span key={x} className={`h-1.5 w-4 rounded ${STEM_COLOR[x] ?? "bg-slate-500"}`} title={x} />)
+              ) : (
+                <span className={`text-[11px] ${s.status === "failed" ? "text-rose-300" : splitting(s.id) || s.status === "splitting" ? "text-cyan-300" : "text-slate-500"}`}>
+                  {s.status === "failed" ? "split failed" : splitting(s.id) || s.status === "splitting" ? "splitting…" : "not split"}
+                </span>
+              )}
+              <span className="text-[10px] text-slate-600 ml-auto">{s.source === "ace-step" ? "ACE-Step" : s.source === "vocals" ? "🎤 vocals" : s.splitBy === "gpu" ? "GPU" : ""}</span>
             </div>
           </button>
         ))}
@@ -532,6 +682,8 @@ export default function StudioPage() {
               <Chip ok={health.gpuStems} label={health.gpuStems ? "Stems on the GPU" : health.gpuStemsError ? "Stems on the CPU (GPU failed)" : "Stems on the CPU"} title={health.gpuStemsError ? `GPU stems are off until the studio restarts: ${health.gpuStemsError}` : "Install tools/comfyui/custom_nodes/mission_control_stems in ComfyUI for the graphics card"} />
               <Chip ok={health.musescore} label="MuseScore" />
               <Chip ok={health.voice} label="Lyrics (Whisper)" />
+              <Chip ok={Boolean(health.upscaleModels?.length)} label="Upscale 4×" title={health.upscaleModels?.length ? health.upscaleModels.join(", ") : "Put RealESRGAN_x4plus.pth in ComfyUI's models\\upscale_models folder"} />
+              <Chip ok={Boolean(health.importFolder)} label="Music folder" title={health.importFolder ? "Jarvis and this page can add songs from your Music folder" : "Set MUSIC_DIR in mission-control/.env to your Music folder, then docker compose up -d studio"} />
             </>
           ) : (
             !error && <span className="text-xs text-slate-500">Checking the studio…</span>
@@ -540,14 +692,16 @@ export default function StudioPage() {
         {error && <p className="text-xs text-rose-300 rounded border border-rose-900 bg-rose-950/40 px-3 py-2">{error}</p>}
 
         <div className="flex gap-1.5" role="tablist" aria-label="Studio mode">
-          {(["music", "video"] as const).map((m) => (
+          {(["music", "video", "pictures"] as const).map((m) => (
             <button key={m} role="tab" aria-selected={mode === m} onClick={() => setMode(m)} className={`${btn} border text-sm ${mode === m ? "border-cyan-600 bg-cyan-950 text-cyan-300" : "border-slate-700 text-slate-400 hover:bg-slate-800"}`}>
-              {m === "music" ? "♪ Music studio" : "▶ Video studio"}
+              {m === "music" ? "♪ Music studio" : m === "video" ? "▶ Video studio" : "🖼 Pictures"}
             </button>
           ))}
         </div>
 
-        {mode === "video" ? (
+        {mode === "pictures" ? (
+          <PictureStudio comfy={Boolean(health?.comfy)} upscaleReady={Boolean(health?.upscaleModels?.length)} folders={health?.sharedFolders ?? []} onJob={load} />
+        ) : mode === "video" ? (
           <VideoStudio songs={songs} onJob={load} comfy={Boolean(health?.comfy)} voice={Boolean(health?.voice)} stockKeys={health?.stock} />
         ) : selected === "new" ? (
           <NewSong health={health} onJob={load} />
@@ -557,7 +711,9 @@ export default function StudioPage() {
               <div className="flex-1 min-w-0">
                 <h2 className="text-xl font-semibold text-slate-100 truncate">{song.title}</h2>
                 <p className="text-xs text-slate-500">
-                  {mmss(song.duration)} · {song.source === "ace-step" ? `written by ACE-Step${song.bpm ? ` · ${song.bpm} BPM` : ""}${song.key ? ` · ${song.key}` : ""}` : "added by you"}
+                  {mmss(song.duration)} · {song.source === "ace-step" ? "written by ACE-Step" : song.source === "vocals" ? "vocals by ACE-Step" : "added by you"}
+                  {song.bpm ? ` · ${song.bpm} BPM` : ""}
+                  {song.key ? ` · ${song.key}` : ""}
                   {song.splitBy && ` · split on the ${song.splitBy === "gpu" ? "graphics card" : "CPU"}`}
                 </p>
                 {song.prompt && <p className="text-[11px] text-slate-500 mt-1">“{song.prompt}”</p>}
@@ -569,7 +725,14 @@ export default function StudioPage() {
                 Remove
               </button>
             </div>
-            <SongTools key={song.id} song={song} health={health} onJob={load} />
+            <AddVocals key={`v-${song.id}`} song={song} health={health} onJob={load} />
+            {song.lyrics && (
+              <details className="text-xs text-slate-400">
+                <summary className="cursor-pointer">Lyrics</summary>
+                <pre className="whitespace-pre-wrap font-sans mt-1">{song.lyrics}</pre>
+              </details>
+            )}
+            <SongTools key={song.id} song={song} health={health} onJob={load} splitQueued={splitting(song.id)} />
           </section>
         ) : null}
 
@@ -610,11 +773,26 @@ export default function StudioPage() {
                   {o.name}
                 </p>
                 {o.files.map((f) => (
-                  <FileLink key={f} rel={f} />
+                  <div key={f} className="flex items-start gap-2">
+                    <div className="flex-1 min-w-0">
+                      <FileLink rel={f} />
+                    </div>
+                    <button
+                      onClick={() => {
+                        if (!confirm(`Move ${f.split("/").pop()} to the studio's trash (data/studio/.trash)? It can be put back from there.`)) return;
+                        void send("DELETE", `/api/studio/${f.split("/").map(encodeURIComponent).join("/")}`).then(load, (e) => setError(errText(e)));
+                      }}
+                      className="text-[11px] text-slate-600 hover:text-rose-300 shrink-0"
+                      title="Move to the trash"
+                      aria-label={`Move ${f.split("/").pop()} to the trash`}
+                    >
+                      🗑
+                    </button>
+                  </div>
                 ))}
               </div>
             ))}
-            <p className="text-[11px] text-slate-500">Also on the PC in mission-control/data/studio/outputs.</p>
+            <p className="text-[11px] text-slate-500">Also on the PC in mission-control/data/studio/outputs. Trashed files go to data/studio/.trash, where you can put them back or delete them for good.</p>
           </details>
         )}
       </main>

@@ -19,6 +19,7 @@ import {
 import { BrowserSession, Frame, SEARCH_SITES } from "./hq/browser";
 import { runBrowserAgent } from "./hq/browser-agent";
 import { runToolAgent } from "./hq/tool-agent";
+import { studioTools, writeLyrics } from "./hq/studio-tools";
 import { StreamGuard, redact } from "./hq/guard";
 import { Hive } from "./hq/hive";
 import { Memory } from "./hq/memory";
@@ -52,9 +53,9 @@ import { Uploads } from "./hq/uploads";
 import { parseWav, splitWav } from "./hq/wav";
 import { closeRound, historyMessages } from "./hq/thread";
 import { FILE_ID, Files, buildReport, fileType, pdfInstructions, printPdf, wantsPdf } from "./hq/pdf";
-import { BookStore, TRIMS, addSource, bookDetail, bookEpub, bookFileName, bookHtml, bookMarkdown, bookSummary, describeStep, editBook, failed, newBook, nextStep, removeSource, rewriteChapter, runStep, settle, trimOf } from "./hq/books";
+import { BookStore, TRIMS, addSource, bookDetail, bookEpub, bookFileName, bookHtml, bookMarkdown, bookSummary, describeStep, editBook, failed, hasContent, newBook, nextStep, removeSource, rewriteChapter, runStep, settle, trimOf } from "./hq/books";
 import type { Book, BookModel, BookStep, ImageLoader, Trim } from "./hq/books";
-import { MIN_PAGES, MAX_PAGES, coverHtml, coverSpec, gutterFor } from "./hq/kdp";
+import { MIN_PAGES, MAX_PAGES, coverHtml, coverSpec, frontDpi, gutterFor, imageSize } from "./hq/kdp";
 import type { Paper } from "./hq/kdp";
 import { docxToText, fetchSource } from "./hq/sources";
 import { COMPETITION_CHECKS, ResearchStore, competitionOf, conceptsPrompt, etsyKeyHeader, isBlockedPage, mineEtsy, mineKeywords, newResearch, parseConcepts, parseResults, renderPage, scoreKeywords, searchUrl } from "./hq/research";
@@ -188,7 +189,11 @@ const STUDIO_URL = (process.env.STUDIO_URL || "").replace(/\/+$/, "");
 const voice = VOICE_URL ? new VoiceClient(VOICE_URL.replace(/\/+$/, "")) : null;
 // Tools (MCP servers) for the agents: the tools service (tools/, docker-compose.yml)
 const TOOLS_URL = process.env.TOOLS_URL || "";
-const tools = TOOLS_URL ? new ToolsClient(TOOLS_URL.replace(/\/+$/, "")) : null;
+// The music studio's own tools for Jarvis (find and add tracks, lyrics, vocals, songs) run here
+const tools =
+  TOOLS_URL || STUDIO_URL
+    ? new ToolsClient(TOOLS_URL.replace(/\/+$/, ""), STUDIO_URL ? [studioTools({ studio: studioFetch, chat: roleJson("planner"), cardFile: (name) => files.read(name) })] : [])
+    : null;
 // Logos, pictures, clips, music and fonts the Coder may use, and the brand
 const assets = new Assets(DATA_DIR);
 const docCache = new DocCache(path.join(DATA_DIR, "uploads"));
@@ -522,7 +527,7 @@ const studioMediaBody = express.json({ limit: "285mb" }) as Middleware;
 app.use((req: Request, res: Response, next: NextFunction) => {
   const p = (req.url ?? "").split("?")[0];
   const parser =
-    req.method !== "POST" ? jsonBody : p === "/api/assets" ? assetBody : p === "/api/studio/songs" ? studioBody : p === "/api/studio/media" ? studioMediaBody : jsonBody;
+    req.method !== "POST" ? jsonBody : p === "/api/assets" ? assetBody : p === "/api/studio/songs" ? studioBody : p === "/api/studio/media" || p === "/api/studio/pictures" ? studioMediaBody : jsonBody;
   return parser(req, res, next);
 });
 
@@ -2773,7 +2778,7 @@ app.post("/api/books/:id/kdp", requireToken, async (req, res) => {
   const b = bookOr404(req, res);
   if (!b) return;
   if (!BROWSER_CDP_URL) return res.status(400).json({ error: "KDP files are printed by the browser sidecar: set BROWSER_CDP_URL (see README-HQ)" });
-  if (!b.chapters.some((c) => c.text || c.image)) return res.status(400).json({ error: "Nothing is written yet" });
+  if (!hasContent(b)) return res.status(400).json({ error: "Nothing is written yet" });
   const trim = (typeof req.body?.trim === "string" && req.body.trim in TRIMS ? req.body.trim : trimOf(b)) as Trim;
   const paper: Paper = req.body?.paper === "cream" || req.body?.paper === "color" ? req.body.paper : b.kind === "picture" ? "color" : "white";
   const footer = b.kind === "picture" ? "none" : "number";
@@ -2800,7 +2805,7 @@ app.post("/api/books/:id/kdp", requireToken, async (req, res) => {
     const firstPicture = b.kind === "picture" ? b.chapters.find((c) => c.image)?.image : undefined;
     const image = front ? `data:${front.mime};base64,${front.data.toString("base64")}` : firstPicture ? (bookImageUri(firstPicture) ?? undefined) : undefined;
     const coverPdf = await printPdf(
-      coverHtml(spec, { title: b.title || "Untitled", subtitle: b.subtitle, author: b.author, blurb: b.listing?.backCover || b.brief, image }),
+      coverHtml(spec, { title: b.title || "Untitled", subtitle: b.subtitle, author: b.author, blurb: b.listing?.backCover || b.brief, image, palette: b.coverColors, finished: Boolean(front && b.coverHasText) }),
       BROWSER_CDP_URL,
       { footer: "none" },
     );
@@ -2810,8 +2815,17 @@ app.post("/api/books/:id/kdp", requireToken, async (req, res) => {
     if (b.kind === "picture") notes.push("In KDP choose “Bleed” for the interior: the pictures run to the page edge.");
     notes.push(`In KDP choose ${paper === "color" ? "premium colour" : `${paper} paper`} and ${trim === "letter" ? "8.5 x 11" : trim.replace("x", " x ")} in: the cover was sized for that paper.`);
     if (!b.listing) notes.push("The back cover uses your brief; make a listing kit first for proper back-cover copy.");
+    const coverPic = front?.data ?? (firstPicture ? files.read(firstPicture) : null);
+    const picSize = coverPic ? imageSize(coverPic) : null;
+    const dpi = picSize ? frontDpi(spec, picSize) : null;
+    if (picSize && dpi && dpi.dpi < 300)
+      notes.push(
+        `The cover picture is only ${dpi.dpi} dpi in print (${picSize[0]}×${picSize[1]}; KDP wants 300, at least ${dpi.need[0]}×${dpi.need[1]}).` +
+          (front && STUDIO_URL ? " Press “Upscale cover 4×”, then make the KDP files again." : " Use a larger picture."),
+      );
     hive.log("writer", "book", `KDP files for “${b.title || "Untitled"}”: ${pages} pages, ${spec.width}×${spec.height} in cover`);
     res.json({
+      coverDpi: dpi?.dpi ?? null,
       interior: { ...interior, url: `/api/files/${interior.name}`, pages },
       cover: { ...cover, url: `/api/files/${cover.name}`, ...spec },
       trim,
@@ -2823,18 +2837,91 @@ app.post("/api/books/:id/kdp", requireToken, async (req, res) => {
   }
 });
 
+/**
+ * The cover picture 4x larger (Real-ESRGAN in ComfyUI, through the studio), so it reaches
+ * 300 dpi in print. The result is sized to what the largest trim needs and saved as the cover.
+ */
+app.post("/api/books/:id/cover/upscale", requireToken, async (req, res) => {
+  const b = bookOr404(req, res);
+  if (!b) return;
+  const front = bookCover(b);
+  if (!front) return res.status(400).json({ error: "Add a cover picture first" });
+  if (!STUDIO_URL) return res.status(400).json({ error: "Upscaling runs in the studio (STUDIO_URL); start it with docker compose" });
+  try {
+    const ext = front.mime.split("/")[1].replace("jpeg", "jpg");
+    const added = (await studioFetch("/pictures", { method: "POST", body: { filename: `${b.title || "cover"}-cover.${ext}`, data: front.data.toString("base64") } })) as { path: string };
+    const job = (await studioFetch("/jobs", { method: "POST", body: { type: "upscale", picture: added.path } })) as { id: string };
+    const until = Date.now() + 15 * 60_000;
+    let done: { status: string; error?: string; result?: { picture?: string } } = { status: "queued" };
+    while (Date.now() < until) {
+      done = (await studioFetch(`/jobs/${job.id}`)) as typeof done;
+      if (!["queued", "running"].includes(done.status)) break;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    if (done.status !== "done" || !done.result?.picture) return res.status(502).json({ error: done.error || `The upscale is still ${done.status}; try again when the studio's job list shows it done` });
+    // Big enough for a 8.5 x 11 in front panel at 300 dpi, as a JPEG that fits the cover upload limit
+    const jpg = (await studioFetch("/pictures/convert", { method: "POST", body: { picture: done.result.picture, to: "jpg", max_side: 3400 } })) as { file: string };
+    const r = await fetch(`${STUDIO_URL}/files/${jpg.file.split("/").map(encodeURIComponent).join("/")}`, { signal: AbortSignal.timeout(60_000) });
+    if (!r.ok) throw new Error(`The studio said ${r.status} for the upscaled cover`);
+    const up = uploads.save(`data:image/jpeg;base64,${Buffer.from(await r.arrayBuffer()).toString("base64")}`, "image");
+    if ("error" in up) return res.status(400).json({ error: up.error });
+    const before = imageSize(front.data);
+    b.cover = up.id;
+    books.save(b);
+    hive.log("writer", "book", `upscaled the cover of “${b.title || "Untitled"}”${before ? ` from ${before[0]}×${before[1]}` : ""}`);
+    res.json(bookView(b));
+  } catch (e) {
+    res.status(502).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
 // --- Music studio (studio/: its own container; songs and GPU stems through ComfyUI) --------
 // The dashboard talks to the studio through here, so the studio itself is never published.
 // Reading is open like the rest of the API; changes need the token.
 const STUDIO_ROUTES: { method: string; path: RegExp }[] = [
-  { method: "GET", path: /^\/(health|songs|jobs|outputs|media)$/ },
-  { method: "POST", path: /^\/media$/ },
+  { method: "GET", path: /^\/(health|songs|jobs|outputs|media|import|pictures|shared|pictures\/thumb)$/ },
+  { method: "POST", path: /^\/(media|songs\/import|pictures|pictures\/(import|text|svg|preview|composite|convert))$/ },
+  { method: "DELETE", path: /^\/(outputs|pictures)\/[A-Za-z0-9._/%-]+$/ },
   { method: "GET", path: /^\/(songs|jobs)\/[a-f0-9]{12}$/ },
   { method: "GET", path: /^\/files\/[A-Za-z0-9._/-]+$/ },
   { method: "POST", path: /^\/(songs|jobs)$/ },
   { method: "POST", path: /^\/jobs\/[a-f0-9]{12}\/cancel$/ },
   { method: "DELETE", path: /^\/songs\/[a-f0-9]{12}$/ },
 ];
+
+/** The harness's own calls to the studio (Jarvis's studio tools). Throws the studio's error. */
+async function studioFetch(sub: string, init: { method?: string; body?: unknown } = {}): Promise<unknown> {
+  if (!STUDIO_URL) throw new Error("The music studio isn't set up (STUDIO_URL)");
+  let r: globalThis.Response;
+  try {
+    r = await fetch(`${STUDIO_URL}${sub}`, {
+      method: init.method ?? "GET",
+      headers: { "Content-Type": "application/json" },
+      body: init.body === undefined ? undefined : JSON.stringify(init.body),
+      signal: AbortSignal.timeout(init.method === "POST" ? 5 * 60_000 : 30_000),
+    });
+  } catch (e) {
+    throw new Error(`The music studio isn't answering (docker compose up -d studio): ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const data = (await r.json().catch(() => ({}))) as { error?: string };
+  if (!r.ok) throw new Error(data.error ?? `The studio said ${r.status}`);
+  if (init.method === "POST" && sub === "/jobs") hive.log("studio", "job", String((data as { title?: string }).title ?? "studio job"));
+  if (init.method === "POST" && sub === "/songs/import") hive.log("studio", "song", `added “${String((data as { title?: string }).title ?? "a song")}” from the Music folder`);
+  return data;
+}
+
+// Lyrics for the Studio page's "Add vocals" form, written by the lead's model
+app.post("/api/studio/lyrics", requireToken, async (req: Request, res: Response) => {
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const s = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined);
+  try {
+    const lyrics = await writeLyrics(roleJson("planner"), { theme: s(b.theme, 600), style: s(b.style, 300), title: s(b.title, 120), seconds: n(b.seconds), bpm: n(b.bpm), key: s(b.key, 20), language: s(b.language, 8) });
+    res.json({ lyrics });
+  } catch (e) {
+    res.status(502).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
 
 app.use("/api/studio", async (req: Request, res: Response) => {
   const [sub, query = ""] = (req.url ?? "/").split("?");

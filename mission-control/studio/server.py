@@ -7,7 +7,14 @@ Windows (COMFY_URL); everything else runs here on the CPU.
   GET  /songs, /songs/<id>            the library
   POST /songs {title, filename, data} add audio (base64); it's split into stems straight away
   DELETE /songs/<id>
-  POST /jobs {type, ...}              split | song | practice | karaoke | sheet | daw
+  GET  /import?q=words                files in the shared music folder (MUSIC_DIR) that match
+  POST /songs/import {path, title?, split?}   add one of them by its path on the PC
+  GET  /pictures                      pictures you added and the picture tools' results
+  GET  /shared?q=&kind=pictures|audio  files in every shared folder (Music, Pictures, Downloads)
+  POST /pictures {filename, data}     add a picture (base64); POST /pictures/import {path}
+  POST /pictures/text | svg | preview | composite | convert    quick picture tools (answer at once)
+  DELETE /outputs/<path>              move a finished file to data/.trash (it can be put back)
+  POST /jobs {type, ...}              split | song | vocals | practice | karaoke | sheet | daw | upscale | edit
   GET  /jobs, /jobs/<id>; POST /jobs/<id>/cancel
   GET  /outputs                       finished work, newest first
   GET  /files/<path>                  any file under the data folder (byte ranges for players)
@@ -28,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from mcstudio import sheet
 from mcstudio.comfy import STEM_NODE, Comfy
 from mcstudio.store import DATA, Jobs, Library, outputs
-from mcstudio import stock, videojobs
+from mcstudio import imports, pictures, stock, videojobs
 from mcstudio.worker import Worker, check_params, job_title, save_upload
 
 MAX_UPLOAD = 150 * 1024 * 1024
@@ -77,6 +84,12 @@ def health() -> dict:
         "voice": bool(VOICE_URL),
         # Free stock footage for themed music videos
         "stock": stock.keys(),
+        # The shared music folder songs can be added from by path
+        "importFolder": imports.available(),
+        # Every shared folder (music, pictures, downloads)
+        "sharedFolders": [r[0] for r in imports.roots()],
+        # 4x upscaling needs an upscale model in ComfyUI
+        "upscaleModels": comfy.options("UpscaleModelLoader", "model_name") if up else [],
     }
     health_cache.update(at=time.time(), value=value)
     return value
@@ -132,9 +145,33 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, {"outputs": outputs(DATA)})
             if p == ["media"]:
                 return self.send(200, {"media": videojobs.list_media(DATA)})
+            if p == ["pictures"]:
+                return self.send(200, {"pictures": pictures.list_all(DATA)})
+            if p == ["pictures", "thumb"]:
+                from urllib.parse import parse_qs, urlparse
+
+                src = pictures.path_of(parse_qs(urlparse(self.path).query).get("path", [""])[0], DATA)
+                return self.send(200, {**pictures.info(src, DATA), "preview": pictures.preview_b64(src)})
+            if p == ["shared"]:
+                from urllib.parse import parse_qs, urlparse
+
+                qs = parse_qs(urlparse(self.path).query)
+                exts = imports.IMAGES if qs.get("kind", ["pictures"])[0] == "pictures" else imports.AUDIO
+                if not imports.roots():
+                    return self.send(200, {"files": [], "error": "No folder is shared with the studio: set MUSIC_DIR, PICTURES_DIR or DOWNLOADS_DIR in mission-control/.env"})
+                return self.send(200, {"files": imports.find_any(qs.get("q", [""])[0][:200], exts), "folders": [r[0] for r in imports.roots()]})
+            if p == ["import"]:
+                from urllib.parse import parse_qs, urlparse
+
+                if not imports.available():
+                    return self.send(200, {"files": [], "error": "No music folder is shared with the studio: set MUSIC_DIR in mission-control/.env"})
+                q = parse_qs(urlparse(self.path).query).get("q", [""])[0][:200]
+                return self.send(200, {"files": imports.find(q)})
             if len(p) >= 2 and p[0] == "files":
                 return self.file("/".join(p[1:]))
             return self.send(404, {"error": "Not found"})
+        except ValueError as e:
+            return self.send(400, {"error": str(e)})
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             return self.send(500, {"error": str(e)})
@@ -206,6 +243,17 @@ class Handler(BaseHTTPRequestHandler):
                     jobs.add("split", {"song": meta["id"]}, f"Split: {meta['title']}")
                     worker.wake.set()
                 return self.send(201, meta)
+            if p == ["songs", "import"]:
+                src = imports.resolve_any(str(body.get("path") or ""), imports.AUDIO, str(body.get("folder") or ""))
+                if src.stat().st_size > MAX_UPLOAD:
+                    return self.send(413, {"error": f"Files can be at most {MAX_UPLOAD // 1024 // 1024} MB"})
+                meta = save_upload(library, str(body.get("title") or "") or src.stem, src.read_bytes(), src.name)
+                if body.get("split", True):
+                    jobs.add("split", {"song": meta["id"]}, f"Split: {meta['title']}")
+                    worker.wake.set()
+                return self.send(201, {**meta, "importedFrom": src.name if src.parent == imports.IMPORT_DIR else str(src).split("/", 2)[-1]})
+            if p and p[0] == "pictures":
+                return self.pictures_post(p[1:], body)
             if p == ["jobs"]:
                 kind = str(body.pop("type", ""))
                 err = check_params(kind, body, library)
@@ -230,8 +278,46 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             return self.send(500, {"error": str(e)})
 
+    def pictures_post(self, op: list[str], body: dict):
+        """The quick picture tools: they answer with the new file and a preview."""
+        pic = lambda key="picture": pictures.path_of(str(body.get(key) or ""), DATA)  # noqa: E731
+        if op == []:
+            data = str(body.get("data") or "")
+            data = data.split(",", 1)[1] if data.startswith("data:") else data
+            try:
+                raw = base64.b64decode(data, validate=True)
+            except (binascii.Error, ValueError):
+                return self.send(400, {"error": "Send the picture as base64"})
+            if len(raw) > videojobs.MAX_MEDIA:
+                return self.send(413, {"error": "That picture is too large"})
+            return self.send(201, pictures.add(raw, str(body.get("filename") or "picture.png")[:200], DATA))
+        if op == ["import"]:
+            src = imports.resolve_any(str(body.get("path") or ""), imports.IMAGES, str(body.get("folder") or ""))
+            return self.send(201, pictures.import_from(src, DATA))
+        if op == ["text"]:
+            return self.send(201, pictures.text_on(pic(), str(body.get("title") or ""), str(body.get("subtitle") or ""), str(body.get("position") or "bottom"), str(body.get("color") or "#ffffff"), int(body.get("size") or 0), body.get("shadow", True) is not False, DATA))
+        if op == ["svg"]:
+            return self.send(201, pictures.render_svg(str(body.get("svg") or ""), str(body.get("title") or "design")[:80], str(body.get("format") or "png"), int(body.get("width") or 0), DATA))
+        if op == ["preview"]:
+            names = body.get("pictures") or ([body["picture"]] if body.get("picture") else [])
+            if not isinstance(names, list):
+                return self.send(400, {"error": "pictures is a list"})
+            return self.send(201, pictures.preview([pictures.path_of(str(n), DATA) for n in names[:12]], body.get("grid", True) is not False, body.get("boxes") or [], body.get("keep") or [], DATA))
+        if op == ["composite"]:
+            return self.send(201, pictures.composite(pic("base"), pic("source"), body.get("source_box") or [], body.get("at") or [], float(body.get("scale") or 1), int(body.get("feather", 12)), body.get("match", True) is not False, str(body.get("key") or ""), DATA))
+        if op == ["convert"]:
+            return self.send(201, pictures.convert(pic(), str(body.get("to") or ""), DATA, max(0, min(20000, int(body.get("max_side") or 0)))))
+        return self.send(404, {"error": "Not found"})
+
     def do_DELETE(self):
         p = self.parts()
+        if len(p) >= 2 and p[0] in ("outputs", "pictures"):
+            from urllib.parse import unquote
+
+            try:
+                return self.send(200, {"ok": True, "trash": pictures.trash("/".join(unquote(x) for x in p), DATA)})
+            except ValueError as e:
+                return self.send(400, {"error": str(e)})
         if len(p) == 2 and p[0] == "songs":
             if any(j["status"] in ("queued", "running") and j["params"].get("song") == p[1] for j in jobs.list(300)):
                 return self.send(409, {"error": "That song has a job running or waiting"})
@@ -247,10 +333,13 @@ class Handler(BaseHTTPRequestHandler):
 ALLOWED = {
     "split": {"song"},
     "song": {"prompt", "title", "lyrics", "seconds", "bpm", "key", "timesig", "language", "seed", "split"},
+    "vocals": {"song", "lyrics", "prompt", "strength", "language", "seed", "title", "vocal_level", "split"},
     "practice": {"song", "gains", "speed", "semitones", "start", "end"},
     "karaoke": {"song", "semitones", "lyrics", "keep_backing_vocals"},
     "sheet": {"song", "parts"},
     "daw": {"song"},
+    "upscale": {"picture", "model"},
+    "edit": {"picture", "prompt", "boxes", "keep", "strength", "seed"},
     **videojobs.ALLOWED,
 }
 
