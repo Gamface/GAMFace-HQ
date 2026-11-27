@@ -57,6 +57,111 @@ function Progress({ value, max }: { value: number; max: number }) {
   );
 }
 
+// --- Cover colours, a finished cover, upscaling -------------------------------------------
+
+/** The three most common colours of the cover picture (dark first), from the browser's canvas. */
+async function coverPalette(src: string): Promise<[string, string, string] | null> {
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.src = src;
+  try {
+    await img.decode();
+  } catch {
+    return null;
+  }
+  const c = document.createElement("canvas");
+  c.width = 48;
+  c.height = 72;
+  const g = c.getContext("2d");
+  if (!g) return null;
+  g.drawImage(img, 0, 0, c.width, c.height);
+  let px: Uint8ClampedArray;
+  try {
+    px = g.getImageData(0, 0, c.width, c.height).data;
+  } catch {
+    return null; // the picture came from another origin without CORS
+  }
+  const bins = new Map<string, { n: number; r: number; g: number; b: number }>();
+  for (let i = 0; i < px.length; i += 4) {
+    const k = `${px[i] >> 5},${px[i + 1] >> 5},${px[i + 2] >> 5}`;
+    const e = bins.get(k) ?? { n: 0, r: 0, g: 0, b: 0 };
+    bins.set(k, { n: e.n + 1, r: e.r + px[i], g: e.g + px[i + 1], b: e.b + px[i + 2] });
+  }
+  const top = [...bins.values()].sort((a, b) => b.n - a.n).map((e) => [e.r / e.n, e.g / e.n, e.b / e.n]);
+  if (!top.length) return null;
+  const hex = (v: number[]) => `#${v.map((x) => Math.round(x).toString(16).padStart(2, "0")).join("")}`;
+  const light = (v: number[]) => 0.299 * v[0] + 0.587 * v[1] + 0.114 * v[2];
+  const bg = top[0];
+  // The accent: the most common colour clearly different from the background
+  const accent = top.find((v) => Math.abs(light(v) - light(bg)) > 60 || Math.hypot(v[0] - bg[0], v[1] - bg[1], v[2] - bg[2]) > 120) ?? (light(bg) > 128 ? [40, 40, 40] : [230, 200, 120]);
+  return [hex(bg), hex(accent), light(bg) > 140 ? "#1a1a1a" : "#ffffff"];
+}
+
+function CoverOptions({ book, act }: { book: Book; act: (fn: () => Promise<unknown>) => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const colors = book.coverColors;
+  const patch = (body: Record<string, unknown>) => act(() => send<Book>("PATCH", `/api/books/${book.id}`, body));
+  const setColor = (k: "bg" | "accent" | "fg", v: string) => {
+    const c = { bg: colors?.bg ?? "#1f2a44", accent: colors?.accent ?? "#d9a441", fg: colors?.fg ?? "#f5efe0", [k]: v };
+    void patch({ coverColors: [c.bg, c.accent, c.fg] });
+  };
+  return (
+    <div className="pt-2 space-y-1.5">
+      {book.cover && (
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-1.5 text-[11px] text-slate-400">
+            <input type="checkbox" checked={Boolean(book.coverHasText)} onChange={(e) => void patch({ coverHasText: e.target.checked })} />
+            The cover already has its title (print it as it is)
+          </label>
+          <button
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              void act(() => send<Book>("POST", `/api/books/${book.id}/cover/upscale`)).finally(() => setBusy(false));
+            }}
+            className="text-[11px] text-cyan-400 hover:text-cyan-300 disabled:opacity-50"
+            title="4x larger and sharper on the graphics card, for 300 dpi print"
+          >
+            {busy ? "Upscaling on the graphics card…" : "Upscale cover 4×"}
+          </button>
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+        <span>Cover colours:</span>
+        {(
+          [
+            ["bg", "Background", colors?.bg ?? "#1f2a44"],
+            ["accent", "Accent", colors?.accent ?? "#d9a441"],
+            ["fg", "Text", colors?.fg ?? "#f5efe0"],
+          ] as const
+        ).map(([k, label, v]) => (
+          <label key={k} className="flex items-center gap-1" title={label}>
+            <input type="color" value={v} onChange={(e) => setColor(k, e.target.value)} className="h-5 w-6 bg-transparent border-0 p-0 cursor-pointer" aria-label={`Cover ${label.toLowerCase()} colour`} />
+            {label}
+          </label>
+        ))}
+        {book.cover && (
+          <button
+            onClick={async () => {
+              const p = await coverPalette(imageUrl(book.cover!));
+              if (p) void patch({ coverColors: p });
+            }}
+            className="text-cyan-400 hover:text-cyan-300"
+          >
+            Match the cover picture
+          </button>
+        )}
+        {colors && (
+          <button onClick={() => void patch({ coverColors: [] })} className="text-slate-500 hover:text-slate-300">
+            Reset
+          </button>
+        )}
+        {!colors && <span className="text-slate-600">(picked from the title)</span>}
+      </div>
+    </div>
+  );
+}
+
 // --- New book ------------------------------------------------------------------
 
 const KIND_DEFAULTS: Record<Kind, { count: number; words: number }> = {
@@ -148,14 +253,32 @@ function NewBook({ onMade, onCancel, pictures, initial }: { onMade: (id: string)
             <select value={f.puzzleType} onChange={(e) => set("puzzleType", e.target.value)} className={`${input} mt-1`}>
               <option value="mystery">Whodunit cases (suspect, place, weapon)</option>
               <option value="logic">Logic grid puzzles</option>
+              <option value="wordsearch">Word searches (themed word lists)</option>
+              <option value="sudoku">Sudoku</option>
             </select>
           </label>
           <label className="text-xs text-slate-400">
             Difficulty
             <select value={f.difficulty} onChange={(e) => set("difficulty", e.target.value)} className={`${input} mt-1`}>
-              <option value="easy">Easy (4 people, 3 categories)</option>
-              <option value="medium">Medium (4 people, 4 categories)</option>
-              <option value="hard">Hard (5 people, 4 categories)</option>
+              {f.puzzleType === "wordsearch" ? (
+                <>
+                  <option value="easy">Easy (12×12, 10 words, across and down)</option>
+                  <option value="medium">Medium (15×15, 15 words, diagonals)</option>
+                  <option value="hard">Hard (17×17, 20 words, any direction)</option>
+                </>
+              ) : f.puzzleType === "sudoku" ? (
+                <>
+                  <option value="easy">Easy (40 numbers given)</option>
+                  <option value="medium">Medium (32 given)</option>
+                  <option value="hard">Hard (26 given)</option>
+                </>
+              ) : (
+                <>
+                  <option value="easy">Easy (4 people, 3 categories)</option>
+                  <option value="medium">Medium (4 people, 4 categories)</option>
+                  <option value="hard">Hard (5 people, 4 categories)</option>
+                </>
+              )}
             </select>
           </label>
         </div>
@@ -370,7 +493,7 @@ function ChapterRow({ book, ch, i, busy, onChange }: { book: Book; ch: Chapter; 
   const [error, setError] = useState<string | null>(null);
   const picture = book.kind === "picture";
   const pv = ch.puzzleView;
-  const done = picture ? Boolean(ch.text && (ch.image || book.art?.off)) : book.kind === "puzzle" ? Boolean(ch.text && pv) : Boolean(ch.text && ch.summary);
+  const done = picture ? Boolean(ch.text && (ch.image || book.art?.off)) : book.kind === "puzzle" ? Boolean((ch.text || book.puzzle?.type === "sudoku") && pv) : Boolean(ch.text && ch.summary);
   const status = done ? "done" : ch.text ? "drafting" : "planned";
   const act = async (fn: () => Promise<Book>) => {
     setError(null);
@@ -390,7 +513,11 @@ function ChapterRow({ book, ch, i, busy, onChange }: { book: Book; ch: Chapter; 
         {picture && ch.image && <img src={fileUrl(ch.image)} alt="" className="h-8 w-8 rounded object-cover" />}
         <span className="flex-1 text-sm text-slate-200 truncate">{picture ? ch.text || ch.title : ch.title}</span>
         <span className={`text-[11px] ${status === "done" ? "text-emerald-400" : status === "drafting" ? "text-cyan-400" : "text-slate-500"}`}>
-          {picture ? (ch.image ? "illustrated" : ch.text ? (book.art?.off ? "text" : "needs picture") : "planned") : status === "planned" ? "planned" : `${num(ch.words ?? 0)} words`}
+          {picture
+            ? ch.image ? "illustrated" : ch.text ? (book.art?.off ? "text" : "needs picture") : "planned"
+            : book.puzzle?.type === "sudoku"
+              ? pv ? "made" : "planned"
+              : status === "planned" ? "planned" : `${num(ch.words ?? 0)} words`}
         </span>
       </button>
       {open && (
@@ -405,7 +532,30 @@ function ChapterRow({ book, ch, i, busy, onChange }: { book: Book; ch: Chapter; 
           ) : ch.text ? (
             <div className={`rounded bg-slate-950 border border-slate-800 p-3 text-slate-300 font-serif leading-relaxed whitespace-pre-wrap ${picture ? "text-base" : "text-sm max-h-96 overflow-y-auto"}`}>{ch.text}</div>
           ) : null}
-          {pv && (
+          {pv?.grid && (
+            <div className="rounded border border-slate-800 p-3 text-xs space-y-2">
+              <pre className="font-mono text-slate-300 leading-tight tracking-[0.35em]">{pv.grid.join("\n")}</pre>
+              <p className="text-slate-400">Find: {pv.words?.join(", ")}</p>
+            </div>
+          )}
+          {pv?.givens && (
+            <div className="rounded border border-slate-800 p-3 text-xs">
+              <table className="border-collapse border-2 border-slate-400 font-mono text-slate-200">
+                <tbody>
+                  {Array.from({ length: 9 }, (_, r) => (
+                    <tr key={r}>
+                      {Array.from({ length: 9 }, (_, c) => (
+                        <td key={c} className={`w-6 h-6 text-center border border-slate-700 ${c % 3 === 2 && c < 8 ? "border-r-2 border-r-slate-400" : ""} ${r % 3 === 2 && r < 8 ? "border-b-2 border-b-slate-400" : ""}`}>
+                          {pv.givens![r * 9 + c] || ""}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {pv && !pv.grid && !pv.givens && (
             <div className="rounded border border-slate-800 p-3 text-xs space-y-2">
               {pv.crime && <p className="text-slate-300">{pv.crime}</p>}
               <p className="text-slate-500">{pv.categories.join(" · ")}</p>
@@ -585,7 +735,7 @@ function BookView({ id, meta, onGone, onChanged }: { id: string; meta: ListReply
   if (!book) return <p className="text-sm text-slate-500">{error ?? "Loading…"}</p>;
   const st = stageText(book);
   const words = book.chapters.reduce((n, c) => n + (c.words ?? 0), 0);
-  const hasText = book.chapters.some((c) => c.text || c.image);
+  const hasText = book.chapters.some((c) => c.text || c.image || c.puzzleView);
   const busy = Boolean(book.running);
   const exportUrl = (fmt: string) => `${HARNESS_URL}/api/books/${book.id}/export/${fmt}`;
   const unit = unitOf(book.kind);
@@ -618,8 +768,12 @@ function BookView({ id, meta, onGone, onChanged }: { id: string; meta: ListReply
           {book.subtitle && <p className="text-sm text-slate-400 italic">{book.subtitle}</p>}
           <p className="text-xs text-slate-500">
             {KIND_LABEL[book.kind]}
-            {book.puzzle ? ` (${book.puzzle.type === "logic" ? "logic grids" : "whodunits"}, ${book.puzzle.difficulty})` : ""} · by {book.author} ·{" "}
-            {book.kind === "picture" ? `${book.chapters.filter((c) => c.image).length} of ${book.chapterCount} pages illustrated` : `${num(words)} of ~${num(book.chapterCount * book.chapterWords)} words`}
+            {book.puzzle ? ` (${{ logic: "logic grids", mystery: "whodunits", wordsearch: "word searches", sudoku: "sudoku" }[book.puzzle.type]}, ${book.puzzle.difficulty})` : ""} · by {book.author} ·{" "}
+            {book.kind === "picture"
+              ? `${book.chapters.filter((c) => c.image).length} of ${book.chapterCount} pages illustrated`
+              : book.puzzle?.type === "sudoku"
+                ? `${book.chapters.filter((c) => c.puzzleView).length} of ${book.chapterCount} puzzles made`
+                : `${num(words)} of ~${num(book.chapterCount * book.chapterWords)} words`}
           </p>
           <div className="flex flex-wrap items-center gap-2 pt-1">
             <span className={`text-[11px] px-2 py-0.5 rounded border ${st.tone}`}>{st.text}</span>
@@ -634,6 +788,7 @@ function BookView({ id, meta, onGone, onChanged }: { id: string; meta: ListReply
               Remove cover
             </button>
           )}
+          <CoverOptions book={book} act={act} />
         </div>
       </div>
 

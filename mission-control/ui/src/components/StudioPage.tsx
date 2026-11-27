@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getJson, send } from "../api";
 import { HARNESS_URL } from "../config";
+import PictureStudio from "./PictureStudio";
 import VideoStudio from "./VideoStudio";
 
 // The music studio: add songs (or write new ones with ACE-Step on the graphics card), split them
@@ -18,6 +19,8 @@ interface Health {
   voice: boolean;
   stock?: { pexels: boolean; pixabay: boolean };
   importFolder?: boolean;
+  sharedFolders?: string[];
+  upscaleModels?: string[];
 }
 
 interface Song {
@@ -568,7 +571,7 @@ export default function StudioPage() {
   const [selected, setSelected] = useState<string | "new" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [upload, setUpload] = useState<string | null>(null);
-  const [mode, setMode] = useState<"music" | "video">("music");
+  const [mode, setMode] = useState<"music" | "video" | "pictures">("music");
   const load = useCallback(() => {
     Promise.all([getJson<Health>("/api/studio/health"), getJson<{ songs: Song[] }>("/api/studio/songs"), getJson<{ jobs: Job[] }>("/api/studio/jobs"), getJson<{ outputs: Output[] }>("/api/studio/outputs")])
       .then(([h, s, j, o]) => {
@@ -679,6 +682,7 @@ export default function StudioPage() {
               <Chip ok={health.gpuStems} label={health.gpuStems ? "Stems on the GPU" : health.gpuStemsError ? "Stems on the CPU (GPU failed)" : "Stems on the CPU"} title={health.gpuStemsError ? `GPU stems are off until the studio restarts: ${health.gpuStemsError}` : "Install tools/comfyui/custom_nodes/mission_control_stems in ComfyUI for the graphics card"} />
               <Chip ok={health.musescore} label="MuseScore" />
               <Chip ok={health.voice} label="Lyrics (Whisper)" />
+              <Chip ok={Boolean(health.upscaleModels?.length)} label="Upscale 4×" title={health.upscaleModels?.length ? health.upscaleModels.join(", ") : "Put RealESRGAN_x4plus.pth in ComfyUI's models\\upscale_models folder"} />
               <Chip ok={Boolean(health.importFolder)} label="Music folder" title={health.importFolder ? "Jarvis and this page can add songs from your Music folder" : "Set MUSIC_DIR in mission-control/.env to your Music folder, then docker compose up -d studio"} />
             </>
           ) : (
@@ -688,14 +692,16 @@ export default function StudioPage() {
         {error && <p className="text-xs text-rose-300 rounded border border-rose-900 bg-rose-950/40 px-3 py-2">{error}</p>}
 
         <div className="flex gap-1.5" role="tablist" aria-label="Studio mode">
-          {(["music", "video"] as const).map((m) => (
+          {(["music", "video", "pictures"] as const).map((m) => (
             <button key={m} role="tab" aria-selected={mode === m} onClick={() => setMode(m)} className={`${btn} border text-sm ${mode === m ? "border-cyan-600 bg-cyan-950 text-cyan-300" : "border-slate-700 text-slate-400 hover:bg-slate-800"}`}>
-              {m === "music" ? "♪ Music studio" : "▶ Video studio"}
+              {m === "music" ? "♪ Music studio" : m === "video" ? "▶ Video studio" : "🖼 Pictures"}
             </button>
           ))}
         </div>
 
-        {mode === "video" ? (
+        {mode === "pictures" ? (
+          <PictureStudio comfy={Boolean(health?.comfy)} upscaleReady={Boolean(health?.upscaleModels?.length)} folders={health?.sharedFolders ?? []} onJob={load} />
+        ) : mode === "video" ? (
           <VideoStudio songs={songs} onJob={load} comfy={Boolean(health?.comfy)} voice={Boolean(health?.voice)} stockKeys={health?.stock} />
         ) : selected === "new" ? (
           <NewSong health={health} onJob={load} />
@@ -767,11 +773,26 @@ export default function StudioPage() {
                   {o.name}
                 </p>
                 {o.files.map((f) => (
-                  <FileLink key={f} rel={f} />
+                  <div key={f} className="flex items-start gap-2">
+                    <div className="flex-1 min-w-0">
+                      <FileLink rel={f} />
+                    </div>
+                    <button
+                      onClick={() => {
+                        if (!confirm(`Move ${f.split("/").pop()} to the studio's trash (data/studio/.trash)? It can be put back from there.`)) return;
+                        void send("DELETE", `/api/studio/${f.split("/").map(encodeURIComponent).join("/")}`).then(load, (e) => setError(errText(e)));
+                      }}
+                      className="text-[11px] text-slate-600 hover:text-rose-300 shrink-0"
+                      title="Move to the trash"
+                      aria-label={`Move ${f.split("/").pop()} to the trash`}
+                    >
+                      🗑
+                    </button>
+                  </div>
                 ))}
               </div>
             ))}
-            <p className="text-[11px] text-slate-500">Also on the PC in mission-control/data/studio/outputs.</p>
+            <p className="text-[11px] text-slate-500">Also on the PC in mission-control/data/studio/outputs. Trashed files go to data/studio/.trash, where you can put them back or delete them for good.</p>
           </details>
         )}
       </main>

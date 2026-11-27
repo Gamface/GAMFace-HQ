@@ -1016,7 +1016,7 @@ export function bookSummary(book: Book) {
     ...rest,
     words,
     target: book.chapterCount * book.chapterWords,
-    written: chapters.filter((c, i) => c.text && !stepFor(book, c, i)).length,
+    written: chapters.filter((c, i) => (c.text || (c.puzzle && puzzleReady(c.puzzle))) && !stepFor(book, c, i)).length,
     chapterTotal: chapters.length,
     sourceCount: sources?.length ?? 0,
     next: step ? describeStep(book, step) : null,
@@ -1064,13 +1064,15 @@ const slug = (s: string) =>
 
 export const bookFileName = (book: Book, ext: string) => `${slug(book.title || "untitled")}.${ext}`;
 
-const written = (book: Book) => book.chapters.map((c, i) => ({ ...c, i })).filter((c) => c.text?.trim() || c.image);
+const written = (book: Book) => book.chapters.map((c, i) => ({ ...c, i })).filter((c) => c.text?.trim() || c.image || (c.puzzle && puzzleReady(c.puzzle)));
+/** Whether any part of a book is made yet (text, a picture, or a puzzle) */
+export const hasContent = (book: Book) => written(book).length > 0;
 const unitLabel = (book: Book, i: number, title: string) => (book.kind === "novel" ? `Chapter ${i + 1}: ${title}` : book.kind === "puzzle" ? `${i + 1}. ${title}` : title);
 
 /** The whole manuscript as Markdown. */
 const sudokuText = (cells: number[]) =>
   Array.from({ length: 9 }, (_, r) => Array.from({ length: 9 }, (_, c) => cells[r * 9 + c] || ".").join(" ").replace(/(\S \S \S) /g, "$1 | ").replace(/ \| $/, "")).map((l, r) => (r % 3 === 2 && r < 8 ? `${l}\n------+-------+------` : l)).join("\n");
-const dirName = (dr: number, dc: number) => ({ "0,1": "across", "1,0": "down", "1,1": "down-right", "-1,1": "up-right", "0,-1": "backwards", "-1,0": "up", "-1,-1": "up-left", "1,-1": "down-left" })[`${dr},${dc}`] ?? "";
+const dirName = (dr: number, dc: number) => ({ "0,1": "across", "1,0": "down", "1,1": "down-right", "-1,1": "up-right", "0,-1": "backwards", "-1,0": "up", "-1,-1": "up-left", "1,-1": "down-left" } as Record<string, string>)[`${dr},${dc}`] ?? "";
 
 export function bookMarkdown(book: Book): string {
   const head = [`# ${book.title || "Untitled"}`, book.subtitle ? `*${book.subtitle}*` : "", `by ${book.author}`].filter(Boolean).join("\n\n");

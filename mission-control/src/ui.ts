@@ -53,7 +53,7 @@ import { Uploads } from "./hq/uploads";
 import { parseWav, splitWav } from "./hq/wav";
 import { closeRound, historyMessages } from "./hq/thread";
 import { FILE_ID, Files, buildReport, fileType, pdfInstructions, printPdf, wantsPdf } from "./hq/pdf";
-import { BookStore, TRIMS, addSource, bookDetail, bookEpub, bookFileName, bookHtml, bookMarkdown, bookSummary, describeStep, editBook, failed, newBook, nextStep, removeSource, rewriteChapter, runStep, settle, trimOf } from "./hq/books";
+import { BookStore, TRIMS, addSource, bookDetail, bookEpub, bookFileName, bookHtml, bookMarkdown, bookSummary, describeStep, editBook, failed, hasContent, newBook, nextStep, removeSource, rewriteChapter, runStep, settle, trimOf } from "./hq/books";
 import type { Book, BookModel, BookStep, ImageLoader, Trim } from "./hq/books";
 import { MIN_PAGES, MAX_PAGES, coverHtml, coverSpec, frontDpi, gutterFor, imageSize } from "./hq/kdp";
 import type { Paper } from "./hq/kdp";
@@ -2778,7 +2778,7 @@ app.post("/api/books/:id/kdp", requireToken, async (req, res) => {
   const b = bookOr404(req, res);
   if (!b) return;
   if (!BROWSER_CDP_URL) return res.status(400).json({ error: "KDP files are printed by the browser sidecar: set BROWSER_CDP_URL (see README-HQ)" });
-  if (!b.chapters.some((c) => c.text || c.image)) return res.status(400).json({ error: "Nothing is written yet" });
+  if (!hasContent(b)) return res.status(400).json({ error: "Nothing is written yet" });
   const trim = (typeof req.body?.trim === "string" && req.body.trim in TRIMS ? req.body.trim : trimOf(b)) as Trim;
   const paper: Paper = req.body?.paper === "cream" || req.body?.paper === "color" ? req.body.paper : b.kind === "picture" ? "color" : "white";
   const footer = b.kind === "picture" ? "none" : "number";

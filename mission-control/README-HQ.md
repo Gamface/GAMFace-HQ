@@ -248,6 +248,33 @@ can be read.
 - Tests: `docker compose run --rm studio python -m unittest discover -s tests` (real ffmpeg,
   rubberband, basic-pitch, MuseScore and Inkscape; an untrained Demucs and a fake ComfyUI).
 
+### Pictures
+
+The Studio's **🖼 Pictures** mode, and the same tools for Jarvis (`studio.picture_text`,
+`svg_design`, `upscale_picture`, `edit_picture`, `composite_pictures`, `convert_picture`,
+`preview_picture`, `add_picture`, `find_pictures`, `list_pictures`). Every tool makes a new
+file in `data/studio/outputs/pictures`; originals are never changed.
+
+| Tool | What it does | Runs on |
+|---|---|---|
+| **Text on it** | Real, sharp titles and credits on artwork (Inkscape, Inter), 7 positions, any colour | CPU |
+| **Upscale 4×** | Real-ESRGAN, e.g. so a cover reaches 300 dpi | Graphics card (ComfyUI) |
+| **Repaint part** | Drag boxes on the picture (Shift+drag for parts to keep) and describe what goes there; only the boxes change | Graphics card (ComfyUI, Z-Image) |
+| **SVG design** | Title cards, posters, cover layouts as PNG or PDF; self-contained SVG only (no links to files or the web) | CPU (Inkscape) |
+| **Convert** | PNG, JPG, WebP, TIFF, PDF (and PSD, TIFF, SVG, PDF in) | CPU |
+| **Composite** (Jarvis) | Paste part of one picture into another, colour-matched, feathered, optionally keyed | CPU |
+| **Preview** (Jarvis) | A pixel grid with the edit boxes on it, or a contact sheet, shown on the card | CPU |
+
+- **Upscale model:** download
+  [RealESRGAN_x4plus.pth](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth)
+  (64 MB) into `%LOCALAPPDATA%\Comfy-Desktop\ComfyUI-Shared\models\upscale_models` and restart
+  ComfyUI; the **Upscale 4×** chip turns green. Repainting uses the Z-Image files you already have.
+- **Pictures and Downloads folders:** like `MUSIC_DIR`, set `PICTURES_DIR` and `DOWNLOADS_DIR` in
+  `mission-control/.env` (read-only) to add pictures by path or with **Find**.
+- **Trash:** the 🗑 buttons (outputs and pictures) move files to `data/studio/.trash/<time>/`,
+  where you can put them back or delete them for good.
+- Jarvis can work on a picture the picture tool just made on his card: name it by its file name.
+
 ### Video studio
 
 **▶ Video studio** on the Studio page runs Jarvis Studio's video workflows (its code, from
@@ -288,7 +315,9 @@ API: `GET /api/studio/media`, `POST /api/studio/media {folder, filename, data}` 
 
 API (through the harness): `GET /api/studio/health|songs|jobs|outputs`, `GET /api/studio/songs/:id`,
 `POST /api/studio/songs {title, filename, data}` (base64), `DELETE /api/studio/songs/:id`,
-`POST /api/studio/jobs {type: split|song|practice|karaoke|sheet|daw, …}`,
+`POST /api/studio/jobs {type: split|song|vocals|practice|karaoke|sheet|daw|upscale|edit, …}`,
+`GET /api/studio/pictures`, `POST /api/studio/pictures` (base64) and `/pictures/{import,text,svg,preview,composite,convert}`,
+`DELETE /api/studio/outputs/<path>` (to the trash),
 `POST /api/studio/jobs/:id/cancel`, `GET /api/studio/files/<path>` (`?download=1`).
 
 ## Books: novels, ebooks, picture books and puzzle books
@@ -373,6 +402,12 @@ Under **Start from my own content** (or **Your content** on a book's page), add:
 - Each puzzle page has the story, the suspects, the facts, the clues and a solving grid.
   The answer key (culprit and full solution) comes at the back. Default trim is 8.5×11 in.
 - Making a hard puzzle takes a few seconds of solving per puzzle.
+- **Word searches** (themed word lists): the Writer picks the topics and words, and code hides
+  them in the grid (easy 12×12 across and down, medium 15×15 with diagonals, hard 17×17 in any
+  direction, backwards included). Each one opens with a short themed intro; the answer key
+  shades the words.
+- **Sudoku**: no model at all. Code fills a grid and takes numbers away only while it still has
+  exactly one solution (easy 40 given, medium 32, hard 26). One per page, answers at the back.
 
 ### Find a niche (research)
 
@@ -429,7 +464,13 @@ Under **Start from my own content** (or **Your content** on a book's page), add:
   in per page). It has spine text only from 80 pages, as KDP requires.
   - The back cover has the listing's back-cover text, with the barcode area left clear.
   - The front uses your cover picture (picture books: the first illustration), or a
-    typographic design in colours chosen from the title.
+    typographic design. Tick **The cover already has its title** when the picture is a
+    finished cover with its own lettering: it's printed as it is, with nothing on top.
+  - **Cover colours** (background, accent, text) set the back, spine and title band. Pick them,
+    press **Match the cover picture**, or leave them to be chosen from the title.
+  - The notes say when the cover picture is **under 300 dpi** in print and what size KDP
+    wants. **Upscale cover 4×** fixes that on the graphics card (Real-ESRGAN in ComfyUI, see
+    *Studio → Pictures*) and saves the result as the cover.
 - KDP's previewer has the final word: check both files there before publishing.
 
 ### Listing kit
