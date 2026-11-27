@@ -18,6 +18,9 @@ test("asking for a new picture is told apart from asking about one", () => {
   for (const p of ["create a flyer for the gamface brand", "design a banner for our YouTube channel", "make a thumbnail for the new video", "generate album cover art", "draw a mascot for the team", "make a sticker of a fox"])
     assert.equal(wantsPicture(p), true, p);
   for (const p of ["create a cover letter for the job", "write the text for a flyer", "make the background job faster", "create a component for the banner"]) assert.equal(wantsPicture(p), false, p);
+  // Making one again counts too ("remake this book cover" went to Vision, which can't make pictures)
+  for (const p of ["remake this book cover", "redo the cover", "Recreate this photo in watercolour", "regenerate the logo", "redesign my book cover", "make a new cover"]) assert.equal(wantsPicture(p), true, p);
+  for (const p of ["make sure the tests cover the edge cases", "redo the cover letter", "does insurance cover this photo damage?", "regenerate the report"]) assert.equal(wantsPicture(p), false, p);
 });
 
 test("picture requests go to the picture tool, or to Jarvis when there isn't one, never to Vision", async () => {

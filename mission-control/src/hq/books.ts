@@ -23,6 +23,12 @@ import type { EpubInput } from "./epub";
 import { TRIM_INCHES, interiorPageCss, listingPrompt, parseListing } from "./kdp";
 import type { KdpTrim, Listing } from "./kdp";
 import { renderMarkdown } from "./markdown";
+import { BAND_STYLES, autoPalette, automatic, colorsFor, paletteById, titlePalette, paletteMenu, parseCoverColors } from "./palettes";
+import type { BandStyle, CoverColors } from "./palettes";
+import { coverBriefPrompt, coverStyle, fallbackBrief, finishPrompt, parseCoverBrief } from "./coverart";
+import type { CoverStyle } from "./coverart";
+import { LAYOUTS, fontPairById, fontsForGroup } from "./coverfonts";
+import type { FontPair, Layout } from "./coverfonts";
 import { PUZZLE_CSS, answerHtml, clueText, answerRows, makePuzzle, puzzleFacts, puzzleHtml, puzzleSize } from "./puzzles";
 import type { Category, Difficulty, Puzzle, PuzzleType } from "./puzzles";
 import { MAX_SOURCES_CHARS, chunkSources, rankChunks } from "./sources";
@@ -103,6 +109,43 @@ export interface Book {
   listing?: Listing;
   /** A listing kit was asked for and runs next */
   wantListing?: boolean;
+  /** The cover's colours. Left out, the cover prints with the palette picked from the title. */
+  coverColors?: CoverColors;
+  /** The ebook cover made from the book's colours (a saved file); the EPUB's cover when no picture is uploaded */
+  ebookCover?: string;
+  /** What the ebook cover was made from (title, colours, picture), to tell when it's out of date */
+  ebookCoverOf?: string;
+  /** AI cover art: the request, the art brief and the pictures drawn so far */
+  coverArt?: CoverArt;
+  /** The cover's type: a font pair and where the title goes over a picture (picked for the genre if left out) */
+  coverDesign?: { fonts?: string; layout?: Layout };
+}
+
+export interface CoverOption {
+  /** The saved picture (a file) */
+  name: string;
+  seed: number;
+  prompt: string;
+  at: number;
+}
+
+export interface CoverArt {
+  style: CoverStyle;
+  note?: string;
+  /** Ask the picture for the book's cover colours */
+  useColors?: boolean;
+  /** The brief the pictures are drawn from (yours, or the Writer's) */
+  prompt?: string;
+  /** You wrote the prompt yourself: the Writer doesn't rewrite it */
+  own?: boolean;
+  concept?: string;
+  /** Pictures still to draw, and how many were asked for this time */
+  pending: number;
+  round: number;
+  options: CoverOption[];
+  /** The option used as the cover picture */
+  picked?: string;
+  error?: string;
 }
 
 export type BookStep =
@@ -113,7 +156,9 @@ export type BookStep =
   | { kind: "continue"; n: number }
   | { kind: "summary"; n: number }
   | { kind: "illustrate"; n: number }
-  | { kind: "listing" };
+  | { kind: "listing" }
+  | { kind: "coverBrief" }
+  | { kind: "coverArt" };
 
 export const BOOK_ID = /^[a-f0-9]{12}$/;
 export const MAX_CHAPTERS = 60;
@@ -185,6 +230,10 @@ export function newBook(input: Record<string, unknown>, now = Date.now()): Book 
   };
   if (typeof input.trim === "string" && input.trim in TRIMS) book.trim = input.trim as Trim;
   if (input.faithful !== undefined) book.faithful = input.faithful !== false;
+  // New books get colours that suit their genre and brief; the Writer and the cover picture can refine them
+  const given = input.coverColors !== undefined ? parseCoverColors(input.coverColors, book, brandOf(input)) : undefined;
+  if (given && "error" in given) return given;
+  book.coverColors = given ?? (given === null ? undefined : { ...pickColors(autoPalette(book)), source: "auto" });
   if (kind === "picture") book.art = { style: str(input.artStyle, 300), characters: "", seed: hash32(uuid) % 2 ** 31, off: input.pictures === false ? true : undefined };
   if (kind === "puzzle") {
     const type: PuzzleType = input.puzzleType === "logic" ? "logic" : "mystery";
@@ -192,6 +241,120 @@ export function newBook(input: Record<string, unknown>, now = Date.now()): Book 
     book.puzzle = { type, difficulty };
   }
   return book;
+}
+
+const pickColors = ({ bg, fg, accent }: { bg: string; fg: string; accent: string }) => ({ bg, fg, accent });
+const brandOf = (input: Record<string, unknown>) => {
+  const b = input.brand as { background?: unknown; text?: unknown; accent?: unknown } | undefined;
+  return b && typeof b.background === "string" && typeof b.text === "string" && typeof b.accent === "string" ? { background: b.background, text: b.text, accent: b.accent } : undefined;
+};
+
+/** Picks the colours again from the genre and brief, if they were picked automatically from them. */
+export function refreshAutoColors(book: Book): boolean {
+  const c = book.coverColors;
+  if (!c || c.source !== "auto" || c.locked) return false;
+  const next = pickColors(autoPalette(book));
+  if (next.bg === c.bg && next.fg === c.fg && next.accent === c.accent) return false;
+  book.coverColors = { ...c, ...next };
+  return true;
+}
+
+/**
+ * Sets the cover colours: a palette id, "auto", "brand", { bg, fg, accent } or
+ * [background, accent, text]; null clears them (back to the title's palette). Returns
+ * what's wrong, or null.
+ */
+export function setCoverColors(book: Book, input: unknown, brand?: { background: string; text: string; accent: string }): string | null {
+  // Changing only the band or the lock keeps the colours (the title palette's, if the book has none yet)
+  if (input && typeof input === "object" && !Array.isArray(input) && !["bg", "background", "fg", "text", "accent", "palette"].some((k) => k in input)) {
+    const o = input as Record<string, unknown>;
+    const title = titlePalette(book.title);
+    const base: CoverColors = book.coverColors ?? { ...pickColors(title), source: "preset", palette: title.id };
+    const next = { ...base };
+    if (o.band !== undefined) {
+      if (typeof o.band !== "string" || !(BAND_STYLES as string[]).includes(o.band)) return `The band is one of: ${BAND_STYLES.join(", ")}`;
+      next.band = o.band as BandStyle;
+    }
+    if (o.locked !== undefined) next.locked = o.locked === true || undefined;
+    book.coverColors = next;
+    return null;
+  }
+  const c = parseCoverColors(input, book, brand);
+  if (c && "error" in c) return c.error;
+  // New colours keep the band style you chose
+  if (c && !c.band && book.coverColors?.band) c.band = book.coverColors.band;
+  book.coverColors = c ?? undefined;
+  return null;
+}
+
+/** The most cover options one request draws (each takes a minute or two on the graphics card). */
+export const MAX_COVER_OPTIONS = 6;
+
+/**
+ * Asks for cover pictures: {style, note, count, useColors, prompt}. A prompt of your own is
+ * drawn as it is; otherwise the Writer writes the brief first. Earlier options are kept.
+ */
+export function requestCoverArt(book: Book, input: Record<string, unknown>): string | null {
+  const style = coverStyle(input.style ?? "auto");
+  if (!style) return "Unknown cover style";
+  const count = int(input.count, 1, MAX_COVER_OPTIONS, 3);
+  const own = str(input.prompt, 1400);
+  if (own && own.split(/\s+/).length < 4) return "Describe the picture in a few more words";
+  const note = str(input.note, 600) || undefined;
+  const prev = book.coverArt;
+  // Same request as last time: draw more from the same brief
+  const same = prev && !own && prev.style === style.id && prev.note === note && !prev.own && Boolean(prev.useColors) === (input.useColors === true);
+  book.coverArt = {
+    style: style.id,
+    note,
+    useColors: input.useColors === true || undefined,
+    prompt: own ? finishPrompt(own, coverDesignFor(book).layout) : same ? prev!.prompt : undefined,
+    own: own ? true : undefined,
+    concept: same ? prev!.concept : undefined,
+    pending: count,
+    round: count,
+    options: prev?.options ?? [],
+    picked: prev?.picked,
+  };
+  return null;
+}
+
+/** Stops drawing and, with forget, drops the options not used as the cover. */
+export function stopCoverArt(book: Book, forget = false) {
+  if (!book.coverArt) return;
+  book.coverArt.pending = 0;
+  if (forget) book.coverArt = undefined;
+}
+
+/** The cover's font pair and layout: yours, or picked for the book's genre. */
+export function coverDesignFor(book: Book): { pair: FontPair; layout: Layout; auto: boolean } {
+  const d = book.coverDesign ?? {};
+  const group = (book.coverColors?.palette && paletteById(book.coverColors.palette)?.group) || autoPalette(book).group;
+  const pair = fontPairById(d.fonts) ?? fontsForGroup(group);
+  return { pair, layout: d.layout ?? (book.kind === "picture" ? "bottom" : "bands"), auto: !d.fonts };
+}
+
+/** Sets the font pair and layout ({fonts, layout}; "auto" or null goes back to the genre's choice). */
+export function setCoverDesign(book: Book, input: unknown): string | null {
+  if (input === null) {
+    book.coverDesign = undefined;
+    return null;
+  }
+  if (!input || typeof input !== "object") return "Send {fonts, layout}";
+  const o = input as Record<string, unknown>;
+  const next = { ...(book.coverDesign ?? {}) };
+  if (o.fonts !== undefined) {
+    if (o.fonts === null || o.fonts === "auto") delete next.fonts;
+    else if (typeof o.fonts === "string" && fontPairById(o.fonts)) next.fonts = o.fonts;
+    else return `Unknown fonts “${String(o.fonts).slice(0, 30)}”`;
+  }
+  if (o.layout !== undefined) {
+    if (o.layout === null || o.layout === "auto") delete next.layout;
+    else if (typeof o.layout === "string" && (LAYOUTS as readonly string[]).includes(o.layout)) next.layout = o.layout as Layout;
+    else return `The layout is one of: ${LAYOUTS.join(", ")}`;
+  }
+  book.coverDesign = Object.keys(next).length ? next : undefined;
+  return null;
 }
 
 /** Adds source material (the caller has turned it into text). Notes on the old sources are dropped. */
@@ -219,7 +382,8 @@ export function removeSource(book: Book, id: string): boolean {
  * Applies edits from the Books page. While a step is running only pausing is allowed;
  * chapter text can be edited by hand (its summary is then rewritten).
  */
-export function editBook(book: Book, input: Record<string, unknown>): string | null {
+export function editBook(book: Book, input: Record<string, unknown>, brand?: { background: string; text: string; accent: string }): string | null {
+  const before = `${book.title}|${book.genre}|${book.audience}|${book.brief}|${book.subtitle ?? ""}`;
   for (const k of ["title", "subtitle", "author", "genre", "audience", "style"] as const) {
     if (typeof input[k] === "string") (book as unknown as Record<string, unknown>)[k] = str(input[k], k === "style" ? 1000 : k === "audience" ? 300 : 200) || (k === "author" ? "Anonymous" : k === "subtitle" ? undefined : "");
   }
@@ -234,6 +398,14 @@ export function editBook(book: Book, input: Record<string, unknown>): string | n
   else if (typeof input.cover === "string") book.cover = input.cover;
   if (typeof input.faithful === "boolean") book.faithful = input.faithful;
   if (typeof input.trim === "string" && input.trim in TRIMS) book.trim = input.trim as Trim;
+  if (input.coverDesign !== undefined) {
+    const err = setCoverDesign(book, input.coverDesign);
+    if (err) return err;
+  }
+  if (input.coverColors !== undefined) {
+    const err = setCoverColors(book, input.coverColors, brand);
+    if (err) return err;
+  } else if (before !== `${book.title}|${book.genre}|${book.audience}|${book.brief}|${book.subtitle ?? ""}`) refreshAutoColors(book);
   if (input.art && typeof input.art === "object" && book.art) {
     const a = input.art as Record<string, unknown>;
     if (typeof a.style === "string") book.art.style = str(a.style, 300);
@@ -329,6 +501,9 @@ function stepFor(book: Book, c: Chapter, n: number): BookStep | null {
 
 /** The next step for a book, or null when it's waiting for you, paused or finished. */
 export function nextStep(book: Book): BookStep | null {
+  // Cover art you asked for runs even while the writing is paused: it doesn't touch the text
+  const art = book.coverArt;
+  if (art && art.pending > 0 && !art.error) return art.prompt ? { kind: "coverArt" } : { kind: "coverBrief" };
   if (book.paused) return null;
   if (book.stage === "planning") {
     if (needsDigest(book)) {
@@ -369,6 +544,12 @@ export function describeStep(book: Book, step: BookStep): string {
       return `Illustrating page ${of}`;
     case "listing":
       return "Writing the listing kit";
+    case "coverBrief":
+      return "Writing the cover art brief";
+    case "coverArt": {
+      const a = book.coverArt;
+      return a ? `Drawing cover option ${a.round - a.pending + 1} of ${a.round}` : "Drawing the cover";
+    }
   }
 }
 
@@ -763,6 +944,8 @@ export interface BookModel {
   json(messages: ChatMessage[]): Promise<{ json: Record<string, unknown>; ref: string }>;
   /** How many characters of prompt the model's context has room for */
   contextChars(): number;
+  /** Draws one cover picture (2:3) and saves it; returns the saved file's name */
+  coverPicture?(prompt: string, seed: number, signal: AbortSignal): Promise<{ name: string }>;
   /** Makes one illustration and saves it; returns the saved file's name */
   illustrate?(prompt: string, seed: number, size: PictureSize, signal: AbortSignal): Promise<{ name: string; ref?: string }>;
 }
@@ -830,6 +1013,7 @@ export async function runStep(book: Book, step: BookStep, model: BookModel, sign
         if (!book.subtitle && parsed.subtitle) book.subtitle = parsed.subtitle;
       }
       book.chapterCount = book.chapters.length;
+      refreshAutoColors(book); // a new title or subtitle can suit other colours
       book.stage = "review"; // you check the outline before anything is written
       return;
     }
@@ -873,12 +1057,49 @@ export async function runStep(book: Book, step: BookStep, model: BookModel, sign
       book.chapters[step.n].image = out.name;
       return;
     }
+    case "coverBrief": {
+      const a = book.coverArt!;
+      const req = { style: a.style, note: a.note, layout: coverDesignFor(book).layout, colors: a.useColors ? colorsFor(book) : undefined };
+      try {
+        const out = await model.json(coverBriefPrompt(book, req));
+        const brief = parseCoverBrief(out.json);
+        if ("error" in brief) throw new Error(brief.error);
+        a.prompt = finishPrompt(brief.prompt, req.layout);
+        a.concept = brief.concept || undefined;
+      } catch (e) {
+        if (signal.aborted) throw e;
+        // The pictures still get drawn, from a brief made from the book itself
+        a.prompt = fallbackBrief(book, req);
+        a.concept = `Quick brief (the Writer couldn't write one: ${(e instanceof Error ? e.message : String(e)).slice(0, 120)})`;
+      }
+      return;
+    }
+    case "coverArt": {
+      const a = book.coverArt!;
+      // A cover picture that fails is reported on the cover art panel; the book itself carries on
+      try {
+        if (!model.coverPicture) throw new Error("Cover pictures need the tools service with ComfyUI (TOOLS_URL and the images server)");
+        const seed = hash32(`${book.uuid}:cover:${a.options.length}:${a.prompt}`) % 2 ** 31;
+        const out = await model.coverPicture(a.prompt!, seed, signal);
+        a.options.push({ name: out.name, seed, prompt: a.prompt!, at: Date.now() });
+        a.pending = Math.max(0, a.pending - 1);
+      } catch (e) {
+        if (signal.aborted) throw e;
+        a.error = (e instanceof Error ? e.message : String(e)).slice(0, 400);
+        a.pending = 0;
+      }
+      return;
+    }
     case "listing": {
-      const out = await model.json(listingPrompt(book));
+      const pickPalette = automatic(book.coverColors);
+      const out = await model.json(listingPrompt(book, pickPalette ? paletteMenu(book) : undefined));
       const listing = parseListing(out.json);
       if ("error" in listing) throw new Error(listing.error);
       book.listing = listing;
       book.wantListing = undefined;
+      // The Writer has read the whole plan: its palette choice beats a keyword match (but not your own or the picture's)
+      const chosen = listing.palette ? paletteById(listing.palette) : undefined;
+      if (chosen && pickPalette && book.coverColors?.source !== "picture") book.coverColors = { ...book.coverColors, ...pickColors(chosen), source: "writer", palette: chosen.id };
       return;
     }
   }
@@ -962,6 +1183,7 @@ export function bookSummary(book: Book) {
     chapterTotal: chapters.length,
     sourceCount: sources?.length ?? 0,
     next: step ? describeStep(book, step) : null,
+    colors: colorsFor(book),
   };
 }
 
@@ -990,6 +1212,7 @@ export function bookDetail(book: Book) {
     digests: undefined,
     sourceParts: chunks,
     digested: (book.digests ?? []).filter(Boolean).length,
+    colors: colorsFor(book),
   };
 }
 

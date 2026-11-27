@@ -58,7 +58,8 @@ export const TEAM: Record<AgentKey, TeamMember> = {
     role: "reads pictures the user attached: screenshots, photos, diagrams, documents (it can't make pictures)",
     prompt:
       "You are Jarvis Vision. Look carefully at the attached pictures and answer about what they actually show: read text exactly, describe layouts, errors, diagrams and details. Say plainly when something is unclear or not visible. " +
-      "If no picture is attached, say only that no picture came with the request and that you read pictures but can't make them. Never guess at other attachments.",
+      "If no picture is attached, say only that no picture came with the request and that you read pictures but can't make them. Never guess at other attachments. " +
+      "If you're asked to make, remake, edit or redesign a picture, say plainly that you can only read pictures, describe what the attached one shows if that helps, and suggest asking \"make a new picture of …\" (or, for a book cover, the Cover art panel on the Books page). Never say a picture was made, saved or is waiting somewhere.",
   },
   tools: {
     key: "tools",
@@ -126,7 +127,7 @@ export function needsWeb(prompt: string): boolean {
 
 const MAKE_PICTURE =
   // the verb, then (without passing code, an app or a page: "create a script that resizes images") the picture
-  /\b(make|create|draw|generate|paint|render|design|produce|imagine|sketch|illustrate)\b(?:(?!\b(?:scripts?|code|functions?|programs?|apps?|tools?|pages?|sites?|websites?|components?|class|folders?|galler(?:y|ies)|bots?|commands?)\b)[^.?!\n]){0,60}?\b(pictures?|photos?|photographs?|images?|drawings?|illustrations?|paintings?|portraits?|artwork|wallpapers?|logos?|posters?|icons?|sketch(es)?|fl[yi]ers?|banners?|graphics?|thumbnails?|cover art|album covers?|book covers?|mascots?|stickers?|avatars?|infographics?)\b/i;
+  /\b(make|create|draw|generate|paint|render|design|produce|imagine|sketch|illustrate|remake|redo|recreate|regenerate|redesign|redraw|reimagine)\b(?:(?!\b(?:scripts?|code|functions?|programs?|apps?|tools?|pages?|sites?|websites?|components?|class|folders?|galler(?:y|ies)|bots?|commands?)\b)[^.?!\n]){0,60}?\b(pictures?|photos?|photographs?|images?|drawings?|illustrations?|paintings?|portraits?|artwork|wallpapers?|logos?|posters?|icons?|sketch(es)?|fl[yi]ers?|banners?|graphics?|thumbnails?|cover art|album covers?|book covers?|(?<=\b(?:the|a|an|this|that|my|our|its|new|front|back)\s+)covers?(?!\s+letters?)|mascots?|stickers?|avatars?|infographics?)\b/i;
 
 /** Whether the request asks for a new picture to be made (not one read). Exported for tests. */
 export function wantsPicture(prompt: string): boolean {
