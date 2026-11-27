@@ -44,6 +44,8 @@ import {
   synthesisPrompt,
   teamContext,
   vaultNotes,
+  wantsPicture,
+  keywordRoute,
   withLiveContext,
 } from "./hq/team";
 import { TelegramBot } from "./hq/telegram";
@@ -1321,6 +1323,12 @@ async function runTask(task: Task) {
       task.targetAgent = "coder";
       task.routedBy = "router";
       log("router", "routed", `→ coder (a video): ${spokenNow ? "(spoken request)" : ask}`);
+    } else if (task.requestedAgent === "auto" && images.length && wantsPicture(ask) && keywordRoute(ask) === "tools") {
+      // "Remake this cover", "make a watercolour of this photo": the picture tool makes it, and
+      // Vision describes the attached picture for it first (Vision can't make pictures)
+      task.targetAgent = "tools";
+      task.routedBy = "router";
+      log("router", "routed", `→ tools (make a picture from the attached one): ${ask}`);
     } else if (task.requestedAgent === "auto" && images.length) {
       // Pictures go to the agent that can see them
       task.targetAgent = "vision";
