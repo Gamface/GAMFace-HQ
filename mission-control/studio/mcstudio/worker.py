@@ -12,13 +12,14 @@ import time
 import traceback
 from pathlib import Path
 
-from . import analyze, audio, daw, karaoke, separate, sheet, videojobs
+from . import analyze, audio, daw, karaoke, pictures, separate, sheet, videojobs
 from .js import context as js_context
-from .comfy import STEM_NODE, STEMS, Comfy, ComfyError, audio_files, song_workflow, split_workflow
+from .comfy import STEM_NODE, STEMS, UPSCALE_DOWNLOAD, Comfy, ComfyError, audio_files, edit_workflow, image_files, song_workflow, split_workflow, upscale_workflow
 from .store import DATA, Jobs, Library, slug
 
 MUSIC_KINDS = ("split", "song", "vocals", "practice", "karaoke", "sheet", "daw")
-KINDS = MUSIC_KINDS + videojobs.VIDEO_KINDS
+PICTURE_KINDS = ("upscale", "edit")
+KINDS = MUSIC_KINDS + PICTURE_KINDS + videojobs.VIDEO_KINDS
 
 
 class Worker:
@@ -255,6 +256,77 @@ class Worker:
             self.wake.set()
         return result
 
+    # --- pictures on the graphics card -------------------------------------------------
+
+    def need_comfy(self) -> Comfy:
+        if not self.comfy:
+            raise ValueError("Picture jobs run in ComfyUI on the PC: set COMFY_URL for the studio service")
+        if not self.comfy.running():
+            raise ComfyError("ComfyUI isn't running on the PC")
+        return self.comfy
+
+    def do_upscale(self, job: dict, picture: str, model: str = "") -> dict:
+        """4x larger and sharper (Real-ESRGAN in ComfyUI), e.g. for a 300 dpi print cover."""
+        comfy = self.need_comfy()
+        src = pictures.path_of(picture, self.data)
+        models = comfy.options("UpscaleModelLoader", "model_name")
+        pick = model if model in models else next((m for m in models if "esrgan" in m.lower() and "x4" in m.lower()), None) or (models[0] if models else None)
+        if not pick:
+            raise ValueError(f"ComfyUI has no upscale model yet: download RealESRGAN_x4plus.pth ({UPSCALE_DOWNLOAD}) into ComfyUI's models\\upscale_models folder, then try again.")
+        im = pictures.open_image(src)
+        if im.width * im.height > 4_000_000:
+            raise ValueError(f"That picture is already {im.width}x{im.height}; 4x would be too large")
+        self.progress(job, f"upscaling on the graphics card ({pick})")
+        with tempfile.TemporaryDirectory() as tmp:
+            flat = Path(tmp) / f"{slug(src.stem)}.png"
+            pictures._flatten(im).save(flat)
+            name = comfy.upload(flat, "mission-control")
+            outputs = comfy.run(upscale_workflow(name, pick, "mission-control/upscaled"), timeout=1800, cancelled=self.cancelled(job), progress=lambda t: self.progress(job, f"upscaling: {t}"))
+            files = image_files(outputs)
+            if not files:
+                raise ComfyError("ComfyUI finished but saved no picture")
+            d = pictures.out_dir(f"{src.stem}-4x", self.data)
+            dst = comfy.fetch(files[0], d / f"{slug(src.stem)}-4x.png")
+        big = pictures.info(dst, self.data)
+        return {"message": f"Upscaled {src.name} from {im.width}x{im.height} to {big['width']}x{big['height']} ({pick}).", "files": self.rel(dst), "picture": big["path"]}
+
+    def do_edit(self, job: dict, picture: str, prompt: str, boxes: list, keep: list | None = None, strength: float = 0.9, seed: int | None = None) -> dict:
+        """Repaints the boxes of a picture from a description (remove something, change it, even out
+        a background); the keep boxes and everything outside the boxes stay exactly as they were."""
+        from .js.images import MODEL, TEXT_ENCODER, VAE
+
+        comfy = self.need_comfy()
+        src = pictures.path_of(picture, self.data)
+        orig = pictures.open_image(src).convert("RGB")
+        work = pictures.fit16(orig)
+        sx, sy = work.width / orig.width, work.height / orig.height
+        scaled = lambda bs: [[b[0] * sx, b[1] * sy, b[2] * sx, b[3] * sy] for b in (pictures.clean_box(b, *orig.size) for b in bs)]  # noqa: E731
+        seed = int(seed) if seed is not None else random.randrange(1, 2**31)
+        self.progress(job, "repainting on the graphics card (Z-Image)")
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            work.save(t / "image.png")
+            # A little wider than the boxes, so the new part blends into the old
+            pictures.mask_for(work.size, scaled(boxes), scaled(keep or []), feather=4).save(t / "mask.png")
+            img_name = comfy.upload(t / "image.png", "mission-control")
+            mask_name = comfy.upload(t / "mask.png", "mission-control")
+            outputs = comfy.run(
+                edit_workflow(img_name, mask_name, prompt[:1500], seed, float(strength), "mission-control/edited", MODEL, TEXT_ENCODER, VAE),
+                timeout=1800, cancelled=self.cancelled(job), progress=lambda x: self.progress(job, f"repainting: {x}"),
+            )
+            files = image_files(outputs)
+            if not files:
+                raise ComfyError("ComfyUI finished but saved no picture")
+            new = pictures.open_image(comfy.fetch(files[0], t / "new.png")).convert("RGB").resize(orig.size)
+        # Only the boxes change: the new picture is laid over the original through a soft mask
+        soft = pictures.mask_for(orig.size, boxes, keep or [], feather=max(2, min(orig.size) // 200))
+        out = orig.copy()
+        out.paste(new, (0, 0), soft)
+        d = pictures.out_dir(f"{src.stem}-edit", self.data)
+        dst = d / f"{slug(src.stem)}-edit.png"
+        out.save(dst)
+        return {"message": f"Repainted {len(boxes)} part{'s' if len(boxes) != 1 else ''} of {src.name}: {prompt[:80]}", "files": self.rel(dst), "picture": pictures.rel(dst, self.data)}
+
     def do_practice(self, job: dict, song: str, gains: dict | None = None, speed: float = 1.0, semitones: float = 0, start: float | None = None, end: float | None = None) -> dict:
         meta = self.song(song)
         stems = self.ready_stems(song)
@@ -339,8 +411,8 @@ class Worker:
 
 def job_title(kind: str, params: dict, library: Library) -> str:
     song = library.get(str(params.get("song", ""))) if params.get("song") else None
-    name = str(params.get("title") or "") or (song["title"] if song else str(params.get("prompt") or "")[:60])
-    labels = {"split": "Split", "song": "New song", "vocals": "Add vocals", "practice": "Practice", "karaoke": "Karaoke", "sheet": "Sheet music", "daw": "DAW stems", **videojobs.LABELS}
+    name = str(params.get("title") or "") or (song["title"] if song else Path(str(params.get("picture") or "")).name or str(params.get("prompt") or "")[:60])
+    labels = {"split": "Split", "song": "New song", "vocals": "Add vocals", "upscale": "Upscale 4x", "edit": "Repaint", "practice": "Practice", "karaoke": "Karaoke", "sheet": "Sheet music", "daw": "DAW stems", **videojobs.LABELS}
     return labels[kind] + (f": {name[:60]}" if name else "")
 
 
@@ -350,6 +422,24 @@ def check_params(kind: str, p: dict, library: Library) -> str | None:
         return f"Unknown job type (one of {', '.join(KINDS)})"
     if kind in videojobs.VIDEO_KINDS:
         return videojobs.check(kind, p, library)
+    if kind in PICTURE_KINDS:
+        try:
+            src = pictures.path_of(str(p.get("picture", "")), library.root.parent)
+        except ValueError as e:
+            return str(e)
+        if kind == "edit":
+            if not str(p.get("prompt", "")).strip():
+                return "Describe what the boxes should show instead"
+            boxes = p.get("boxes")
+            if not isinstance(boxes, list) or not boxes or not all(isinstance(b, list) and len(b) == 4 for b in boxes):
+                return "Give at least one box to repaint: [[x0, y0, x1, y1], ...] in pixels"
+            try:
+                size = pictures.open_image(src).size
+                for b in boxes + list(p.get("keep") or []):
+                    pictures.clean_box(b, *size)
+            except ValueError as e:
+                return str(e)
+        return None
     if kind == "song":
         if not str(p.get("prompt", "")).strip():
             return "Describe the song (style, instruments, mood)"

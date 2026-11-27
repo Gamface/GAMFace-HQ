@@ -186,7 +186,8 @@ export async function routeTask(chat: JsonChat, model: string, prompt: string): 
           "file is only for reading or organizing the user's own notes. " +
           (toolsSummary ? "Pick tools when one of its installed tools clearly answers the request. " : "") +
           (installedTools.has("studio.add_vocals")
-            ? "Anything about the music studio (finding or adding a track or audio file, writing lyrics for a song, adding vocals or lyrics to a track, making a song) goes to tools. "
+            ? "Anything about the music studio (finding or adding a track or audio file, writing lyrics for a song, adding vocals or lyrics to a track, making a song) " +
+              "or about changing an existing picture (text or a title on artwork, upscaling, removing or repainting part of it, combining pictures, converting, an SVG design) goes to tools. "
             : "") +
           'Reply with JSON only: {"agent": "<key>", "reason": "<a few words>"}',
       },

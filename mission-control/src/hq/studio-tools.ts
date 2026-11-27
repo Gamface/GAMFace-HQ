@@ -20,6 +20,18 @@ export interface StudioSong {
 
 export type StudioFetch = (path: string, init?: { method?: string; body?: unknown }) => Promise<unknown>;
 
+interface PictureOut {
+  file?: string;
+  path?: string;
+  name?: string;
+  width?: number;
+  height?: number;
+  preview?: string;
+  gridStep?: number | null;
+}
+
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|tiff?|psd|svg|pdf)$/i;
+
 /** Sections to write for a song this long: enough words to fill it, not so many they're rushed. */
 export function lyricShape(seconds: number): string {
   if (seconds <= 75) return "[Verse] (4 lines), [Chorus] (4 lines)";
@@ -116,8 +128,56 @@ function describe(s: StudioSong): string {
   return `- "${s.title}" (id ${s.id}): ${bits.join(", ")}`;
 }
 
-export function studioTools(opts: { studio: StudioFetch; chat: JsonChat }): LocalToolServer {
+export function studioTools(opts: {
+  studio: StudioFetch;
+  chat: JsonChat;
+  /** A picture saved on a card (by name), so Jarvis can work on pictures the picture tool made */
+  cardFile?: (name: string) => Buffer | null;
+  /** How long a picture job (upscale, repaint) is waited for before Jarvis answers */
+  jobWaitMs?: number;
+}): LocalToolServer {
   const { studio, chat } = opts;
+  const jobWait = opts.jobWaitMs ?? 8 * 60_000;
+  /** The studio path of a picture named by its studio path, a card file, a PC path or part of its name. */
+  const pictureRef = async (ref: unknown): Promise<string> => {
+    const want = str(ref, 1000);
+    if (!want) throw new Error("Say which picture (list them with studio.list_pictures)");
+    if (/^(pictures|outputs)\//.test(want)) return want;
+    const card = opts.cardFile && IMAGE_EXT.test(want) && !/[\\/]/.test(want) ? opts.cardFile(want) : null;
+    if (card) {
+      const added = (await studio("/pictures", { method: "POST", body: { filename: want, data: card.toString("base64") } })) as PictureOut;
+      return added.path!;
+    }
+    if (/[\\/]/.test(want) && IMAGE_EXT.test(want)) {
+      const added = (await studio("/pictures/import", { method: "POST", body: { path: want } })) as PictureOut;
+      return added.path!;
+    }
+    const all = ((await studio("/pictures")) as { pictures?: PictureOut[] }).pictures ?? [];
+    const w = norm(want);
+    const hits = all.filter((p) => norm(p.name ?? "").includes(w) || norm(p.path ?? "").includes(w));
+    if (hits.length >= 1) return hits[0].path!; // newest first
+    throw new Error(`No picture "${want}" in the studio. Add it with studio.add_picture (a path on the PC or a picture on this card), or list them with studio.list_pictures.`);
+  };
+  const shown = (out: PictureOut, what: string) => ({
+    text: `${what}: ${out.file ?? out.path} (${out.width}x${out.height}). It's shown on the card and saved in the Studio's pictures.`,
+    ...(out.preview ? { media: [{ mimeType: "image/jpeg" as const, data: out.preview }] } : {}),
+  });
+  const waitJob = async (id: string) => {
+    type Job = { id: string; title: string; status: string; progress?: string; error?: string; result?: { message?: string; picture?: string } };
+    const until = Date.now() + jobWait;
+    for (;;) {
+      const j = (await studio(`/jobs/${id}`)) as Job;
+      if (j.status === "done") {
+        const pic = j.result?.picture;
+        const thumb = pic ? ((await studio(`/pictures/thumb?path=${encodeURIComponent(pic)}`)) as PictureOut) : null;
+        return thumb ? shown({ ...thumb, file: pic }, j.result?.message ?? "Done") : { text: j.result?.message ?? "Done" };
+      }
+      if (j.status === "failed" || j.status === "cancelled") return { text: `${j.title} ${j.status}: ${j.error ?? ""}`, isError: true };
+      if (Date.now() > until) return { text: `${j.title} is still ${j.status}${j.progress ? ` (${j.progress})` : ""}: job ${j.id}. It lands on the Studio page when done; check with studio.job_status.` };
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  };
+  const box = { type: "array", items: { type: "number" }, description: "[x0, y0, x1, y1] in pixels" };
   const songs = async () => ((await studio("/songs")) as { songs?: StudioSong[] }).songs ?? [];
   const startJob = async (body: Record<string, unknown>) => (await studio("/jobs", { method: "POST", body })) as { id: string; title: string };
   const lyricsFor = async (song: StudioSong | null, a: Record<string, unknown>) =>
@@ -133,12 +193,16 @@ export function studioTools(opts: { studio: StudioFetch; chat: JsonChat }): Loca
 
   return {
     name: "studio",
-    description: "Mission Control's music studio: find tracks in the user's Music folder, add them, write lyrics, sing lyrics over an instrumental, make songs (ACE-Step on this PC's graphics card)",
+    description:
+      "Mission Control's studio: find tracks in the user's Music folder, add them, write lyrics, sing lyrics over an instrumental, make songs (ACE-Step); and work on pictures: text on artwork, SVG designs, upscale 4x, repaint parts, composite, convert",
     notes:
       "To put lyrics on a track the user names (a file path like C:\\Users\\...\\Song.mp3, or a title): studio.list_songs to see if it's already in the studio; if not, studio.find_music then studio.import_song with the path; then studio.add_vocals with that song " +
       "(it writes lyrics from the theme when you don't pass any). Songs and vocals take a few minutes on the graphics card: the tools start the job and the result appears on the Studio page; studio.job_status checks on it. " +
-      "You can write lyrics yourself with studio.write_lyrics. Never say you can't write lyrics or reach the file: use these tools.",
-    timeoutMs: 180_000,
+      "You can write lyrics yourself with studio.write_lyrics. Never say you can't write lyrics or reach the file: use these tools. " +
+      "PICTURES: name a picture by its studio path (pictures/... or outputs/...), a picture's file name on this card, or a path on the PC. Picture tools never change the original: each makes a new file. " +
+      "To fix part of a picture: studio.preview_picture (it shows a pixel grid on the card and gives the size), then studio.edit_picture with boxes in those pixels. " +
+      "For print covers under 300 dpi, studio.upscale_picture. For a title on artwork use studio.picture_text (real, sharp text) rather than asking the picture model to draw letters.",
+    timeoutMs: 10 * 60_000,
     tools: [
       {
         name: "list_songs",
@@ -279,6 +343,171 @@ export function studioTools(opts: { studio: StudioFetch; chat: JsonChat }): Loca
           const list: Job[] = /^[a-f0-9]{12}$/.test(id) ? [(await studio(`/jobs/${id}`)) as Job] : (((await studio("/jobs")) as { jobs?: Job[] }).jobs ?? []).slice(0, 6);
           if (!list.length) return { text: "No studio jobs yet." };
           return { text: list.map((j) => `- ${j.title} (job ${j.id}): ${j.status}${j.progress ? `, ${j.progress}` : ""}${j.error ? ` — ${j.error}` : ""}${j.result?.message ? ` — ${j.result.message}` : ""}`).join("\n") };
+        },
+      },
+      {
+        name: "list_pictures",
+        description: "The pictures in the studio (added ones and what the picture tools made), newest first",
+        inputSchema: { type: "object", properties: { query: { type: "string", description: "words from the name (optional)" } } },
+        readOnly: true,
+        run: async (a) => {
+          const all = ((await studio("/pictures")) as { pictures?: PictureOut[] }).pictures ?? [];
+          const w = norm(str(a.query, 200));
+          const hits = w ? all.filter((p) => norm(p.path ?? "").includes(w)) : all;
+          return { text: hits.length ? hits.slice(0, 40).map((p) => `- ${p.path} (${p.width}x${p.height})`).join("\n") : "No pictures in the studio yet." };
+        },
+      },
+      {
+        name: "find_pictures",
+        description: "Searches the user's shared Pictures, Downloads and Music folders on the PC for pictures (by words in the file name)",
+        inputSchema: { type: "object", properties: { query: { type: "string" } } },
+        readOnly: true,
+        run: async (a) => {
+          const q = str(a.query, 300).replace(/^.*[\\/]/, "").replace(IMAGE_EXT, "");
+          const out = (await studio(`/shared?kind=pictures&q=${encodeURIComponent(q)}`)) as { files?: { folder: string; path: string; sizeMB: number }[]; error?: string };
+          if (out.error) return { text: out.error, isError: true };
+          const files = out.files ?? [];
+          return { text: files.length ? files.slice(0, 40).map((f) => `- ${f.folder}: ${f.path} (${f.sizeMB} MB)`).join("\n") : `No pictures matching "${q}" in the shared folders.` };
+        },
+      },
+      {
+        name: "add_picture",
+        description: "Adds a picture to the studio: from a path on the PC (shared Pictures/Downloads folder) or a picture saved on this card",
+        inputSchema: { type: "object", properties: { picture: { type: "string", description: "C:\\Users\\...\\x.png, a find_pictures path, or a card file name" } }, required: ["picture"] },
+        readOnly: true,
+        run: async (a) => {
+          const path = await pictureRef(a.picture);
+          const thumb = (await studio(`/pictures/thumb?path=${encodeURIComponent(path)}`)) as PictureOut;
+          return shown({ ...thumb, file: path }, "Added");
+        },
+      },
+      {
+        name: "picture_text",
+        description: "Puts real, sharp text on a picture (Inkscape): a title and an optional subtitle or credit, e.g. a cover title or a thumbnail caption",
+        inputSchema: {
+          type: "object",
+          properties: {
+            picture: { type: "string" },
+            title: { type: "string", description: "the main text (\\n for a second line)" },
+            subtitle: { type: "string" },
+            position: { type: "string", enum: ["top", "center", "bottom", "top-left", "top-right", "bottom-left", "bottom-right"] },
+            color: { type: "string", description: "#rrggbb, default white" },
+            size: { type: "number", description: "title size in pixels (default: fits the picture)" },
+          },
+          required: ["picture", "title"],
+        },
+        readOnly: true,
+        run: async (a) => {
+          const picture = await pictureRef(a.picture);
+          const out = (await studio("/pictures/text", { method: "POST", body: { picture, title: str(a.title, 200), subtitle: str(a.subtitle, 200), position: str(a.position, 20) || "bottom", color: str(a.color, 7) || "#ffffff", size: num(a.size) ?? 0 } })) as PictureOut;
+          return shown(out, "Made");
+        },
+      },
+      {
+        name: "svg_design",
+        description: "Renders a design you write as SVG (title cards, posters, cover layouts, logos, lower thirds) to PNG or PDF. Self-contained SVG only: no links to files or the web",
+        inputSchema: {
+          type: "object",
+          properties: {
+            svg: { type: "string", description: "a complete <svg> with width, height and viewBox" },
+            title: { type: "string" },
+            format: { type: "string", enum: ["png", "pdf"] },
+            width: { type: "number", description: "PNG width in pixels (optional)" },
+          },
+          required: ["svg"],
+        },
+        readOnly: true,
+        run: async (a) => {
+          const out = (await studio("/pictures/svg", { method: "POST", body: { svg: str(a.svg, 2_000_000), title: str(a.title, 80) || "design", format: str(a.format, 4) || "png", width: num(a.width) ?? 0 } })) as PictureOut;
+          return out.preview ? shown(out, "Rendered") : { text: `Rendered ${out.file} (PDF), with its SVG next to it.` };
+        },
+      },
+      {
+        name: "preview_picture",
+        description: "Shows a picture on the card with a labelled pixel grid (and edit boxes in red, keep boxes in green) to plan an edit, or a numbered contact sheet of several pictures",
+        inputSchema: {
+          type: "object",
+          properties: {
+            pictures: { type: "array", items: { type: "string" }, description: "one picture (grid) or several (contact sheet)" },
+            boxes: { type: "array", items: box, description: "boxes to repaint, drawn in red" },
+            keep: { type: "array", items: box, description: "boxes to keep, drawn in green" },
+            grid: { type: "boolean" },
+          },
+          required: ["pictures"],
+        },
+        readOnly: true,
+        run: async (a) => {
+          const names = Array.isArray(a.pictures) ? a.pictures.slice(0, 12) : [a.pictures];
+          const refs = [];
+          for (const n of names) refs.push(await pictureRef(n));
+          const out = (await studio("/pictures/preview", { method: "POST", body: { pictures: refs, boxes: a.boxes ?? [], keep: a.keep ?? [], grid: a.grid !== false } })) as PictureOut & { size?: number[] };
+          return {
+            ...shown(out, refs.length > 1 ? "Contact sheet" : "Preview"),
+            text: refs.length > 1 ? `Contact sheet of ${refs.length} pictures, numbered in order: ${refs.join(", ")}` : `${refs[0]} is ${out.size?.[0]}x${out.size?.[1]} pixels${out.gridStep ? `; grid lines every ${out.gridStep} px` : ""}. The preview is on the card.`,
+          };
+        },
+      },
+      {
+        name: "composite_pictures",
+        description: "Pastes part of one picture into another: source_box from the source, placed with its top-left at `at` on the base; optional scale, colour match, feathered edges and keying out a plain background",
+        inputSchema: {
+          type: "object",
+          properties: {
+            base: { type: "string" },
+            source: { type: "string" },
+            source_box: box,
+            at: { type: "array", items: { type: "number" }, description: "[x, y] on the base" },
+            scale: { type: "number" },
+            feather: { type: "number", description: "soft edge in pixels (default 12)" },
+            match: { type: "boolean", description: "match the colours to the base (default true)" },
+            key: { type: "string", description: "make a plain background see-through: white, black or #rrggbb" },
+          },
+          required: ["base", "source", "source_box", "at"],
+        },
+        readOnly: true,
+        run: async (a) => {
+          const body = { base: await pictureRef(a.base), source: await pictureRef(a.source), source_box: a.source_box, at: a.at, scale: num(a.scale) ?? 1, feather: num(a.feather) ?? 12, match: a.match !== false, key: str(a.key, 8) };
+          return shown((await studio("/pictures/composite", { method: "POST", body })) as PictureOut, "Made");
+        },
+      },
+      {
+        name: "convert_picture",
+        description: "Converts a picture to png, jpg, webp, tiff or pdf",
+        inputSchema: { type: "object", properties: { picture: { type: "string" }, to: { type: "string", enum: ["png", "jpg", "webp", "tiff", "pdf"] } }, required: ["picture", "to"] },
+        readOnly: true,
+        run: async (a) => {
+          const out = (await studio("/pictures/convert", { method: "POST", body: { picture: await pictureRef(a.picture), to: str(a.to, 5) } })) as PictureOut;
+          return out.preview ? shown(out, "Converted") : { text: `Converted: ${out.file}` };
+        },
+      },
+      {
+        name: "upscale_picture",
+        description: "Makes a picture 4x larger and sharper (Real-ESRGAN on the graphics card), e.g. so a cover reaches 300 dpi for print",
+        inputSchema: { type: "object", properties: { picture: { type: "string" } }, required: ["picture"] },
+        readOnly: true,
+        run: async (a) => {
+          const job = await startJob({ type: "upscale", picture: await pictureRef(a.picture) });
+          return waitJob(job.id);
+        },
+      },
+      {
+        name: "edit_picture",
+        description: "Repaints parts of a picture from a description (remove something, replace it, even out a background) on the graphics card. Only the boxes change; keep boxes inside them stay as they are",
+        inputSchema: {
+          type: "object",
+          properties: {
+            picture: { type: "string" },
+            prompt: { type: "string", description: "what the boxes should show instead, as a visual description" },
+            boxes: { type: "array", items: box },
+            keep: { type: "array", items: box },
+            strength: { type: "number", description: "0.5-1.0, how freely to repaint (default 0.9)" },
+          },
+          required: ["picture", "prompt", "boxes"],
+        },
+        readOnly: true,
+        run: async (a) => {
+          const job = await startJob({ type: "edit", picture: await pictureRef(a.picture), prompt: str(a.prompt, 1500), boxes: a.boxes, keep: a.keep ?? [], ...(num(a.strength) !== undefined ? { strength: num(a.strength) } : {}) });
+          return waitJob(job.id);
         },
       },
     ],

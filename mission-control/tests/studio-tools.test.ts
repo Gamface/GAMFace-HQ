@@ -52,7 +52,8 @@ test("Jarvis's studio tools: add vocals writes lyrics and starts the job; nothin
   const servers = await client.list();
   assert.deepEqual(servers.map((s) => s.name), ["studio"]);
   const ro = toolsFor({ routine: true }, servers).map((t) => t.name);
-  assert.deepEqual(ro.sort(), ["find_music", "job_status", "list_songs", "write_lyrics"], "routines only get the read-only ones");
+  assert.ok(!ro.includes("import_song") && !ro.includes("add_vocals") && !ro.includes("make_song"), "routines only get the read-only ones");
+  assert.ok(ro.includes("write_lyrics") && ro.includes("picture_text") && ro.includes("upscale_picture"));
 
   await assert.rejects(client.call("studio", "add_vocals", { song: "all blacks" }), /needs your approval/);
   const found = await client.call("studio", "find_music", { query: "C:\\Users\\aldra\\Music\\GAMFACE-ALL BLACKS-INSTRU.mp3" });
@@ -77,4 +78,31 @@ test("the studio tools make the Tools teammate available on their own", () => {
   setToolsSummary("studio: add_vocals (asks first: Sings lyrics…)", ["studio.add_vocals"]);
   assert.equal(toolsAvailable(), true);
   setToolsSummary(null);
+});
+
+test("picture tools: a card picture goes to the studio, edits wait for the job and show the result", async () => {
+  const calls: { path: string; method?: string; body?: unknown }[] = [];
+  let polls = 0;
+  const studio = async (path: string, init: { method?: string; body?: unknown } = {}) => {
+    calls.push({ path, ...init });
+    if (path === "/pictures" && init.method === "POST") return { path: "pictures/images-sunset.png", width: 1216, height: 832 };
+    if (path === "/pictures") return { pictures: [{ path: "outputs/pictures/cover-1a2b3c/cover-4x.png", name: "cover-4x.png", width: 4864, height: 3328 }] };
+    if (path === "/pictures/text") return { file: "outputs/pictures/x-text/x-text.png", width: 1216, height: 832, preview: "QUJD" };
+    if (path === "/jobs" && init.method === "POST") return { id: "ffffffffffff", title: "Repaint" };
+    if (path === "/jobs/ffffffffffff") return ++polls < 2 ? { id: "ffffffffffff", title: "Repaint", status: "running", progress: "repainting" } : { id: "ffffffffffff", title: "Repaint", status: "done", result: { message: "Repainted 1 part", picture: "outputs/pictures/e/e.png" } };
+    if (path.startsWith("/pictures/thumb")) return { path: "outputs/pictures/e/e.png", width: 1216, height: 832, preview: "REVG" };
+    throw new Error("unexpected " + path);
+  };
+  const client = new ToolsClient("", [studioTools({ studio, chat: (async () => ({})) as never, cardFile: (n) => (n === "images-sunset.png" ? Buffer.from("png") : null), jobWaitMs: 10_000 })]);
+  const text = await client.call("studio", "picture_text", { picture: "images-sunset.png", title: "ALL BLACKS" });
+  assert.equal(text.isError, false, text.text);
+  assert.equal(text.media?.[0].mimeType, "image/jpeg");
+  assert.deepEqual((calls.find((c) => c.path === "/pictures/text")!.body as { picture: string }).picture, "pictures/images-sunset.png", "the card picture was added first");
+  const named = await client.call("studio", "upscale_picture", { picture: "cover 4x" });
+  assert.equal(named.isError, false);
+  assert.equal((calls.filter((c) => c.path === "/jobs").at(-1)!.body as { picture: string }).picture, "outputs/pictures/cover-1a2b3c/cover-4x.png", "found by name");
+  polls = 0;
+  const edit = await client.call("studio", "edit_picture", { picture: "outputs/pictures/x.png", prompt: "clear sky", boxes: [[0, 0, 10, 10]] });
+  assert.match(edit.text, /Repainted 1 part: outputs\/pictures\/e\/e\.png \(1216x832\)/);
+  assert.equal(edit.media?.[0].data, "REVG");
 });

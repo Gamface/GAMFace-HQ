@@ -127,7 +127,7 @@ export function refuseFromHost(host: string, resolve: (h: string) => Promise<str
  * the user approves the call.
  */
 export interface LocalTool extends Omit<ToolInfo, "server" | "notes" | "timeoutMs"> {
-  run: (args: Record<string, unknown>) => Promise<{ text: string; isError?: boolean }>;
+  run: (args: Record<string, unknown>) => Promise<{ text: string; isError?: boolean; media?: ToolMedia[] }>;
 }
 export interface LocalToolServer {
   name: string;
@@ -222,7 +222,8 @@ export class ToolsClient {
       const started = Date.now();
       try {
         const out = await withTimeout(own.run(args), timeoutMs);
-        return { text: cleanToolText(out.text), isError: Boolean(out.isError), ms: Date.now() - started };
+        const media = toolMedia(out.media);
+        return { text: cleanToolText(out.text), isError: Boolean(out.isError), ms: Date.now() - started, ...(media.length ? { media } : {}) };
       } catch (e) {
         return { text: cleanToolText(e instanceof Error ? e.message : String(e)), isError: true, ms: Date.now() - started };
       }

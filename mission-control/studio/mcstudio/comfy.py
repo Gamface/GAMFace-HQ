@@ -231,3 +231,43 @@ def split_workflow(input_name: str, prefix: str) -> dict:
     for i, name in enumerate(STEMS):
         wf[str(10 + i)] = {"class_type": "SaveAudio", "inputs": {"audio": ["2", i], "filename_prefix": f"{prefix}/{name}"}}
     return wf
+
+
+UPSCALE_DOWNLOAD = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
+
+
+def upscale_workflow(input_name: str, model: str, prefix: str) -> dict:
+    """LoadImage → an upscale model (Real-ESRGAN 4x) → SaveImage. ComfyUI's own nodes."""
+    return {
+        "1": {"class_type": "LoadImage", "inputs": {"image": input_name}},
+        "2": {"class_type": "UpscaleModelLoader", "inputs": {"model_name": model}},
+        "3": {"class_type": "ImageUpscaleWithModel", "inputs": {"upscale_model": ["2", 0], "image": ["1", 0]}},
+        "4": {"class_type": "SaveImage", "inputs": {"images": ["3", 0], "filename_prefix": prefix}},
+    }
+
+
+def edit_workflow(image_name: str, mask_name: str, prompt: str, seed: int, strength: float, prefix: str, unet: str, clip: str, vae: str, steps: int = 8) -> dict:
+    """Repaints the white part of the mask with Z-Image Turbo (the picture model Mission Control
+    already uses): the picture is encoded, only the masked part of it is noised and redrawn."""
+    return {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip, "type": "lumina2", "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
+        "4": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["1", 0], "shift": 3}},
+        "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
+        "6": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["5", 0]}},
+        "7": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "8": {"class_type": "LoadImageMask", "inputs": {"image": mask_name, "channel": "red"}},
+        "9": {"class_type": "VAEEncode", "inputs": {"pixels": ["7", 0], "vae": ["3", 0]}},
+        "10": {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["9", 0], "mask": ["8", 0]}},
+        "11": {
+            "class_type": "KSampler",
+            "inputs": {"model": ["4", 0], "positive": ["5", 0], "negative": ["6", 0], "latent_image": ["10", 0], "seed": seed, "steps": steps, "cfg": 1, "sampler_name": "res_multistep", "scheduler": "simple", "denoise": round(max(0.3, min(1.0, strength)), 2)},
+        },
+        "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["3", 0]}},
+        "13": {"class_type": "SaveImage", "inputs": {"images": ["12", 0], "filename_prefix": prefix}},
+    }
+
+
+def image_files(outputs: dict) -> list[dict]:
+    return [img for o in outputs.values() for img in o.get("images", [])]
